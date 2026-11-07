@@ -35,16 +35,36 @@ const GradeShader = {
     uFlash: { value: 0 },
     uTime: { value: 0 },
     uDesat: { value: 0 },
+    uTilt: { value: 0 }, // tilt-shift depth of field (title-screen showcase)
+    uRes: { value: new THREE.Vector2(1, 1) },
   },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
   fragmentShader: /* glsl */`
     uniform sampler2D tDiffuse;
-    uniform float uStorm, uVignette, uAspect, uFlash, uTime, uDesat;
+    uniform float uStorm, uVignette, uAspect, uFlash, uTime, uDesat, uTilt;
+    uniform vec2 uRes;
     varying vec2 vUv;
     float h(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
     void main() {
       vec4 c = texture2D(tDiffuse, vUv);
       vec3 col = c.rgb;
+      if (uTilt > 0.01) {
+        // miniature-diorama tilt shift: sharp band across the middle, blur grows above/below
+        float d = abs(vUv.y - 0.5);
+        float r = smoothstep(0.1, 0.48, d) * 9.0 * uTilt;
+        if (r > 0.3) {
+          vec3 acc = col; float wsum = 1.0;
+          float a0 = h(vUv * 517.0) * 6.2831;
+          for (int i = 0; i < 12; i++) {
+            float fi = float(i);
+            float a = a0 + fi * 2.39996;
+            float rr = r * sqrt((fi + 0.5) / 12.0);
+            vec2 o = vec2(cos(a), sin(a)) * rr / uRes;
+            acc += texture2D(tDiffuse, vUv + o).rgb; wsum += 1.0;
+          }
+          col = acc / wsum;
+        }
+      }
       float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
       // golden hour: teal shadows, warm highlights
       vec3 golden = col * mix(vec3(0.9, 1.0, 1.07), vec3(1.07, 1.0, 0.9), smoothstep(0.02, 0.7, l));
@@ -56,6 +76,7 @@ const GradeShader = {
       col += uFlash * vec3(0.9, 0.95, 1.0);
       vec2 q = vUv - 0.5; q.x *= uAspect;
       float v = smoothstep(0.92, 0.28, length(q));
+      v = mix(v, v * smoothstep(1.0, 0.35, length(q)), uTilt * 0.6);
       col *= mix(1.0 - uVignette - uStorm * 0.12, 1.0, v);
       col += (h(vUv * 913.0 + uTime) - 0.5) * 0.018 * (0.4 + uStorm);
       gl_FragColor = vec4(col, c.a);

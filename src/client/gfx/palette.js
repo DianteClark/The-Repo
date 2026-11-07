@@ -55,42 +55,51 @@ export const P = {
   hazard: 0xf2e6c8,
 };
 
-// Lighting / grading keyframes, from golden hour (0) to storm (1).
+// Lighting / weather arc keyframes by tide stage (storm 0..1):
+// golden morning → hazy overcast afternoon → storm front at dusk → night storm.
+// cloud = drifting cloud-shadow strength, haze = extra distance fog.
 export const MOOD = [
   {
     sun: new THREE.Color(0xffc48a), sunI: 3.1,
     sky: new THREE.Color(0x9cc2dc), ground: new THREE.Color(0x4a3a2e), hemiI: 1.25,
     fog: new THREE.Color(0x24515a), bg: new THREE.Color(0x173a44),
-    exposure: 1.0,
+    exposure: 1.0, cloud: 0.18, haze: 0,
   },
   {
-    sun: new THREE.Color(0xd8b08c), sunI: 2.2,
-    sky: new THREE.Color(0x7fa6ab), ground: new THREE.Color(0x33302c), hemiI: 1.0,
-    fog: new THREE.Color(0x1d3d46), bg: new THREE.Color(0x122e37),
-    exposure: 0.98,
+    sun: new THREE.Color(0xf0d2ac), sunI: 2.5,
+    sky: new THREE.Color(0x95b4bd), ground: new THREE.Color(0x3d362e), hemiI: 1.15,
+    fog: new THREE.Color(0x2a4e56), bg: new THREE.Color(0x183740),
+    exposure: 1.0, cloud: 0.5, haze: 0.3,
   },
   {
-    sun: new THREE.Color(0x9fb4c0), sunI: 1.35,
-    sky: new THREE.Color(0x5d7782), ground: new THREE.Color(0x1f2427), hemiI: 0.95,
-    fog: new THREE.Color(0x13252d), bg: new THREE.Color(0x0c1c23),
-    exposure: 1.02,
+    sun: new THREE.Color(0xe09a68), sunI: 1.9,
+    sky: new THREE.Color(0x6c8a92), ground: new THREE.Color(0x2b2a29), hemiI: 1.1,
+    fog: new THREE.Color(0x1b3640), bg: new THREE.Color(0x10262f),
+    exposure: 1.02, cloud: 0.6, haze: 0.6,
+  },
+  {
+    sun: new THREE.Color(0x92aec4), sunI: 1.3,
+    sky: new THREE.Color(0x51707f), ground: new THREE.Color(0x1b2125), hemiI: 1.05,
+    fog: new THREE.Color(0x10222b), bg: new THREE.Color(0x0a1820),
+    exposure: 1.04, cloud: 0.35, haze: 1,
   },
 ];
 
-const _a = new THREE.Color();
 /** Blend mood keyframes into `out` for storm in [0,1]. */
 export function moodAt(storm, out) {
   const f = Math.max(0, Math.min(1, storm)) * (MOOD.length - 1);
   const i = Math.min(MOOD.length - 2, Math.floor(f));
   const t = f - i;
   const A = MOOD[i], B = MOOD[i + 1];
-  for (const k of ['sun', 'sky', 'ground', 'fog', 'bg']) out[k].copy(A[k]).lerp(B[k], t);
+  out.sun.copy(A.sun).lerp(B.sun, t); out.sky.copy(A.sky).lerp(B.sky, t); out.ground.copy(A.ground).lerp(B.ground, t);
+  out.fog.copy(A.fog).lerp(B.fog, t); out.bg.copy(A.bg).lerp(B.bg, t);
   out.sunI = A.sunI + (B.sunI - A.sunI) * t;
   out.hemiI = A.hemiI + (B.hemiI - A.hemiI) * t;
   out.exposure = A.exposure + (B.exposure - A.exposure) * t;
+  out.cloud = A.cloud + (B.cloud - A.cloud) * t;
+  out.haze = A.haze + (B.haze - A.haze) * t;
   return out;
 }
 export function makeMood() {
-  return { sun: new THREE.Color(), sky: new THREE.Color(), ground: new THREE.Color(), fog: new THREE.Color(), bg: new THREE.Color(), sunI: 1, hemiI: 1, exposure: 1 };
+  return { sun: new THREE.Color(), sky: new THREE.Color(), ground: new THREE.Color(), fog: new THREE.Color(), bg: new THREE.Color(), sunI: 1, hemiI: 1, exposure: 1, cloud: 0, haze: 0 };
 }
-void _a;

@@ -2,20 +2,25 @@
 // Everything is synthesized with the Web Audio API (no audio files).
 //
 // Graph:
-//   voices ─┬─ sfxBus ──────────────────────────┐
-//           ├─ radioBus (band-limit + drive) ───┤
-//           ├─ reverb send ─ Convolver ─────────┤
-//           └─ echo send ─ tape delay loop ─────┤
-//   music ── musicIn ─ duck gain ───────────────┤
-//   stingers ── stingerIn ──────────────────────┤
-//                                               ▼
-//                pre ─ glue comp ─ limiter ─ soft clip ─ volume ─ destination
+//   voices ─┬─ sfxBus ─────────────────────┐
+//           ├─ radioBus (band-limit+drive) ┤
+//           ├─ reverb send ─ Convolver ────┤
+//           └─ echo send ─ tape delay ─────┤
+//                                          ▼
+//                          pre ─ hp ─ glue comp ──┐
+//   score/menu ─ musicIn ─ duck ─┐                │
+//   ambience ─ ambIn ─ ambDuck ──┼─ bedBus ───────┤   (beds skip the glue comp,
+//   stingers ─ stingerIn ────────┘                │    so its auto make-up gain
+//                                                 ▼    can't inflate them)
+//                         sum ─ limiter ─ soft clip ─ volume ─ destination
 //
 // Public API (docs/V1_SPEC.md §3). Every method is a no-op before resume(),
 // while muted, or if Web Audio is unavailable.
 
 import { makeNoise, makeCrackle, makeImpulse, softClipCurve, driveCurve } from './sfx/buffers.js';
 import { Score } from './sfx/music.js';
+import { MenuTheme } from './sfx/menu.js';
+import { Ambience } from './sfx/ambience.js';
 
 const MAX_VOICES = 40;
 // Per-category concurrency caps and the minimum spacing between voices of the
@@ -33,12 +38,15 @@ const CATS = {
 const BASE_GAIN = 0.9;
 
 const clamp01 = (x) => { const v = Number(x); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0; };
+const isNum = (x) => x !== null && x !== '' && typeof x !== 'boolean' && Number.isFinite(Number(x));
 const rnd = (a, b) => a + Math.random() * (b - a);
 
 function weaponKind(w) {
   const s = String(w ?? 'rifle').toLowerCase().replace(/[\s_-]/g, '');
   if (s.includes('long') || s.includes('sniper') || s.includes('marks')) return 'longrifle';
   if (s.includes('shot')) return 'shotgun';
+  if (s.includes('smg') || s.includes('submachine') || s.includes('medic')) return 'smg';
+  if (s.includes('carbine') || s.includes('recon')) return 'carbine';
   return 'rifle';
 }
 
@@ -50,8 +58,10 @@ export class Sfx {
     this.offline = false;
     this.voices = [];
     this.catLast = Object.create(null);
-    this._wantMusic = false;
+    this._wantMusic = null; // 'menu' | 'match' | null
     this._intensity = 0.15;
+    this._ambience = { stage: 0, rain: 0 };
+    this._muteToken = 0;
     this._duckUntil = 0;
     this._duckLevel = 1;
     this._stepAlt = 0;
@@ -84,6 +94,7 @@ export class Sfx {
         b.connect(ctx.destination);
         (b.start || b.noteOn).call(b, 0);
       }
+      if (this.muted) this._applyOut(); // keep a muted context suspended
     } catch {
       this.ctx = null;
     }
@@ -114,11 +125,16 @@ export class Sfx {
     const lim = ctx.createDynamicsCompressor();
     lim.threshold.value = -4; lim.knee.value = 0; lim.ratio.value = 20;
     lim.attack.value = 0.001; lim.release.value = 0.09;
+    const sum = ctx.createGain(); sum.gain.value = 1;
     const makeup = ctx.createGain(); makeup.gain.value = 1.25;
     const clip = ctx.createWaveShaper(); clip.curve = softClipCurve(); clip.oversample = '2x';
     const out = ctx.createGain(); out.gain.value = this._outGain();
-    pre.connect(hp).connect(glue).connect(lim).connect(makeup).connect(clip).connect(out).connect(ctx.destination);
-    this.pre = pre; this.master = out; this.limiter = lim; this.glue = glue;
+    pre.connect(hp).connect(glue).connect(sum);
+    sum.connect(lim).connect(makeup).connect(clip).connect(out).connect(ctx.destination);
+    // Music, ambience and stingers join after the glue compressor.
+    const bed = ctx.createGain(); bed.gain.value = 1;
+    bed.connect(sum);
+    this.pre = pre; this.master = out; this.limiter = lim; this.glue = glue; this.bedBus = bed;
 
     // SFX bus (dry, punchy).
     this.sfxBus = ctx.createGain(); this.sfxBus.gain.value = 1;
@@ -144,6 +160,7 @@ export class Sfx {
     // Tape echo: feedback delay with filtering in the loop.
     this.echoIn = ctx.createGain(); this.echoIn.gain.value = 1;
     const dl = ctx.createDelay(1.5); dl.delayTime.value = 0.34;
+    this.echoDelay = dl;
     const fb = ctx.createGain(); fb.gain.value = 0.33;
     const eLp = ctx.createBiquadFilter(); eLp.type = 'lowpass'; eLp.frequency.value = 2300;
     const eHp = ctx.createBiquadFilter(); eHp.type = 'highpass'; eHp.frequency.value = 220;
@@ -152,16 +169,31 @@ export class Sfx {
     eHp.connect(eOut).connect(pre);
     const eRev = ctx.createGain(); eRev.gain.value = 0.25; eOut.connect(eRev).connect(this.reverbIn);
 
-    // Music bus (ducked) and stinger bus (not ducked).
-    this.musicIn = ctx.createGain(); this.musicIn.gain.value = 0.15;
+    // Music bus (ducked), ambience bus (lightly ducked), stinger bus (not ducked).
+    this.musicIn = ctx.createGain(); this.musicIn.gain.value = 0.26;
     this.musicDuck = ctx.createGain(); this.musicDuck.gain.value = 1;
-    this.musicIn.connect(this.musicDuck).connect(pre);
-    this.stingerIn = ctx.createGain(); this.stingerIn.gain.value = 0.3;
-    this.stingerIn.connect(pre);
+    this.musicIn.connect(this.musicDuck).connect(bed);
+    this.ambIn = ctx.createGain(); this.ambIn.gain.value = 0.36;
+    this.ambDuck = ctx.createGain(); this.ambDuck.gain.value = 1;
+    this.ambIn.connect(this.ambDuck).connect(bed);
+    this.stingerIn = ctx.createGain(); this.stingerIn.gain.value = 0.55;
+    this.stingerIn.connect(bed);
+    // Effect sends for the beds, scaled with their bus level so trimming a bus
+    // trims its reverb/echo too.
+    const send = (lvl, dest) => { const g = ctx.createGain(); g.gain.value = lvl; g.connect(dest); return g; };
+    this.musicRevIn = send(this.musicIn.gain.value, this.reverbIn);
+    this.musicEchoIn = send(this.musicIn.gain.value, this.echoIn);
+    this.ambRevIn = send(this.ambIn.gain.value, this.reverbIn);
+    this.stingerRevIn = send(this.stingerIn.gain.value, this.reverbIn);
+    this.stingerEchoIn = send(this.stingerIn.gain.value, this.echoIn);
 
     this.score = new Score(this);
     this.score.setIntensity(this._intensity);
-    if (this._wantMusic) this.score.start();
+    this.menu = new MenuTheme(this);
+    this.amb = new Ambience(this);
+    this.amb.set(this._ambience);
+    if (this._wantMusic === 'match') this._startMatchMusic();
+    else if (this._wantMusic === 'menu') this._startMenuMusic();
   }
 
   _installUnlock() {
@@ -169,7 +201,7 @@ export class Sfx {
     this._unlockInstalled = true;
     const kick = () => {
       const c = this.ctx;
-      if (c && c.state !== 'running' && c.state !== 'closed') {
+      if (c && !this.muted && c.state !== 'running' && c.state !== 'closed') {
         const p = c.resume(); if (p && p.catch) p.catch(() => {});
       }
     };
@@ -181,10 +213,20 @@ export class Sfx {
 
   _applyOut() {
     if (!this.master) return;
-    const t = this.ctx.currentTime, g = this.master.gain;
+    const ctx = this.ctx, t = ctx.currentTime, g = this.master.gain;
     g.cancelScheduledValues(t);
     g.setValueAtTime(g.value, t);
     g.linearRampToValueAtTime(this._outGain(), t + 0.05);
+    if (this.offline) return;
+    // While muted, suspend the context (saves battery; the drones stop costing CPU).
+    const token = ++this._muteToken;
+    if (this.muted) {
+      setTimeout(() => {
+        if (token === this._muteToken && this.muted && ctx.state === 'running') ctx.suspend().catch(() => {});
+      }, 120);
+    } else if (ctx.state === 'suspended') {
+      const p = ctx.resume(); if (p && p.catch) p.catch(() => {});
+    }
   }
 
   /** True when a new sound may be scheduled. */
@@ -204,31 +246,67 @@ export class Sfx {
   setMuted(m) { if (!!m !== this.muted) this.toggle(); return this.muted; }
 
   setVolume(v) {
+    if (!isNum(v)) return; // ignore garbage rather than silently muting
     this.volume = clamp01(v);
     try { this._applyOut(); } catch { /* ignore */ }
   }
 
   setIntensity(x) {
+    if (!isNum(x)) return;
     this._intensity = clamp01(x);
     this.score?.setIntensity(this._intensity);
   }
 
+  /** Match score (+ world ambience). Crossfades from the menu theme if it is playing. */
   startMusic() {
-    this._wantMusic = true;
-    try { if (this.score) this.score.start(); } catch { /* ignore */ }
+    this._wantMusic = 'match';
+    if (this.ctx) this._startMatchMusic();
   }
 
+  /** Title theme. Crossfades from the match score if it is playing. */
+  startMenuMusic() {
+    this._wantMusic = 'menu';
+    if (this.ctx) this._startMenuMusic();
+  }
+
+  /** Stops score, menu theme and ambience (all loops and timers). */
   stopMusic() {
-    this._wantMusic = false;
+    this._wantMusic = null;
     try { this.score?.stop(); } catch { /* ignore */ }
+    try { this.menu?.stop(); } catch { /* ignore */ }
+    try { this.amb?.stop(); } catch { /* ignore */ }
+  }
+
+  /** stage: 0 = early (waves, wind, gulls) .. 1 = late (storm); rain: 0..1. */
+  setAmbience(opts = {}) {
+    const a = this._ambience;
+    if (opts && isNum(opts.stage)) a.stage = clamp01(opts.stage);
+    if (opts && isNum(opts.rain)) a.rain = clamp01(opts.rain);
+    try { this.amb?.set(a); } catch { /* ignore */ }
+  }
+
+  _startMatchMusic() {
+    try {
+      this.menu.stop(2.5);
+      this.score.start();
+      this.amb.start();
+    } catch { /* ignore */ }
+  }
+
+  _startMenuMusic() {
+    try {
+      this.score.stop(2.0);
+      this.amb.stop(2.0);
+      this.menu.start();
+    } catch { /* ignore */ }
   }
 
   stinger(kind) {
     if (!this.canPlay()) return;
     try {
-      const k = ['victory', 'defeat', 'round', 'tide'].includes(kind) ? kind : 'round';
+      const k = ['victory', 'defeat', 'round', 'tide', 'downed'].includes(kind) ? kind : 'round';
       const len = this.score.stinger(k);
-      this._duck(k === 'round' ? 0.5 : 0.8, len * 0.7, 0.8);
+      this._duck(k === 'round' || k === 'downed' ? 0.5 : 0.8, len * 0.7, 0.8);
     } catch { /* ignore */ }
   }
 
@@ -246,7 +324,7 @@ export class Sfx {
     const cat = CATS[o.cat] ? o.cat : 'misc';
     const spec = CATS[cat];
 
-    // Prune finished voices in place.
+    // Prune finished voices in place (and release their graph).
     const vs = this.voices;
     let w = 0, inCat = 0, oldestCat = null;
     for (let i = 0; i < vs.length; i++) {
@@ -254,7 +332,7 @@ export class Sfx {
       if (v.end > now) {
         vs[w++] = v;
         if (v.cat === cat) { inCat++; if (!oldestCat) oldestCat = v; }
-      }
+      } else this._release(v);
     }
     vs.length = w;
 
@@ -291,9 +369,35 @@ export class Sfx {
       const s = ctx.createGain(); s.gain.value = o.echo * (0.6 + 0.4 * far);
       tail.connect(s).connect(this.echoIn);
     }
-    const v = { cat, t, end: t + dur + 0.05, out, srcs: [] };
+    const v = { cat, t, end: t + dur + 0.05, out, tail, srcs: [] };
     vs.push(v);
+    this._scheduleSweep();
     return v;
+  }
+
+  _release(v) {
+    try { v.out.disconnect(); if (v.tail !== v.out) v.tail.disconnect(); } catch { /* gone */ }
+  }
+
+  /** After a burst of sounds, release finished voices even if nothing else plays. */
+  _scheduleSweep() {
+    if (this._sweepTimer || this.offline) return;
+    this._sweepTimer = setTimeout(() => {
+      this._sweepTimer = null;
+      const now = this.ctx ? this.ctx.currentTime : Infinity;
+      const vs = this.voices;
+      let w = 0;
+      for (let i = 0; i < vs.length; i++) { if (vs[i].end > now) vs[w++] = vs[i]; else this._release(vs[i]); }
+      vs.length = w;
+      if (w) this._scheduleSweep();
+    }, 2500);
+  }
+
+  /** Number of live voices (diagnostics/tests). */
+  get activeVoices() {
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    let n = 0; for (const v of this.voices) if (v.end > now) n++;
+    return n;
   }
 
   _steal(v, now) {
@@ -304,7 +408,7 @@ export class Sfx {
       g.linearRampToValueAtTime(0, now + 0.02);
       for (const s of v.srcs) { try { s.stop(now + 0.03); } catch { /* stopped */ } }
     } catch { /* ignore */ }
-    v.end = now; // pruned on next allocation
+    v.end = now + 0.05; // released once the fade is done
   }
 
   /** ADSR-less percussive envelope on a gain param. */
@@ -353,6 +457,7 @@ export class Sfx {
     s.start(t, Math.random() * Math.max(0, len - (a + d) * (p.rate ?? 1) - 0.05));
     s.stop(t + a + d + 0.02);
     v.srcs.push(s);
+    if (t + a + d + 0.08 > v.end) v.end = t + a + d + 0.08;
     return g;
   }
 
@@ -372,6 +477,7 @@ export class Sfx {
     o.start(t);
     o.stop(t + a + d + 0.02);
     v.srcs.push(o);
+    if (t + a + d + 0.08 > v.end) v.end = t + a + d + 0.08;
     return g;
   }
 
@@ -382,10 +488,12 @@ export class Sfx {
     const now = this.ctx.currentTime;
     const target = 1 - depth;
     if (now < this._duckUntil && target >= this._duckLevel) return; // already ducked deeper
-    g.cancelScheduledValues(now);
-    g.setValueAtTime(Math.max(0.0001, g.value), now);
-    g.setTargetAtTime(target, now, 0.012);
-    g.setTargetAtTime(1, now + hold, release);
+    for (const [p, tg] of [[g, target], [this.ambDuck.gain, 1 - depth * 0.4]]) {
+      p.cancelScheduledValues(now);
+      p.setValueAtTime(Math.max(0.0001, p.value), now);
+      p.setTargetAtTime(tg, now, 0.012);
+      p.setTargetAtTime(1, now + hold, release);
+    }
     this._duckLevel = target;
     this._duckUntil = now + hold;
   }
@@ -437,7 +545,10 @@ export class Sfx {
 
   // ------------------------------------------------------------ SFX: combat
 
-  /** far: 0 = next to you, 1 = distant/unseen. weapon: 'rifle'|'longrifle'|'shotgun'. */
+  /**
+   * far: 0 = next to you, 1 = distant/unseen.
+   * weapon: 'rifle'|'longrifle'|'shotgun'|'smg'|'carbine' (or a weapon name like 'Long Rifle').
+   */
   shot(far = 0, weapon = 'rifle') {
     this._safe(() => {
       const kind = weaponKind(weapon);
@@ -468,6 +579,24 @@ export class Sfx {
         this._noise(v, { at: 0.5, a: 0.001, d: 0.03, vol: 0.18, type: 'bandpass', f: 1500, q: 3 });
         this._noise(v, { at: 0.62, a: 0.001, d: 0.045, vol: 0.22, type: 'bandpass', f: 850, q: 3 });
         this._duck(0.45, 0.15, 0.45);
+      } else if (kind === 'smg') {
+        // Light, fast, papery crack with little low end.
+        const v = this._voice({ cat: 'shot', dur: 0.3, far: fr, gain: 0.9, rev: 0.1, echo: 0.05 });
+        if (!v) return;
+        this._noise(v, { a: 0.0003, d: 0.03, vol: 0.8, type: 'highpass', f: 3200 * p, q: 0.9 });
+        this._noise(v, { a: 0.001, d: 0.08, vol: 0.45, type: 'bandpass', f: 1500 * p, f2: 600, q: 1.2 });
+        this._osc(v, { f: 210 * p, f2: 80, a: 0.001, d: 0.07, glide: 0.05, vol: 0.45 });
+        this._osc(v, { type: 'square', f: 3400 * p, a: 0.0003, d: 0.005, vol: 0.05 });
+        this._duck(0.25, 0.06, 0.3);
+      } else if (kind === 'carbine') {
+        // Tighter rifle with a short metallic ring.
+        const v = this._voice({ cat: 'shot', dur: 0.4, far: fr, gain: 0.95, rev: 0.12, echo: 0.1 });
+        if (!v) return;
+        this._noise(v, { a: 0.0004, d: 0.04, vol: 0.85, type: 'highpass', f: 2900 * p, q: 0.9 });
+        this._noise(v, { a: 0.001, d: 0.11, vol: 0.55, type: 'lowpass', f: 1300 * p, f2: 350, q: 1 });
+        this._osc(v, { f: 165 * p, f2: 55, a: 0.001, d: 0.11, glide: 0.08, vol: 0.6 });
+        this._osc(v, { type: 'triangle', f: 2300 * p, a: 0.0005, d: 0.06, vol: 0.05 });
+        this._duck(0.3, 0.08, 0.35);
       } else {
         const v = this._voice({ cat: 'shot', dur: 0.45, far: fr, gain: 1.0, rev: 0.12, echo: 0.08 });
         if (!v) return;
@@ -586,6 +715,111 @@ export class Sfx {
       // Body thud into cover.
       this._osc(v, { at: 0.26, f: 115, f2: 48, a: 0.002, d: 0.18, vol: 0.6 });
       this._noise(v, { at: 0.26, buf: 'brown', a: 0.002, d: 0.14, vol: 0.45, type: 'lowpass', f: 380 });
+    });
+  }
+
+
+  // ------------------------------------------------------------ SFX: 2.0
+
+  /** Smoke grenade: canister pop, then a long pressurised hiss and a soft billow. */
+  smoke() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 2.6, gain: 0.8, rev: 0.2 });
+      if (!v) return;
+      this._osc(v, { f: 260, f2: 90, a: 0.001, d: 0.09, vol: 0.5 });
+      this._noise(v, { a: 0.0005, d: 0.03, vol: 0.4, type: 'bandpass', f: 1800, q: 1.4 });
+      this._noise(v, { at: 0.05, a: 0.08, d: 2.0, vol: 0.32, type: 'bandpass', f: 4200, f2: 2400, q: 0.9, pan: -0.25, panTo: 0.25 });
+      this._noise(v, { at: 0.08, a: 0.25, d: 1.6, vol: 0.06, type: 'highpass', f: 7000 });
+      this._noise(v, { buf: 'brown', at: 0.1, a: 0.3, d: 1.4, vol: 0.4, type: 'lowpass', f: 320, f2: 160 });
+    });
+  }
+
+  /** A teammate back on the net: squelch, rising chime, a strong heartbeat. */
+  revive() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 1.4, bus: 'radio', gain: 0.9, rev: 0.25, echo: 0.15 });
+      if (!v) return;
+      v.srcs.push(this._squelch(v.t, 0.06, v.out, 0.22));
+      [[0.08, 587.33], [0.2, 880], [0.32, 1174.7]].forEach(([at, f], i) =>
+        this._osc(v, { type: 'triangle', at, f, a: 0.004, d: 0.25 + i * 0.15, vol: 0.2 }));
+      this._osc(v, { at: 0.32, f: 1760, a: 0.02, d: 0.6, vol: 0.05, det: 5 });
+      const h = this._voice({ cat: 'misc', dur: 0.8, gain: 0.8, rev: 0.05 });
+      if (h) for (const at of [0.05, 0.22]) this._osc(h, { at, f: 75, f2: 42, a: 0.004, d: 0.18, vol: at < 0.1 ? 0.7 : 0.45 });
+    });
+  }
+
+  /** A soldier goes down (not dead yet): impact, falling groan, warbling comms. */
+  downed() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 1.3, gain: 0.85, rev: 0.12 });
+      if (!v) return;
+      this._osc(v, { f: 140, f2: 40, a: 0.002, d: 0.3, vol: 0.6 });
+      this._noise(v, { buf: 'brown', a: 0.002, d: 0.25, vol: 0.5, type: 'lowpass', f: 500 });
+      this._noise(v, { buf: 'pink', at: 0.04, a: 0.01, d: 0.12, vol: 0.15, type: 'bandpass', f: 1500, q: 1.2 });
+      const r = this._voice({ cat: 'misc', dur: 1.2, bus: 'radio', gain: 0.8, rev: 0.15 });
+      if (r) {
+        // Warble: tone with fast vibrato, sliding down, over thin static.
+        const ctx = this.ctx, t = r.t + 0.12;
+        const o = ctx.createOscillator(); o.type = 'sawtooth';
+        o.frequency.setValueAtTime(700, t); o.frequency.exponentialRampToValueAtTime(260, t + 0.8);
+        const lfo = ctx.createOscillator(); lfo.frequency.value = 11;
+        const la = ctx.createGain(); la.gain.value = 40;
+        lfo.connect(la).connect(o.frequency);
+        const g = ctx.createGain();
+        this._env(g, t, 0.03, 0.06, 0.8);
+        o.connect(g).connect(r.out);
+        o.start(t); lfo.start(t); o.stop(t + 0.9); lfo.stop(t + 0.9);
+        r.srcs.push(o, lfo);
+        this._noise(r, { at: 0.1, a: 0.05, d: 0.8, vol: 0.08, type: 'bandpass', f: 2200, q: 1 });
+      }
+      this._duck(0.45, 0.4, 0.6);
+    });
+  }
+
+  /** Medic patch: velcro rip, a spray hiss, a gentle up-chime. */
+  patch() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 1.0, gain: 0.9, rev: 0.15 });
+      if (!v) return;
+      this._noise(v, { buf: 'crackle', a: 0.005, d: 0.18, vol: 0.4, type: 'highpass', f: 2200, rate: 1.4 });
+      this._noise(v, { buf: 'pink', a: 0.01, d: 0.16, vol: 0.18, type: 'bandpass', f: 2600, q: 1.5 });
+      this._noise(v, { at: 0.22, a: 0.02, d: 0.25, vol: 0.12, type: 'highpass', f: 5000 });
+      this._osc(v, { type: 'triangle', at: 0.3, f: 659.25, a: 0.005, d: 0.2, vol: 0.13 });
+      this._osc(v, { type: 'triangle', at: 0.4, f: 987.77, a: 0.005, d: 0.45, vol: 0.13 });
+    });
+  }
+
+  /** Recon scan: a sonar ping with long echo, a sweep, and data chirps. */
+  scan() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 2.0, gain: 0.8, rev: 0.4, echo: 0.55 });
+      if (!v) return;
+      this._osc(v, { f: 1320, a: 0.002, d: 0.9, vol: 0.2 });
+      this._osc(v, { f: 2640, a: 0.002, d: 0.3, vol: 0.04 });
+      this._noise(v, { a: 0.15, d: 0.6, vol: 0.08, type: 'bandpass', f: 600, f2: 4000, q: 4, pan: -0.6, panTo: 0.6 });
+      const d = this._voice({ cat: 'misc', dur: 1.2, bus: 'radio', gain: 0.7, rev: 0.05 });
+      if (d) for (let i = 0; i < 7; i++) {
+        this._osc(d, { type: 'square', at: 0.35 + i * 0.055, f: [1800, 2400, 1500, 2700, 2100, 3000, 1650][i], a: 0.001, d: 0.025, vol: 0.06 });
+      }
+    });
+  }
+
+  /** Bleed out: a slowing, fading heartbeat, a long tone, then the line goes dead. */
+  bleedOut() {
+    this._safe(() => {
+      const v = this._voice({ cat: 'misc', dur: 2.6, gain: 0.85, rev: 0.15 });
+      if (!v) return;
+      [[0, 0.6], [0.7, 0.42], [1.55, 0.25]].forEach(([at, vol]) => {
+        this._osc(v, { at, f: 70, f2: 40, a: 0.004, d: 0.2, vol });
+        this._osc(v, { at: at + 0.17, f: 62, f2: 38, a: 0.004, d: 0.18, vol: vol * 0.6 });
+      });
+      const r = this._voice({ cat: 'misc', dur: 2.8, bus: 'radio', gain: 0.8, rev: 0.1 });
+      if (r) {
+        this._osc(r, { at: 1.9, f: 988, a: 0.01, d: 0.5, vol: 0.06 });
+        r.srcs.push(...this._static(r.t + 2.1, 0.3, 0.2, r.out));
+        this._click(r, 2.42, 1600, 0.3);
+      }
+      this._duck(0.5, 2.0, 0.8);
     });
   }
 

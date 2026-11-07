@@ -7,16 +7,20 @@ import { MODES } from '../src/sim/constants.js';
 const N = Number(process.argv[2] || 20);
 const pct = (a, b) => (b ? ((100 * a) / b).toFixed(0) + '%' : '-');
 
-for (const mode of Object.keys(MODES)) {
+for (const mode of (process.argv[3] ? process.argv[3].split(',') : Object.keys(MODES))) {
   const st = { rounds: [], deaths: 0, tideDeaths: 0, shots: 0, hits: 0, grazes: 0, aimed: 0, grenade: 0,
     breach: 0, hunker: 0, overwatch: 0, owShots: 0, medkit: 0, coverBreak: 0, cache: 0, cachePick: 0,
-    expDmg: 0, explosionKills: 0, ff: 0, cover: [0, 0, 0], flank: 0, firstKill: [] };
+    expDmg: 0, explosionKills: 0, ff: 0, cover: [0, 0, 0], flank: 0, firstKill: [],
+    downed: 0, revive: 0, medRevive: 0, patch: 0, scan: 0, scanHits: 0, smoke: 0, bleed: 0, executes: 0, wipeDeaths: 0, classKills: {} };
   for (let seed = 1; seed <= N; seed++) {
     const s = createGame({ seed: seed * 7919, mode, noHuman: true });
     let guard = 0, firstKill = null;
+    const downedNow = new Set();
     const tally = (evs) => {
       let lastSrc = null;
       for (const e of evs) {
+        if (e.type === 'downed') downedNow.add(e.id);
+        if (e.type === 'revive') downedNow.delete(e.id);
         if (e.type === 'shot') {
           st.shots++; if (e.result === 'hit') st.hits++; if (e.result === 'graze') st.grazes++;
           if (e.ability === 'aimed') st.aimed++; if (e.reaction) st.owShots++;
@@ -31,21 +35,31 @@ for (const mode of Object.keys(MODES)) {
         else if (e.type === 'supply_drop') st.cache++;
         else if (e.type === 'crate' && e.item === 'cache') st.cachePick++;
         else if (e.type === 'damage') { lastSrc = e.source; if (e.source === 'explosion') st.expDmg++; }
+        else if (e.type === 'downed') st.downed++;
+        else if (e.type === 'revive') { st.revive++; if (s.units[e.by].cls === 'medic') st.medRevive++; }
+        else if (e.type === 'patch') st.patch++;
+        else if (e.type === 'scan') { st.scan++; st.scanHits += e.revealed.length; }
+        else if (e.type === 'smoke') st.smoke++;
+        else if (e.type === 'bleed_out') { st.bleed++; lastSrc = 'bleed'; }
         else if (e.type === 'zone_damage') lastSrc = 'tide';
         else if (e.type === 'death') {
           st.deaths++;
+          if (e.by !== null && lastSrc !== 'bleed') { const c = s.units[e.by].cls; st.classKills[c] = (st.classKills[c] || 0) + 1; }
+          if (lastSrc === 'shot' && downedNow.has(e.id)) st.executes++;
           if (e.by === null) st.tideDeaths++;
           else if (lastSrc === 'explosion' || lastSrc === 'breach') st.explosionKills++;
           if (firstKill === null) firstKill = s.round;
         }
       }
     };
+    for (const u of s.units) { st.classN = st.classN || {}; st.classN[u.cls] = (st.classN[u.cls] || 0) + 1; st.classWin = st.classWin || {}; }
     tally(s.startEvents);
     while (s.winner === null && guard++ < 4000) {
       const t = currentTeamId(s);
       for (const id of s.teams[t].members) tally(botTakeTurn(s, id));
       tally(endTeamTurn(s));
     }
+    for (const u of s.units) if (u.team === s.winner) st.classWin[u.cls] = (st.classWin[u.cls] || 0) + 1;
     st.rounds.push(s.round);
     st.firstKill.push(firstKill);
   }
@@ -56,5 +70,8 @@ for (const mode of Object.keys(MODES)) {
   console.log(`deaths ${st.deaths}  tide ${pct(st.tideDeaths, st.deaths)}  explosive ${pct(st.explosionKills, st.deaths)}`);
   console.log(`shots ${st.shots} (${(st.shots / N).toFixed(0)}/match)  hit ${pct(st.hits, st.shots)}  graze ${pct(st.grazes, st.shots)}  miss ${pct(st.shots - st.hits - st.grazes, st.shots)}  reaction ${st.owShots}`);
   console.log(`target cover open/half/full ${st.cover.join('/')}  flanked ${st.flank}`);
+  const n = (k) => (st[k] / N).toFixed(1);
+  console.log(`2.0 per match: downed ${n('downed')}  revived ${n('revive')} (medic ${n('medRevive')})  bled out ${n('bleed')}  executed ${n('executes')}  patch ${n('patch')}  scan ${n('scan')} (${(st.scanHits / Math.max(1, st.scan)).toFixed(1)} revealed/scan)  smoke ${n('smoke')}`);
+  console.log(`per unit by class (kills, share of units on the winning squad): ${Object.keys(st.classN).map((k) => `${k} ${((st.classKills[k] || 0) / st.classN[k]).toFixed(2)}k ${pct(st.classWin[k] || 0, st.classN[k])}`).join('  ')}`);
   console.log(`per match: aimed ${(st.aimed / N).toFixed(1)}  grenades ${(st.grenade / N).toFixed(1)}  breach ${(st.breach / N).toFixed(1)}  hunker ${(st.hunker / N).toFixed(1)}  overwatch ${(st.overwatch / N).toFixed(1)}  medkit ${(st.medkit / N).toFixed(1)}  cover destroyed ${(st.coverBreak / N).toFixed(1)}  caches ${(st.cachePick / N).toFixed(1)}/${(st.cache / N).toFixed(1)}`);
 }

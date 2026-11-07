@@ -4,15 +4,23 @@
 
 let lock = null;
 let wanted = false;
+let pending = false;
 
 async function acquire() {
+  if (pending) return;
+  pending = true;
   try {
     if ('wakeLock' in navigator && document.visibilityState === 'visible') {
-      lock = await navigator.wakeLock.request('screen');
-      lock.addEventListener('release', () => { lock = null; });
+      const l = await navigator.wakeLock.request('screen');
+      // allowSleep() may have been called while the request was pending.
+      if (!wanted) { l.release().catch?.(() => {}); return; }
+      lock = l;
+      lock.addEventListener('release', () => { if (lock === l) lock = null; });
     }
   } catch {
     lock = null; // e.g. low battery mode; nothing else we can do in-browser
+  } finally {
+    pending = false;
   }
 }
 

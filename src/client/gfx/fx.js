@@ -35,6 +35,7 @@ void main() {
   gl_Position = projectionMatrix * mv;
 }`;
 const PFRAG = /* glsl */`
+uniform vec3 uTint;
 varying vec2 vUv;
 varying vec4 vCol;
 varying float vSoft;
@@ -43,7 +44,7 @@ void main() {
   float a = clamp(1.0 - r, 0.0, 1.0);
   a = pow(a, vSoft);
   if (a <= 0.003) discard;
-  gl_FragColor = vec4(vCol.rgb, vCol.a * a);
+  gl_FragColor = vec4(vCol.rgb * uTint, vCol.a * a);
 }`;
 
 class Particles {
@@ -68,6 +69,7 @@ class Particles {
     geo.instanceCount = 0;
     this.geo = geo;
     this.mat = new THREE.ShaderMaterial({
+      uniforms: { uTint: { value: new THREE.Color(1, 1, 1) } },
       vertexShader: PVERT, fragmentShader: PFRAG, transparent: true, depthWrite: false, blending,
     });
     this.mesh = new THREE.Mesh(geo, this.mat);
@@ -131,6 +133,7 @@ class Debris {
     const F = (k) => new Float32Array(cap * k);
     this.p = F(3); this.v = F(3); this.r = F(3); this.w = F(3); this.sz = F(3); this.life = F(1); this.max = F(1);
     this.col = F(3);
+    this.arrs = [this.p, this.v, this.r, this.w, this.sz, this.col];
     const geo = new THREE.BoxGeometry(1, 1, 1);
     this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ roughness: 0.9 }), cap);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -145,12 +148,14 @@ class Debris {
   spawn(x, y, z, vx, vy, vz, s, color, life = 3.2) {
     if (this.n >= this.cap) return;
     const i = this.n++;
-    this.p.set([x, y, z], i * 3); this.v.set([vx, vy, vz], i * 3);
-    this.r.set([Math.random() * 6, Math.random() * 6, Math.random() * 6], i * 3);
-    this.w.set([(Math.random() - 0.5) * 18, (Math.random() - 0.5) * 18, (Math.random() - 0.5) * 18], i * 3);
-    this.sz.set([s * (0.6 + Math.random() * 0.8), s * (0.4 + Math.random() * 0.6), s * (0.6 + Math.random() * 0.8)], i * 3);
-    this._c.set(color).offsetHSL(0, 0, (Math.random() - 0.5) * 0.1);
-    this.col.set([this._c.r, this._c.g, this._c.b], i * 3);
+    const i3 = i * 3, R = Math.random;
+    this.p[i3] = x; this.p[i3 + 1] = y; this.p[i3 + 2] = z;
+    this.v[i3] = vx; this.v[i3 + 1] = vy; this.v[i3 + 2] = vz;
+    this.r[i3] = R() * 6; this.r[i3 + 1] = R() * 6; this.r[i3 + 2] = R() * 6;
+    this.w[i3] = (R() - 0.5) * 18; this.w[i3 + 1] = (R() - 0.5) * 18; this.w[i3 + 2] = (R() - 0.5) * 18;
+    this.sz[i3] = s * (0.6 + R() * 0.8); this.sz[i3 + 1] = s * (0.4 + R() * 0.6); this.sz[i3 + 2] = s * (0.6 + R() * 0.8);
+    this._c.set(color).offsetHSL(0, 0, (R() - 0.5) * 0.1);
+    this.col[i3] = this._c.r; this.col[i3 + 1] = this._c.g; this.col[i3 + 2] = this._c.b;
     this.life[i] = 0; this.max[i] = life * (0.8 + Math.random() * 0.4);
   }
   update(dt, floodedAt) {
@@ -159,7 +164,7 @@ class Debris {
       if (this.life[i] < this.max[i]) continue;
       const j = --this.n;
       if (i !== j) {
-        for (const a of [this.p, this.v, this.r, this.w, this.sz, this.col]) { a[i * 3] = a[j * 3]; a[i * 3 + 1] = a[j * 3 + 1]; a[i * 3 + 2] = a[j * 3 + 2]; }
+        for (let q = 0; q < 6; q++) { const a = this.arrs[q]; a[i * 3] = a[j * 3]; a[i * 3 + 1] = a[j * 3 + 1]; a[i * 3 + 2] = a[j * 3 + 2]; }
         this.life[i] = this.life[j]; this.max[i] = this.max[j];
       }
     }
@@ -213,9 +218,9 @@ export class Fx {
     this.world = world;
     this.overlay = overlay;
     this.scale = opts.scale ?? 1; // particle-count scale (quality)
-    this.add = new Particles(900, THREE.AdditiveBlending);
-    this.alpha = new Particles(700, THREE.NormalBlending);
-    this.debris = new Debris(240);
+    this.add = new Particles(1000, THREE.AdditiveBlending);
+    this.alpha = new Particles(1400, THREE.NormalBlending);
+    this.debris = new Debris(260);
     world.add(this.add.mesh, this.alpha.mesh, this.debris.mesh);
     this.items = []; // timed custom effects {t, dur, fn}
     this.floodedAt = null;
@@ -232,8 +237,9 @@ export class Fx {
     }
     // rings
     this.ringGeo = new THREE.RingGeometry(0.82, 1, 48); this.ringGeo.rotateX(-Math.PI / 2);
+    this.thinRingGeo = new THREE.RingGeometry(0.965, 1, 72); this.thinRingGeo.rotateX(-Math.PI / 2);
     this.rings = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 12; i++) {
       const m = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({ transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
       m.visible = false; m.renderOrder = 7; world.add(m); this.rings.push(m);
     }
@@ -246,7 +252,7 @@ export class Fx {
       this.lights.push({ l, t: 1, dur: 1, i0: 0 });
     }
     // scorch decals
-    this.scorchTex = radialTexture('rgba(20,16,12,0.85)', 'rgba(20,16,12,0)');
+    this.scorchTex = radialTexture('rgba(24,19,14,0.62)', 'rgba(24,19,14,0)');
     this.scorchGeo = new THREE.PlaneGeometry(1, 1); this.scorchGeo.rotateX(-Math.PI / 2);
     this.scorches = [];
     for (let i = 0; i < 8; i++) {
@@ -267,15 +273,142 @@ export class Fx {
     }
     this.textI = 0;
     this.shake = 0;
+    this.clock = 0;
+
+    // pooled thrown projectile (frag / smoke canister)
+    this.nade = new THREE.Mesh(new THREE.IcosahedronGeometry(0.08, 0), new THREE.MeshStandardMaterial({ color: 0x3b4436, roughness: 0.6 }));
+    this.nade.castShadow = true; this.nade.visible = false;
+    world.add(this.nade);
+    // scan sweep: radar arm + grid disc (one at a time)
+    const sg = new THREE.CircleGeometry(1, 40, 0, 1.2); sg.rotateX(-Math.PI / 2);
+    this.sweepMat = new THREE.ShaderMaterial({
+      uniforms: { uCol: { value: new THREE.Color(0x7fe9ff) }, uA: { value: 0 } },
+      vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: 'uniform vec3 uCol; uniform float uA; varying vec3 vP; void main(){ float a = clamp(atan(-vP.z, vP.x) / 1.2, 0.0, 1.0); float r = length(vP.xz); float g = smoothstep(0.03, 0.0, abs(fract(r * 5.0) - 0.5) - 0.46); gl_FragColor = vec4(uCol * 1.6, (pow(a, 4.0) * 0.7 + g * a * 0.4) * uA * smoothstep(1.0, 0.92, r)); }',
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.sweep = new THREE.Mesh(sg, this.sweepMat); this.sweep.visible = false; this.sweep.renderOrder = 7;
+    world.add(this.sweep);
+    // persistent smoke clouds: id -> {x, z, r, t, fade, acc}
+    this.smokes = []; // [{id, x, z, r, t, fade, acc}]
+  }
+
+  // ---------- persistent smoke ----------
+  smokeCloud(id, x, z, r) {
+    this.clearSmokeNow(id);
+    this.smokes.push({ id, x, z, r, t: 0, fade: -1, acc: 0 });
+    // initial burst so the cloud blooms immediately
+    for (let i = 0; i < this._n(46); i++) this._puff(x, z, r, true);
+    this.ring(x, 0.06, z, 0.2, r * 1.5, 0xe8e4d8, 0.9, 0.7);
+  }
+  clearSmoke(id) { for (const c of this.smokes) if (c.id === id && c.fade < 0) c.fade = 0; }
+  clearSmokeNow(id) { const i = this.smokes.findIndex((c) => c.id === id); if (i >= 0) this.smokes.splice(i, 1); }
+  clearAllSmoke() { this.smokes.length = 0; }
+  _puff(x, z, r, burst) {
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * r * 0.85;
+    const px = x + Math.cos(a) * d, pz = z + Math.sin(a) * d;
+    const y = 0.15 + Math.random() * (burst ? 0.4 : 0.9);
+    // lit from above: low puffs darker and cooler, high puffs bright bone
+    const hk = Math.min(1, y / 1.0);
+    const g = 0.5 + hk * 0.3 + Math.random() * 0.06;
+    const out = burst ? 1.6 : 0.18;
+    this.alpha.spawn(px, y, pz, Math.cos(a) * out, 0.05 + Math.random() * 0.12, Math.sin(a) * out,
+      burst ? 2.6 + Math.random() * 1.5 : 3.4 + Math.random() * 1.6, burst ? 0.45 : 0.75, 1.25 + Math.random() * 0.55,
+      g * 0.97, g, g * 1.02, 1, burst ? 2.2 : 0.6, -0.02, 0, 0.7);
+  }
+  _updateSmoke(dt) {
+    for (let i = this.smokes.length - 1; i >= 0; i--) {
+      const c = this.smokes[i];
+      c.t += dt;
+      let rate = 28 * Math.max(0.7, this.scale) * c.r / 1.5;
+      if (c.fade >= 0) {
+        c.fade += dt;
+        rate *= Math.max(0, 1 - c.fade / 1.2);
+        if (c.fade > 1.2) { this.smokes.splice(i, 1); continue; }
+      }
+      c.acc += rate * dt;
+      while (c.acc >= 1) { c.acc -= 1; this._puff(c.x, c.z, c.r, false); }
+    }
+  }
+
+  /** Projectile arc for throws. kind: 'frag' | 'smoke'. Returns nothing; caller animates via fn(t). */
+  throwStart(kind) {
+    const n = this.nade;
+    n.visible = true;
+    n.material.color.set(kind === 'smoke' ? 0xb9b8ae : 0x3b4436);
+    n.scale.set(kind === 'smoke' ? 0.8 : 1, kind === 'smoke' ? 1.6 : 1, kind === 'smoke' ? 0.8 : 1);
+    return n;
+  }
+  throwEnd() { this.nade.visible = false; }
+
+  // ---------- recon scan ----------
+  scanSweep(x, z, radius, dur = 1.5) {
+    const m = this.sweep;
+    m.position.set(x, 0.16, z); m.visible = true;
+    m.userData.tok = (m.userData.tok || 0) + 1;
+    const tok = m.userData.tok;
+    this.ring(x, 0.1, z, 0.2, radius, 0x7fe9ff, 0.9, 1.2);
+    this.timed(0.35, (t) => { if (t >= 1) this.ring(x, 0.1, z, 0.2, radius, 0x7fe9ff, 0.9, 0.8); });
+    this.timed(0.7, (t) => { if (t >= 1) this.ring(x, 0.1, z, 0.2, radius, 0x7fe9ff, 0.9, 0.5); });
+    this.add.spawn(x, 0.3, z, 0, 0, 0, 0.4, 0.3, 1.4, 0.6, 2.2, 2.6, 1, 0, 0, 0, 1.4);
+    this.timed(dur, (t) => {
+      if (m.userData.tok !== tok) return;
+      m.scale.setScalar(radius * Math.min(1, t * 4));
+      m.rotation.y = -t * Math.PI * 4.2;
+      this.sweepMat.uniforms.uA.value = t < 0.8 ? 1 : 1 - (t - 0.8) / 0.2;
+      if (t >= 1) m.visible = false;
+    });
+  }
+  /** Magenta ping on a revealed unit. */
+  revealPing(x, z) {
+    this.ring(x, 0.08, z, 0.2, 1.1, 0xff3fa4, 0.6, 1.3);
+    this.add.spawn(x, 0.6, z, 0, 0, 0, 0.35, 0.2, 0.9, 3.2, 0.5, 1.6, 1, 0, 0, 0, 1.3);
+  }
+
+  // ---------- heals / revive ----------
+  healPulse(x, z, k = 1) {
+    this.ring(x, 0.08, z, 0.2, 1.0 * k, 0x7fe9ff, 0.7, 1.2);
+    for (let i = 0; i < this._n(16 * k); i++) {
+      const a = Math.random() * Math.PI * 2, d = 0.15 + Math.random() * 0.3;
+      this.add.spawn(x + Math.cos(a) * d, 0.1 + Math.random() * 0.4, z + Math.sin(a) * d, 0, 0.7 + Math.random() * 0.9, 0, 0.9 + Math.random() * 0.4, 0.07, 0.03, 1.0, 3.0, 3.6, 1, 1, 0, 0.6, 1);
+    }
+  }
+  /** Stream of motes from (ax,az) to (bx,bz). */
+  healStream(ax, ay, az, bx, by, bz, n = 14) {
+    for (let i = 0; i < this._n(n); i++) {
+      const T = 0.35 + Math.random() * 0.25;
+      this.add.spawn(ax, ay, az, (bx - ax) / T + (Math.random() - 0.5) * 0.6, (by - ay) / T + 0.8, (bz - az) / T + (Math.random() - 0.5) * 0.6,
+        T, 0.06, 0.04, 1.0, 3.0, 3.6, 1, 0, 1.6, 0.8, 1);
+    }
+  }
+  reviveShimmer(x, z) {
+    this.ring(x, 0.08, z, 0.3, 1.5, 0x7fe9ff, 0.8, 1.4);
+    this.ring(x, 0.6, z, 0.1, 0.9, 0x7fe9ff, 0.6, 0.9);
+    for (let i = 0; i < this._n(30); i++) {
+      const a = Math.random() * Math.PI * 2, d = 0.3 + Math.random() * 0.15;
+      this.add.spawn(x + Math.cos(a) * d, 0.05 + Math.random() * 0.2, z + Math.sin(a) * d, -Math.sin(a) * 0.9, 1.6 + Math.random() * 1.6, Math.cos(a) * 0.9,
+        0.8 + Math.random() * 0.4, 0.06, 0.02, 1.2, 3.4, 4.2, 1, 1.2, 0, 1.2, 1);
+    }
+    this.add.spawn(x, 0.6, z, 0, 0.4, 0, 0.45, 0.4, 1.4, 0.7, 2.0, 2.4, 1, 0, 0, 0, 1.4);
+    this.flashLight(x, 0.8, z, 0x7fe9ff, 10, 0.4, 4);
+  }
+
+  /** Unit hits the deck (downed / death impact). */
+  slump(x, z, wet) {
+    if (wet) this.splash(x, z, 0.9);
+    else this.dust(x, z, 9, 0.76, 0.7, 0.58, 0.05, 1.2);
   }
 
   setScale(s) { this.scale = s; }
+  /** Ambient light on alpha particles (smoke, dust, rain) so they darken with the storm. */
+  setAmbient(r, g, b) { this.alpha.mat.uniforms.uTint.value.setRGB(r, g, b); }
   _n(n) { return Math.max(1, Math.round(n * this.scale)); }
 
   timed(dur, fn) { this.items.push({ t: 0, dur, fn }); }
 
   flashLight(x, y, z, color, intensity, dur = 0.12, dist = 6) {
-    const L = this.lights.reduce((a, b) => (a.t / a.dur > b.t / b.dur ? a : b));
+    let L = this.lights[0];
+    for (const b of this.lights) if (b.t / b.dur > L.t / L.dur) L = b;
     L.l.position.set(x, y, z); L.l.color.set(color); L.l.distance = dist;
     L.t = 0; L.dur = dur; L.i0 = intensity;
     L.l.intensity = intensity;
@@ -292,8 +425,17 @@ export class Fx {
     this.flashLight(x, y + 0.1, z, 0xffc070, 9 * big, 0.09, 5);
   }
 
+  _pick(list) {
+    // free slot, else the oldest one (each reuse bumps a token so the old timer lets go)
+    let best = list[0];
+    for (const m of list) { if (!m.visible) { best = m; break; } if ((m.userData.t0 || 0) < (best.userData.t0 || 0)) best = m; }
+    best.userData.tok = (best.userData.tok || 0) + 1;
+    best.userData.t0 = this.clock;
+    return best;
+  }
+
   tracer(ax, ay, az, bx, by, bz, color, width = 0.035, dur = 0.16) {
-    const m = this.beams.find((b) => !b.visible) || this.beams[0];
+    const m = this._pick(this.beams), tok = m.userData.tok;
     _a.set(ax, ay, az); _b.set(bx, by, bz);
     const L = _a.distanceTo(_b);
     m.position.copy(_a);
@@ -306,6 +448,7 @@ export class Fx {
     const sp = 55;
     this.add.spawn(ax, ay, az, dx * sp, dy * sp, dz * sp, Math.min(0.5, L / sp), 0.08, 0.08, 7, 6, 4.5, 1, 0, 0, 0.9, 0.8);
     this.timed(dur, (t) => {
+      if (m.userData.tok !== tok) return;
       m.material.opacity = (1 - t) * (1 - t);
       m.scale.x = m.scale.y = width * (1 - t * 0.6);
       if (t >= 1) m.visible = false;
@@ -319,9 +462,26 @@ export class Fx {
     }
   }
 
-  hitFlash(x, y, z, k = 1) {
+  /** Impact flash. (nx, nz): travel direction of the hit; sparks + cloth puff spray out the far side. */
+  hitFlash(x, y, z, k = 1, nx = 0, nz = 0) {
     this.add.spawn(x, y, z, 0, 0, 0, 0.12, 0.3 * k, 0.75 * k, 5, 4.6, 4.2, 1, 0, 0, 0, 1.5);
-    this.sparks(x, y, z, 10 * k, 5, 4.4, 3.6, 4);
+    for (let i = 0; i < this._n(10 * k); i++) {
+      const a = Math.random() * Math.PI * 2, sp = 4 * (0.4 + Math.random());
+      this.add.spawn(x, y, z, Math.cos(a) * sp * 0.6 + nx * 5, Math.random() * 3.6, Math.sin(a) * sp * 0.6 + nz * 5,
+        0.25 + Math.random() * 0.3, 0.05, 0.02, 5, 4.4, 3.6, 1, 2, 9, 1.4, 1);
+    }
+    for (let i = 0; i < this._n(5 * k); i++) {
+      this.alpha.spawn(x + nx * 0.15, y, z + nz * 0.15, nx * (1 + Math.random()) + (Math.random() - 0.5) * 0.6, 0.3 + Math.random() * 0.5, nz * (1 + Math.random()) + (Math.random() - 0.5) * 0.6,
+        0.5 + Math.random() * 0.3, 0.08, 0.3, 0.7, 0.68, 0.62, 0.5, 3, 0, 0, 1.3);
+    }
+  }
+
+  /** Ejected brass: a few tiny glints popping out to the side and dropping. */
+  shell(x, y, z, nx, nz) {
+    if (this.scale < 1) return;
+    const s = Math.random() < 0.5 ? 1 : -1;
+    this.add.spawn(x - nx * 0.3, y, z - nz * 0.3, -nz * s * 1.6 + (Math.random() - 0.5), 1.6 + Math.random(), nx * s * 1.6 + (Math.random() - 0.5),
+      0.45, 0.025, 0.02, 3.6, 2.6, 1.0, 1, 0.5, 11, 0.4, 1);
   }
 
   dust(x, z, n = 4, r = 0.78, g = 0.7, b = 0.56, y = 0.05, spread = 1) {
@@ -342,10 +502,13 @@ export class Fx {
   }
 
   ring(x, y, z, r0, r1, color, dur = 0.45, op = 1) {
-    const m = this.rings.find((r) => !r.visible) || this.rings[0];
+    const m = this._pick(this.rings), tok = m.userData.tok;
+    m.geometry = r1 > 2.4 ? this.thinRingGeo : this.ringGeo;
     m.position.set(x, y, z); m.visible = true;
     m.material.color.set(color);
+    m.scale.setScalar(r0); m.material.opacity = op;
     this.timed(dur, (t) => {
+      if (m.userData.tok !== tok) return;
       const e = easeOutCubic(t);
       m.scale.setScalar(r0 + (r1 - r0) * e);
       m.material.opacity = op * (1 - t);
@@ -390,7 +553,20 @@ export class Fx {
       this.alpha.spawn(x + Math.cos(a) * d, y + Math.random() * 0.4, z + Math.sin(a) * d, Math.cos(a) * 1.2, 0.8 + Math.random() * 1.4, Math.sin(a) * 1.2,
         1.8 + Math.random() * 1.6, 0.5, 1.6 + Math.random(), g, g * 0.97, g * 0.95, 0.75, 1.4, -0.25, 0, 1.2);
     }
+    // lingering embers drifting up, and a rising smoke column
+    for (let i = 0; i < this._n(16); i++) {
+      const a = Math.random() * Math.PI * 2, d = Math.random() * radius * 0.7;
+      A.spawn(x + Math.cos(a) * d, 0.1, z + Math.sin(a) * d, (Math.random() - 0.5) * 0.6, 0.6 + Math.random() * 1.4, (Math.random() - 0.5) * 0.6,
+        1.4 + Math.random() * 1.4, 0.035, 0.015, 5, 2.2, 0.5, 1, 0.8, -0.3, 0.6, 1);
+    }
+    for (let i = 0; i < this._n(8); i++) {
+      const g = 0.3 + Math.random() * 0.1;
+      this.alpha.spawn(x + (Math.random() - 0.5) * 0.4, 0.8 + i * 0.12, z + (Math.random() - 0.5) * 0.4, 0.2, 0.9 + Math.random() * 0.6, 0.1,
+        1.8 + Math.random() * 1.2, 0.3, 0.9 + Math.random() * 0.4, g, g * 0.97, g * 0.95, 0.45, 0.6, -0.15, 0, 1.2);
+    }
+    if (!wet) this.debrisBurst(x, 0.15, z, [0x3d3a33, 0x6b6253, 0x8d7f63], 10, 1.0);
     this.ring(x, 0.06, z, 0.3, radius * 2.3, 0xffd9a8, 0.5, 1.4);
+    this.ring(x, 0.05, z, 0.2, radius * 1.4, 0xffffff, 0.22, 1.8);
     this.flashLight(x, 1, z, 0xffa860, 26, 0.4, 7);
     if (wet) { this.splash(x, z, 2.2); this.splash(x + 0.4, z - 0.3, 1.4); } else this.scorch(x, z, radius);
     this.shake = Math.min(1, this.shake + 0.75);
@@ -408,6 +584,12 @@ export class Fx {
   /** style: 'hit' | 'graze' | 'miss' | 'heal' | 'info' | 'tide' | 'kill' */
   floatText(x, y, z, text, color, big = 1) {
     const T = this.texts[this.textI++ % this.texts.length];
+    // Stack above fresh texts on the same spot (e.g. FLANKED + damage + GRAZE) instead of overprinting.
+    for (let n = 0; n < 4; n++) {
+      const clash = this.texts.some((o) => o !== T && o.s.visible && o.t < o.dur * 0.75 && Math.abs(o.x - x) + Math.abs(o.z - z) < 0.3 && Math.abs(o.s.position.y - y) < 0.45);
+      if (!clash) break;
+      y += 0.45;
+    }
     const g = T.c.getContext('2d');
     g.clearRect(0, 0, 512, 128);
     const font = (px) => `900 ${px}px system-ui, -apple-system, "Segoe UI", sans-serif`;
@@ -429,6 +611,8 @@ export class Fx {
   }
 
   update(dt, camRight) {
+    this.clock += dt;
+    this._updateSmoke(dt);
     this.add.update(dt);
     this.alpha.update(dt);
     this.debris.update(dt, this.floodedAt);
@@ -474,5 +658,8 @@ export class Fx {
     for (const s of this.scorches) s.m.visible = false;
     for (const t of this.texts) t.s.visible = false;
     for (const L of this.lights) { L.t = L.dur; L.l.intensity = 0; }
+    this.smokes.length = 0;
+    this.nade.visible = false; this.sweep.visible = false;
+    this.shake = 0;
   }
 }

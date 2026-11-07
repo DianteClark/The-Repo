@@ -21,7 +21,7 @@ export function renderTurnStrip(state, { myTeam, activeTeam, alive }) {
     else if (i < pos) cls.push('done');
     if (out) cls.push('out');
     if (team.isLoneWolf) cls.push('wolf');
-    const dots = solo ? '' : team.members.map((id) => `<i class="${state.units[id].alive ? '' : 'x'}"></i>`).join('');
+    const dots = solo ? '' : team.members.map((id) => { const m = state.units[id]; return `<i class="${!m.alive ? 'x' : m.downed ? 'dn' : ''}"></i>`; }).join('');
     return `<span class="${cls.join(' ')}" title="${t === myTeam ? 'Your squad' : 'Squad ' + (t + 1)}">${solo ? '' : dots}</span>`;
   }).join('');
   if (el._html !== html) { el.innerHTML = html; el._html = html; }
@@ -72,10 +72,19 @@ export function renderChips({ round, squadsLeft, squadsTotal, tideIn, tideDmg, o
 
 // ---------- unit card ----------
 
-export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weaponStats, spectating, aliveMates }) {
+export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weaponStats, spectating, aliveMates, callsign, inSmoke, spotted }) {
   const el = $('unitCard');
-  if (!u) { el.innerHTML = ''; return; }
+  if (!u) { el.innerHTML = ''; el._html = ''; return; }
   const c = CLASSES[u.cls];
+  if (u.alive && u.downed) {
+    const pips = Array.from({ length: Math.max(2, u.bleed || 0) }, (_, i) => `<i class="${i < (u.bleed || 0) ? 'on' : ''}"></i>`).join('');
+    const html = `<div class="uc downed"><div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
+      <div class="uc-main"><div class="uc-top"><span class="uc-name">Downed</span><span class="tag bleed">${ICON.bleed}${u.bleed || 0} turn${u.bleed === 1 ? '' : 's'} left</span></div>
+      <div class="uc-sub">${aliveMates ? 'Hold on. A squadmate next to you can revive you.' : 'No squadmate standing to revive you.'}</div></div>
+      <div class="uc-bleed" title="Bleed-out counter"><span class="bl-pips">${pips}</span><small>Bleed</small></div></div>`;
+    if (el._html !== html) { el.innerHTML = html; el._html = html; }
+    return;
+  }
   if (!u.alive) {
     const html = `<div class="uc dead"><div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
       <div class="uc-main"><div class="uc-top"><span class="uc-name">Eliminated</span></div>
@@ -83,13 +92,17 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
     if (el._html !== html) { el.innerHTML = html; el._html = html; }
     return;
   }
-  const hpPips = Array.from({ length: u.maxHp }, (_, i) => `<i class="${i < u.hp ? 'on' : ''}${i < u.hp && u.hp <= u.maxHp * 0.35 ? ' low' : ''}"></i>`).join('');
+  const prevHp = el._hp && el._hp.id === u.id ? el._hp.hp : u.hp;
+  el._hp = { id: u.id, hp: u.hp };
+  const hpPips = Array.from({ length: u.maxHp }, (_, i) => `<i class="${i < u.hp ? 'on' : ''}${i < u.hp && u.hp <= u.maxHp * 0.35 ? ' low' : ''}${i >= u.hp && i < prevHp ? ' lost' : ''}${i < u.hp && i >= prevHp ? ' gain' : ''}"></i>`).join('');
   const apPips = Array.from({ length: u.maxAp }, (_, i) => `<i class="${myTurn && i < u.ap ? 'on' : ''}"></i>`).join('');
   const armor = u.armor > 0 ? `<span class="armor" title="Armor: blocks ${u.armor} damage per hit">${ICON.shield}<b>${u.armor}</b></span>` : '';
   const tags = [
     u.isLoneWolf && `<span class="tag wolf">${ICON.wolf}Lone wolf</span>`,
     u.overwatch && `<span class="tag ow">${ICON.overwatch}Overwatch</span>`,
     u.hunkered && `<span class="tag hk">${ICON.hunker}Hunkered</span>`,
+    inSmoke && `<span class="tag sm">${ICON.smoke}Smoke</span>`,
+    spotted && `<span class="tag spot">${ICON.scan}Scanned</span>`,
     outside ? `<span class="tag danger">${ICON.tide}In the tide</span>` : nextOutside ? `<span class="tag warn">${ICON.tide}Tide next</span>` : '',
   ].filter(Boolean).join('');
   const ws = weaponStats;
@@ -99,12 +112,13 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
     u.mods.barrel ? `<span class="g mod" title="Heavy barrel ×${u.mods.barrel}">${ICON.barrel}${u.mods.barrel}</span>` : '',
     `<span class="g item${u.items.medkit ? '' : ' none'}" title="Medkits">${ICON.medkit}${u.items.medkit}</span>`,
     (u.items.frag ?? 0) > 0 || u.cls === 'assault' ? `<span class="g item${u.items.frag ? '' : ' none'}" title="Frag grenades">${ICON.grenade}${u.items.frag ?? 0}</span>` : '',
+    (u.items.smoke ?? 0) > 0 || u.cls === 'recon' ? `<span class="g item${u.items.smoke ? '' : ' none'}" title="Smoke grenades">${ICON.smoke}${u.items.smoke ?? 0}</span>` : '',
     u.missStreak ? `<span class="g streak" title="Miss streak bonus">+${u.missStreak * 10}%</span>` : '',
   ].filter(Boolean).join('');
   const html = `<div class="uc">
     <div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
     <div class="uc-main">
-      <div class="uc-top"><span class="uc-name">${esc(c.name)}</span>${tags}</div>
+      <div class="uc-top"><span class="uc-name">${callsign ? `${esc(callsign)}<em>${esc(c.name)}</em>` : esc(c.name)}</span>${tags}</div>
       <div class="uc-hp"><span class="hp-pips${u.maxHp > 14 ? ' dense' : ''}">${hpPips}</span><span class="hp-num">${u.hp}<small>/${u.maxHp}</small></span>${armor}</div>
       <div class="uc-gear">${gear}</div>
     </div>
@@ -160,10 +174,23 @@ export function feedKill({ killer, victim, cause, killerMine, victimMine }) {
   const f = $('feed');
   const d = document.createElement('div');
   d.className = 'kf' + (killerMine ? ' by-me' : '') + (victimMine ? ' on-me' : '');
-  const ic = { shoot: ICON.shoot, aimed: ICON.aimed, grenade: ICON.grenade, breach: ICON.breach, tide: ICON.tide, overwatch: ICON.overwatch }[cause] || ICON.skull;
+  const ic = CAUSE_ICON[cause] || ICON.skull;
+  const note = { tide: 'drowned', bleed: 'bled out', downed: 'down' }[cause] || 'down';
   d.innerHTML = killer
     ? `<span class="a ${killerMine ? 'mine' : ''}">${esc(killer)}</span><span class="kic">${ic}</span><span class="b ${victimMine ? 'mine' : ''}">${esc(victim)}</span>`
-    : `<span class="kic tide">${ic}</span><span class="b ${victimMine ? 'mine' : ''}">${esc(victim)}</span><small>${cause === 'tide' ? 'drowned' : 'down'}</small>`;
+    : `<span class="kic ${cause === 'tide' ? 'tide' : ''}">${ic}</span><span class="b ${victimMine ? 'mine' : ''}">${esc(victim)}</span><small>${note}</small>`;
+  pushFeed(d);
+}
+const CAUSE_ICON = { shoot: ICON.shoot, aimed: ICON.aimed, grenade: ICON.grenade, breach: ICON.breach, tide: ICON.tide, overwatch: ICON.overwatch, bleed: ICON.bleed, execute: ICON.skull };
+
+/** One feed line: [a] icon [b] note. kind: down | revive | patch | scan | smoke */
+export function feedLine({ a, aMine, icon, b, bMine, note, kind = '' }) {
+  const d = document.createElement('div');
+  d.className = `kf ev ${kind}` + (aMine || bMine ? ' mineish' : '');
+  d.innerHTML = (a ? `<span class="a ${aMine ? 'mine' : ''}">${esc(a)}</span>` : '')
+    + `<span class="kic">${ICON[icon] || ''}</span>`
+    + (b ? `<span class="b ${bMine ? 'mine' : ''}">${esc(b)}</span>` : '')
+    + (note ? `<small>${esc(note)}</small>` : '');
   pushFeed(d);
 }
 
@@ -193,7 +220,7 @@ function pushFeed(d) {
   setTimeout(() => { d.classList.add('fade'); setTimeout(() => d.remove(), 600); }, 7000);
 }
 
-export function clearFeed() { $('feed').innerHTML = ''; $('toasts').innerHTML = ''; }
+export function clearFeed() { $('feed').innerHTML = ''; $('toasts').innerHTML = ''; merged = null; }
 
 export function toast(msg, kind = 'info', iconName) {
   const t = $('toasts');
@@ -219,3 +246,67 @@ export function banner(text, kind = 'you', sub = '', ms = 1400) {
   bannerTimer = setTimeout(() => b.classList.remove('show'), ms);
 }
 export function hideBanner() { clearTimeout(bannerTimer); $('banner').classList.remove('show'); }
+
+// ---------- squad alert (downed teammates) ----------
+
+/**
+ * list: [{id, name, cls, bleed, adjacent, isPlayer}] — downed squadmates.
+ * opts: { canAct, onRevive(id), onFind(id), selfDowned }
+ */
+export function renderSquadAlert(list, opts = {}) {
+  const el = $('squadAlert');
+  if (!list.length) {
+    if (!el.classList.contains('hidden')) { el.classList.add('hidden'); el.innerHTML = ''; el._sig = ''; }
+    return;
+  }
+  const sig = JSON.stringify(list) + '|' + !!opts.canAct;
+  if (el._sig === sig) return;
+  el._sig = sig;
+  el.classList.remove('hidden');
+  el.innerHTML = list.map((m) => {
+    const btn = m.isPlayer ? ''
+      : m.adjacent && opts.canAct ? `<button class="btn sm sa-rev" data-id="${m.id}">${ICON.revive}<span>Revive</span><small>1 AP</small></button>`
+      : `<button class="btn ghost sm sa-find" data-id="${m.id}" title="Show on map">${ICON.focus}<span>${opts.canAct ? 'Move next to them' : 'Find'}</span></button>`;
+    const pips = Array.from({ length: 2 }, (_, i) => `<i class="${i < m.bleed ? 'on' : ''}"></i>`).join('');
+    return `<div class="sa-row${m.bleed <= 1 ? ' crit' : ''}${m.isPlayer ? ' me' : ''}">
+      <span class="sa-ic">${ICON.downed}</span>
+      <div class="sa-txt"><b>${esc(m.isPlayer ? 'You are down' : `${m.name} is down`)}</b><small><span class="bl-pips">${pips}</span>${m.bleed} turn${m.bleed === 1 ? '' : 's'} to bleed out</small></div>
+      ${btn}</div>`;
+  }).join('');
+  el.querySelectorAll('.sa-rev').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); opts.onRevive?.(Number(b.dataset.id)); }; });
+  el.querySelectorAll('.sa-find').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); opts.onFind?.(Number(b.dataset.id)); }; });
+}
+
+// ---------- damage direction + screen edge juice ----------
+
+/** angle: radians, 0 = up (towards the top of the screen), clockwise. */
+export function damageDir(angle, kind = 'enemy', strength = 1) {
+  const host = $('dmgDir');
+  if (!host) return;
+  const d = document.createElement('i');
+  d.className = 'dd ' + kind;
+  d.style.setProperty('--a', `${angle}rad`);
+  d.style.setProperty('--s', String(0.7 + Math.min(1, strength) * 0.5));
+  host.appendChild(d);
+  while (host.children.length > 4) host.firstChild.remove();
+  setTimeout(() => d.remove(), 1500);
+}
+
+let glowT = 0;
+/** kind: you (amber turn start) | hurt | heal | tide */
+export function edgeGlow(kind, ms = 900) {
+  const g = $('edgeGlow');
+  if (!g) return;
+  g.className = '';
+  void g.offsetWidth;
+  g.className = 'show ' + kind;
+  g.style.animationDuration = ms + 'ms';
+  clearTimeout(glowT);
+  glowT = setTimeout(() => { g.className = ''; }, ms);
+}
+export function clearJuice() {
+  const h = $('dmgDir'); if (h) h.innerHTML = '';
+  const g = $('edgeGlow'); if (g) g.className = '';
+  clearTimeout(glowT);
+  renderSquadAlert([]);
+}

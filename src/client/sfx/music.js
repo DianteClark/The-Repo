@@ -53,8 +53,8 @@ export class Score {
     out.gain.linearRampToValueAtTime(1, t + 3); // fade in
     out.connect(e.musicIn);
     const send = ctx.createGain();
-    send.gain.value = 0.35;
-    out.connect(send).connect(e.reverbIn);
+    send.gain.value = 0.25;
+    out.connect(send).connect(e.musicRevIn);
 
     const layer = (v) => { const g = ctx.createGain(); g.gain.value = v; g.connect(out); return g; };
     const n = {
@@ -138,6 +138,7 @@ export class Score {
   pump(horizon) {
     const e = this.eng, ctx = e.ctx;
     if (!this.playing || !ctx) return;
+    if (horizon === undefined && ctx.state !== 'running') return; // suspended/muted: hold
     const until = horizon ?? ctx.currentTime + 0.25;
     // If the tab slept, skip ahead instead of firing a burst of stale notes.
     if (this.nextT < ctx.currentTime - 0.5) this.nextT = ctx.currentTime + 0.05;
@@ -234,7 +235,7 @@ export class Score {
     o1.connect(g); o2.connect(g2).connect(g);
     g.connect(n.motif);
     const echo = ctx.createGain(); echo.gain.value = 0.5;
-    g.connect(echo).connect(this.eng.echoIn);
+    g.connect(echo).connect(this.eng.musicEchoIn);
     o1.start(t); o2.start(t); o1.stop(t + 1.9); o2.stop(t + 1.9);
   }
 
@@ -288,7 +289,7 @@ export class Score {
     const out = ctx.createGain(); out.gain.value = 1;
     out.connect(e.stingerIn);
     const rs = ctx.createGain(); rs.gain.value = 0.45;
-    out.connect(rs).connect(e.reverbIn);
+    out.connect(rs).connect(e.stingerRevIn);
     const pad = (f, t0, dur, vol, cutFrom, cutTo, type = 'sawtooth', det = 8) => {
       const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 1.2;
       lp.frequency.setValueAtTime(cutFrom, t0);
@@ -308,7 +309,7 @@ export class Score {
       const g = ctx.createGain();
       this._env(g, t0, 0.005, vol, 2.2);
       g.connect(out);
-      const ec = ctx.createGain(); ec.gain.value = 0.4; g.connect(ec).connect(e.echoIn);
+      const ec = ctx.createGain(); ec.gain.value = 0.4; g.connect(ec).connect(e.stingerEchoIn);
       for (const [m, a] of [[1, 1], [2.76, 0.2], [5.4, 0.06]]) {
         const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f * m;
         const ga = ctx.createGain(); ga.gain.value = a;
@@ -340,6 +341,24 @@ export class Score {
       bell(587.33, t + 0.08, 0.06);
       bell(880, t + 0.3, 0.05);
       len = 2.5;
+    } else if (kind === 'downed') {
+      // Dissonant cluster that sags in pitch, over a warbling radio carrier.
+      for (const [s, v] of [[0, 0.05], [1, 0.04], [6, 0.035]]) {
+        const f = D3 * semi(s);
+        const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1100;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + 0.08);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 2.0);
+        lp.connect(g).connect(out);
+        for (const d of [-10, 10]) {
+          const o = ctx.createOscillator(); o.type = 'sawtooth'; o.detune.value = d;
+          o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.94, t + 1.8);
+          o.connect(lp); o.start(t); o.stop(t + 2.05);
+        }
+      }
+      this._kick(t, 0.5, out);
+      bell(293.66 * semi(1), t + 0.05, 0.05);
+      len = 2.2;
     } else { // 'tide'
       pad(D2, t, 2.8, 0.09, 150, 900);
       pad(D2 * 1.5, t + 0.15, 2.6, 0.06, 150, 900);

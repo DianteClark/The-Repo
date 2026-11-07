@@ -11,7 +11,7 @@ export const CLASSES = {
     name: 'Assault',
     desc: 'All-rounder. Solid rifle, good mobility.',
     hp: 10, armor: 0, move: 6,
-    weapon: { name: 'Rifle', range: 9, aim: 62, dmg: [3, 5] },
+    weapon: { name: 'Rifle', range: 9, aim: 65, dmg: [3, 5] },
   },
   marksman: {
     name: 'Marksman',
@@ -22,8 +22,20 @@ export const CLASSES = {
   breacher: {
     name: 'Breacher',
     desc: 'Tough. Shotgun is brutal at close range.',
-    hp: 13, armor: 1, move: 5,
-    weapon: { name: 'Shotgun', range: 5, aim: 78, dmg: [5, 7], falloff: true },
+    hp: 12, armor: 0, move: 5,
+    weapon: { name: 'Shotgun', range: 5, aim: 74, dmg: [5, 7], falloff: true },
+  },
+  medic: {
+    name: 'Medic',
+    desc: 'Keeps the squad standing. Patch heals or revives.',
+    hp: 9, armor: 0, move: 6,
+    weapon: { name: 'SMG', range: 7, aim: 66, dmg: [2, 4] },
+  },
+  recon: {
+    name: 'Recon',
+    desc: 'Fast scout. Scan reveals enemies through walls; carries smoke.',
+    hp: 9, armor: 0, move: 7,
+    weapon: { name: 'Carbine', range: 10, aim: 70, dmg: [3, 5] },
   },
 };
 
@@ -51,8 +63,9 @@ export const MEDKIT_HEAL = 5;
 
 export const ZONE = {
   shrinkEvery: 2, // rounds
-  step: 4, // tiles of radius per shrink
+  step: 5, // tiles of radius per shrink
   minRadius: 0, // the tide eventually covers everything, so matches always end
+  finalRadius: 3, // the last ring holds for one interval: a real final-circle fight
   damage: 2, // + 1 per 5 rounds
 };
 
@@ -63,7 +76,8 @@ export const CRATE_TABLE = [
   ['armor', 18],
   ['scope', 22],
   ['barrel', 17],
-  ['frag', 13],
+  ['frag', 12],
+  ['smoke', 10],
 ];
 export const CRATE_LABEL = {
   medkit: '+1 Medkit',
@@ -71,23 +85,36 @@ export const CRATE_LABEL = {
   scope: 'Scope: +2 range, +5 aim',
   barrel: 'Heavy barrel: +1 damage',
   frag: '+1 Frag grenade',
+  smoke: '+1 Smoke grenade',
   cache: 'Supply cache: +1 scope, +1 barrel, +1 frag',
 };
 export const MOD_CAP = 2; // max stacks of scope / barrel / crate armor
 export const FRAG_CAP = 3; // max grenades carried
+export const SMOKE_CAP = 2;
 
 // Supply caches land inside the next safe zone at the start of these rounds.
 export const SUPPLY_DROP_ROUNDS = [4, 8, 12];
 
 // ---------- abilities ----------
-export const START_FRAGS = { assault: 2, marksman: 0, breacher: 0 };
+export const START_FRAGS = { assault: 2, marksman: 0, breacher: 0, medic: 0, recon: 0 };
+export const START_SMOKES = { recon: 1 };
 export const FRAG = { range: 7, radius: 1.5, dmg: 3 };
 export const AIMED = { aim: 15, dmg: 2, cooldown: 3 }; // Marksman
 export const BREACH = { dmg: 4, radius: 1, cooldown: 3 }; // Breacher; radius is Chebyshev
+export const SMOKE = { range: 7, radius: 1.5, defense: 25 }; // lasts until the thrower's next turn
+export const PATCH = { heal: 5, reviveHp: 4, cooldown: 2 }; // Medic
+export const SCAN = { range: 12, radius: 5, cooldown: 3 }; // Recon
+export const REVIVE_HP = 3;
+export const BLEED_TURNS = 2; // own team turns a downed unit lasts
+
 export const ABILITY_TEXT = {
   grenade: { name: 'Frag Grenade', desc: `Throw up to ${FRAG.range} tiles. ${FRAG.dmg} damage in a 3×3 blast, hits allies too, shreds cover. 1 AP.` },
   aimed: { name: 'Aimed Shot', desc: `+${AIMED.aim} aim, +${AIMED.dmg} damage. Ends turn. Cooldown ${AIMED.cooldown}.` },
   breach: { name: 'Breach Charge', desc: `Blow open adjacent cover; ${BREACH.dmg} damage to enemies next to it. 1 AP. Cooldown ${BREACH.cooldown}.` },
+  patch: { name: 'Patch', desc: `Heal yourself or an adjacent ally for ${PATCH.heal}, or revive a downed ally at ${PATCH.reviveHp} HP. 1 AP. Cooldown ${PATCH.cooldown}.` },
+  scan: { name: 'Scan', desc: `Reveal every unit within ${SCAN.radius} tiles of a point up to ${SCAN.range} tiles away, through walls, until your next turn. 1 AP. Cooldown ${SCAN.cooldown}.` },
+  smoke: { name: 'Smoke Grenade', desc: `Up to ${SMOKE.range} tiles. A 3×3 cloud: +${SMOKE.defense} defense for anyone inside until your next turn. 1 AP.` },
+  revive: { name: 'Revive', desc: `Get an adjacent downed squadmate back up at ${REVIVE_HP} HP. 1 AP.` },
   hunker: { name: 'Hunker Down', desc: 'Double your cover bonus and no grazes until your next turn. Ends turn.' },
 };
 

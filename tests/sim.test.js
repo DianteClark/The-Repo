@@ -75,6 +75,21 @@ test('same seed, same match', () => {
   assert.equal(a.round, b.round);
 });
 
+test('end-of-match invariants: nobody is left downed, eliminations are consistent', () => {
+  for (const mode of Object.keys(MODES)) {
+    for (let seed = 20; seed <= 23; seed++) {
+      const s = simulate({ seed, mode, noHuman: true });
+      assert.equal(s.eliminated.length, s.teams.length - 1, `${mode} ${seed}`);
+      assert.ok(!s.eliminated.includes(s.winner));
+      for (const u of s.units) {
+        if (u.team === s.winner) continue;
+        assert.equal(u.alive, false, `${mode} ${seed}: loser ${u.id} still alive`);
+      }
+      assert.ok(s.units.some((u) => u.team === s.winner && u.alive && !u.downed));
+    }
+  }
+});
+
 test('bot-only matches finish with a single winner in every mode', () => {
   for (const mode of Object.keys(MODES)) {
     for (let seed = 1; seed <= 6; seed++) {
@@ -106,7 +121,7 @@ test('same seed, same event stream (abilities and destruction included)', () => 
   assert.deepEqual(a.state.map.cover, b.state.map.cover);
 });
 
-test('bots use grenades, aimed shots and breach charges; supply drops happen', () => {
+test('bots use every ability (grenade, aimed, breach, patch, scan, smoke, revive); supply drops happen', () => {
   const count = {};
   for (const mode of Object.keys(MODES)) {
     for (let seed = 1; seed <= 4; seed++) {
@@ -120,5 +135,6 @@ test('bots use grenades, aimed shots and breach charges; supply drops happen', (
       }
     }
   }
-  for (const k of ['grenade', 'aimed', 'breach', 'cover_change', 'supply_drop', 'damage']) assert.ok(count[k] > 0, k);
+  for (const k of ['grenade', 'aimed', 'breach', 'cover_change', 'supply_drop', 'damage',
+    'downed', 'revive', 'patch', 'scan', 'smoke', 'smoke_clear', 'reveal_end']) assert.ok(count[k] > 0, k);
 });

@@ -3,11 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b171c" />
+  <meta name="theme-color" content="#0d1a1f" />
+  <meta name="color-scheme" content="dark" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Tidefall" />
+  <meta name="application-name" content="Tidefall" />
+  <meta name="format-detection" content="telephone=no" />
   <meta name="description" content="Tidefall: a 16-player turn-based tactical battle royale on a drowning archipelago." />
   <title>Tidefall | Tactical battle royale</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="assets/icon/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icon/icon-192.png" />
+  <link rel="apple-touch-icon" href="assets/icon/icon-180.png" />
   <link rel="preload" href="src/client/ui/fonts/barlow-condensed-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="styles.css" />
   <script type="importmap">
@@ -23,22 +32,45 @@
   <canvas id="scene"></canvas>
   <div id="vignette"></div>
 
-  <!-- ============ MENU ============ -->
-  <div id="menu" class="screen">
-    <div class="menu-fx" aria-hidden="true">
-      <div class="scan"></div>
-      <svg class="waves" viewBox="0 0 1200 200" preserveAspectRatio="none">
-        <path class="w1" d="M0 120 C150 90 300 150 450 120 S750 90 900 120 S1100 150 1200 120 V200 H0Z" />
-        <path class="w2" d="M0 140 C150 115 300 165 450 140 S750 115 900 140 S1100 165 1200 140 V200 H0Z" />
-        <path class="w3" d="M0 160 C150 140 300 180 450 160 S750 140 900 160 S1100 180 1200 160 V200 H0Z" />
-      </svg>
+  <canvas id="menuFx" aria-hidden="true"></canvas>
+
+  <!-- ============ SPLASH ============ -->
+  <div id="splash" class="screen" role="button" tabindex="0" aria-label="Tidefall. Tap to start">
+    <div class="sp-rays" aria-hidden="true"></div>
+    <div class="sp-center">
+      <div class="kicker sp-kick"><span>16 players</span><span>Turn-based</span><span>Battle royale</span></div>
+      <h1 class="logo big" aria-label="Tidefall 2.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>2.0</b></span></h1>
+      <p class="tagline">The tide takes everyone eventually. Be the last squad above it.</p>
+      <div class="sp-start"><span class="sp-ring"></span><span id="spStartTxt">Tap to start</span></div>
     </div>
+    <div class="sp-foot"><span class="dot"></span><span>Offline vs 15 bots</span><span class="sep"></span><span>Five classes</span><span class="sep"></span><span>v2.0</span></div>
+    <svg class="waves" viewBox="0 0 1200 200" preserveAspectRatio="none" aria-hidden="true">
+      <path class="w1" d="M0 120 C150 90 300 150 450 120 S750 90 900 120 S1100 150 1200 120 V200 H0Z" />
+      <path class="w2" d="M0 140 C150 115 300 165 450 140 S750 115 900 140 S1100 165 1200 140 V200 H0Z" />
+      <path class="w3" d="M0 160 C150 140 300 180 450 160 S750 140 900 160 S1100 180 1200 160 V200 H0Z" />
+    </svg>
+  </div>
+
+  <!-- ============ MENU ============ -->
+  <div id="menu" class="screen hidden">
+    <div class="menu-fx" aria-hidden="true"><div class="scan"></div></div>
 
     <header class="brand">
-      <div class="kicker"><span>16 players</span><span>Turn-based</span><span>Battle royale</span></div>
-      <h1 class="logo" aria-label="Tidefall"><span data-t="TIDEFALL">TIDEFALL</span></h1>
+      <div class="brand-top">
+        <h1 class="logo" aria-label="Tidefall 2.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>2.0</b></span></h1>
+        <div class="brand-btns">
+          <button id="howBtn" class="icon-btn" title="How to play" aria-label="How to play"></button>
+          <button id="setBtn" class="icon-btn" title="Settings" aria-label="Settings"></button>
+        </div>
+      </div>
       <p class="tagline">The tide takes everyone eventually. Be the last squad above it.</p>
-      <div class="brand-meta"><span class="dot"></span>Offline vs 15 bots<span class="sep"></span>v1.0</div>
+      <div class="profile panel">
+        <label class="callsign"><span class="cs-ic"></span><span class="cs-l">Callsign</span>
+          <input id="callsign" type="text" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" aria-label="Callsign" />
+          <button id="csDice" class="cs-dice" type="button" title="Random callsign" aria-label="Random callsign"></button>
+        </label>
+        <div id="career" class="career" aria-label="Career stats"></div>
+      </div>
     </header>
 
     <section class="loadout panel" aria-label="Loadout">
@@ -50,20 +82,24 @@
         <span class="wolf-txt"><b>Volunteer as Lone Wolf</b><small>Drop solo with +1 AP, +50% HP and +1 armor</small></span>
       </label>
 
-      <div class="sec-h"><span class="n">02</span>Class</div>
-      <div id="classChoices" class="class-grid"></div>
-      <div id="classDetail" class="class-detail"></div>
+      <div class="sec-h"><span class="n">02</span>Class<small id="classCount"></small></div>
+      <div id="classCarousel" class="carousel" aria-hidden="true">
+        <div class="car-stage"></div>
+        <button class="car-nav prev" tabindex="-1" aria-label="Previous class"></button>
+        <button class="car-nav next" tabindex="-1" aria-label="Next class"></button>
+      </div>
+      <div id="classChoices" class="class-tabs" role="tablist" aria-label="Class"></div>
+      <div id="classDetail" class="class-detail" aria-live="polite"></div>
 
       <button id="playBtn" class="btn primary xl"><span>Deploy</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
-      <div class="menu-row">
-        <button id="howBtn" class="btn ghost">How to play</button>
-        <button id="setBtn" class="btn ghost">Settings</button>
-      </div>
       <button id="inviteBtn" class="btn ghost invite" aria-disabled="true">
         <span>Join with invite code</span><span class="soon">Coming next</span>
       </button>
     </section>
   </div>
+
+  <!-- ============ TRANSITION WIPE ============ -->
+  <div id="wipe" aria-hidden="true"><i></i><i></i><i></i></div>
 
   <!-- ============ HUD ============ -->
   <div id="hud" class="hidden">
@@ -95,7 +131,10 @@
       </div>
     </div>
 
+    <div id="dmgDir" aria-hidden="true"></div>
+    <div id="edgeGlow" aria-hidden="true"></div>
     <div id="feed"></div>
+    <div id="squadAlert" class="hidden" aria-live="assertive"></div>
     <div id="toasts"></div>
     <div id="banner" class="banner"></div>
 
@@ -120,6 +159,18 @@
     </div>
   </div>
 
+  <!-- ============ DROP IN ============ -->
+  <div id="dropIn" class="screen hidden" aria-live="polite">
+    <div class="di-bg"></div>
+    <div class="di-card">
+      <div id="diKicker" class="kicker"></div>
+      <h1 class="di-title"><span>Drop</span><span>in</span></h1>
+      <div id="diSquad" class="di-squad"></div>
+      <div class="di-count"><b id="diNum">3</b><small id="diTip"></small></div>
+      <div class="di-skip">Tap to skip</div>
+    </div>
+  </div>
+
   <!-- ============ END ============ -->
   <div id="endScreen" class="screen hidden">
     <div class="end-card panel">
@@ -128,6 +179,7 @@
       <h1 id="endTitle"></h1>
       <p id="endSub" class="end-sub"></p>
       <div id="endStats" class="end-stats"></div>
+      <div id="endCareer" class="end-career"></div>
       <div class="end-btns">
         <button id="againBtn" class="btn primary xl"><span>Play again</span></button>
         <button id="loadoutBtn" class="btn ghost">Change loadout</button>
@@ -136,28 +188,41 @@
   </div>
 
   <!-- ============ SHEETS ============ -->
-  <div id="settingsSheet" class="sheet hidden">
+  <div id="settingsSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="sheet-card panel">
       <div class="sheet-h"><h2>Settings</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
       <div id="settingsBody"></div>
     </div>
   </div>
-  <div id="howSheet" class="sheet hidden">
+  <div id="howSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="How to play">
     <div class="sheet-card panel wide">
       <div class="sheet-h"><h2>How to play</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <button id="howTut" class="btn ghost how-tut">Play the quick tutorial</button>
       <div id="howBody" class="how-grid"></div>
       <button class="btn primary" data-close>Got it</button>
     </div>
   </div>
-  <div id="pauseSheet" class="sheet hidden">
+  <div id="pauseSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Paused">
     <div class="sheet-card panel narrow">
       <div class="sheet-h"><h2>Paused</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
       <p class="sheet-note" id="pauseNote">Your turn timer is paused.</p>
       <div class="pause-btns">
-        <button class="btn primary" data-close>Resume</button>
+        <button class="btn primary" data-close data-autofocus>Resume</button>
         <button id="pSettings" class="btn ghost">Settings</button>
         <button id="pHow" class="btn ghost">How to play</button>
         <button id="pQuit" class="btn ghost danger">Leave match</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tutSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Quick tutorial">
+    <div class="sheet-card panel tut-card">
+      <div class="sheet-h"><h2 id="tutStep">Basics</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <div id="tutBody" class="tut-body"></div>
+      <div id="tutDots" class="tut-dots"></div>
+      <div class="tut-btns">
+        <button id="tutSkip" class="btn ghost">Skip</button>
+        <button id="tutNext" class="btn primary">Next</button>
       </div>
     </div>
   </div>

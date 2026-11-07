@@ -5,11 +5,12 @@ import {
   TOTAL_PLAYERS, MAP_SIZE, BASE_AP, CLASSES, MODES, LONE_WOLF, GRAZE_BAND,
   MISS_STREAK_CAP, MEDKIT_HEAL, ZONE, CRATE_COUNT, CRATE_TABLE, MOD_CAP, CALLSIGNS,
   FRAG, FRAG_CAP, AIMED, BREACH, START_FRAGS, SUPPLY_DROP_ROUNDS, ABILITY_TEXT, FLANK_DMG,
+  START_SMOKES, SMOKE, SMOKE_CAP, PATCH, SCAN, REVIVE_HP, BLEED_TURNS,
 } from './constants.js';
 import { generateMap } from './map.js';
 import { makeRng, roll } from './rng.js';
 import {
-  reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, teamSeesTile, dist, los, inBounds, DIRS8,
+  reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, teamSeesTile, dist, los, inBounds, DIRS8, standing,
 } from './rules.js';
 
 const CLASS_KEYS = Object.keys(CLASSES);
@@ -64,6 +65,19 @@ export function createGame(opts = {}) {
     }
     anchors.push([best.x, best.y]);
   }
+  // The human's squad gets the most isolated open spot once everyone else is placed
+  // (deterministic scan, no rng draw), so they rarely get gunned down before their first turn.
+  if (playerTeam >= 0) {
+    let best = null;
+    for (let y = 2; y < S - 2; y++) {
+      for (let x = 2; x < S - 2; x++) {
+        if (map.cover[y * S + x]) continue;
+        const gap = Math.min(99, ...anchors.filter((_, i) => i !== playerTeam).map((a) => dist(a[0], a[1], x, y)));
+        if (!best || gap > best.gap) best = { x, y, gap };
+      }
+    }
+    if (best) anchors[playerTeam] = [best.x, best.y];
+  }
   teams.forEach((team, t) => {
     const [ax, ay] = anchors[t];
     for (const id of team.members) {
@@ -94,7 +108,13 @@ export function createGame(opts = {}) {
 
   const order = teams.map((t) => t.id);
   // Rotate the start so the human isn't always first.
-  const startShift = Math.floor(rng() * order.length);
+  // The human still lands somewhere in the first quarter of round 1, so they get
+  // to act before most of the lobby has had a shot at them.
+  let startShift = Math.floor(rng() * order.length);
+  if (playerTeam >= 0) {
+    const q = Math.max(1, Math.ceil(order.length / 4));
+    startShift = (playerTeam - (startShift % q) + order.length) % order.length;
+  }
   for (let i = 0; i < startShift; i++) order.push(order.shift());
 
   const state = {
@@ -103,6 +123,10 @@ export function createGame(opts = {}) {
     round: 1, turnPos: 0, rollCounter: 0,
     eliminated: [], // team ids in elimination order
     winner: null,
+    smokes: [], // [{id, x, y, radius, team, expiresRound, expiresTeam}]
+    reveals: [], // active scans: [{team, x, y, radius, ids}]
+    nextSmokeId: 0,
+    turnSerial: 0, // increments every team turn
   };
   state.startEvents = startTeamTurn(state);
   return state;
@@ -122,9 +146,10 @@ function makeUnit(id, team, cls, name, isPlayer, isLoneWolf) {
     alive: true, overwatch: false, missStreak: 0, kills: 0,
     weapon: { ...c.weapon, dmg: [...c.weapon.dmg] },
     mods: { scope: 0, barrel: 0, armor: 0 },
-    items: { medkit: 1, frag: START_FRAGS[cls] || 0 },
-    cooldowns: { aimed: 0, breach: 0 },
+    items: { medkit: 1, frag: START_FRAGS[cls] || 0, smoke: START_SMOKES[cls] || 0 },
+    cooldowns: { aimed: 0, breach: 0, patch: 0, scan: 0 },
     hunkered: false,
+    downed: false, bleed: 0, downedBy: null, downedAt: -1,
   };
 }
 
@@ -154,7 +179,8 @@ function nearestFree(map, occupied, x0, y0) {
 // ---------- queries ----------
 
 export const currentTeamId = (state) => state.order[state.turnPos];
-export const teamAlive = (state, t) => state.teams[t].members.some((id) => state.units[id].alive);
+/** A team is in the match while at least one member is standing (downed members don't count). */
+export const teamAlive = (state, t) => state.teams[t].members.some((id) => standing(state.units[id]));
 export const aliveTeams = (state) => state.teams.filter((t) => teamAlive(state, t.id)).map((t) => t.id);
 export const insideZone = (state, x, y, r = state.zone.r) => dist(x, y, state.zone.x, state.zone.y) <= r;
 export const zoneDamage = (state) => ZONE.damage + Math.floor(state.round / 5);
@@ -211,7 +237,7 @@ function grenadeTileOk(state, u, x, y) {
     && los(state.map, u.x, u.y, x, y);
 }
 
-const canGrenade = (u) => u.alive && u.ap >= 1 && u.items.frag > 0;
+const canGrenade = (u) => standing(u) && u.ap >= 1 && u.items.frag > 0;
 
 /** Valid grenade target tiles (Set of y*size+x). Empty if the unit can't throw right now. */
 export function grenadeTargets(state, u) {
@@ -242,7 +268,7 @@ export function grenadePreview(state, u, x, y) {
       if (!o.alive || dist(o.x, o.y, x, y) > FRAG.radius) continue;
       if (!teamSeesUnit(state, u.team, o)) continue;
       const dmg = Math.max(1, FRAG.dmg - o.armor);
-      units.push({ id: o.id, dmg, lethal: dmg >= o.hp, ally: o.team === u.team });
+      units.push({ id: o.id, dmg, lethal: o.downed || dmg >= o.hp, ally: o.team === u.team, downed: !!o.downed });
     }
     for (const [tx, ty] of blastTiles(map, x, y, FRAG.radius)) {
       const from = map.cover[ty * S + tx];
@@ -252,7 +278,7 @@ export function grenadePreview(state, u, x, y) {
   return { valid, x, y, radius: FRAG.radius, units, cover };
 }
 
-const canBreach = (u) => u.alive && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0;
+const canBreach = (u) => standing(u) && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0;
 
 /** Adjacent (8-way) tiles with cover the Breacher can blow open. Empty if not usable now. */
 export function breachTargets(state, u) {
@@ -275,15 +301,87 @@ export function breachPreview(state, u, x, y) {
     if (!o.alive || o.team === u.team || Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) > BREACH.radius) continue;
     if (!teamSeesUnit(state, u.team, o)) continue;
     const dmg = Math.max(1, BREACH.dmg - o.armor);
-    units.push({ id: o.id, dmg, lethal: dmg >= o.hp });
+    units.push({ id: o.id, dmg, lethal: o.downed || dmg >= o.hp });
   }
   const from = inBounds(state.map, x, y) ? state.map.cover[y * S + x] : 0;
   return { valid, units, cover: from ? [{ x, y, from, to: 0 }] : [] };
 }
 
+// ---------- 2.0 helpers: smoke, patch, scan, revive ----------
+
+const chebyshev = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+const hasSquadmates = (state, u) => state.teams[u.team].members.length > 1;
+
+const canSmoke = (u) => standing(u) && u.ap >= 1 && u.items.smoke > 0;
+
+/** Valid smoke target tiles (same reach and LOS rules as a frag). Empty if the unit can't throw. */
+export function smokeTargets(state, u) {
+  const out = new Set();
+  if (!canSmoke(u)) return out;
+  const S = state.map.size;
+  const R = SMOKE.range;
+  for (let y = Math.max(0, u.y - R); y <= Math.min(S - 1, u.y + R); y++) {
+    for (let x = Math.max(0, u.x - R); x <= Math.min(S - 1, u.x + R); x++) {
+      if (grenadeTileOk(state, u, x, y)) out.add(y * S + x);
+    }
+  }
+  return out;
+}
+
+const canPatch = (u) => standing(u) && u.cls === 'medic' && u.ap >= 1 && u.cooldowns.patch <= 0;
+const patchable = (u, t) => t.alive && t.team === u.team && chebyshev(u, t) <= 1
+  && (t.downed || t.hp < t.maxHp);
+
+/** Tiles of units the Medic can patch now: itself or adjacent squadmates that are hurt or downed. */
+export function patchTargets(state, u) {
+  const out = new Set();
+  if (!canPatch(u)) return out;
+  for (const t of state.units) if (patchable(u, t)) out.add(t.y * state.map.size + t.x);
+  return out;
+}
+
+const canRevive = (u) => standing(u) && u.ap >= 1;
+const revivable = (u, t) => t.alive && t.downed && t.team === u.team && t.id !== u.id && chebyshev(u, t) <= 1;
+
+/** Tiles of adjacent downed squadmates this unit can revive. */
+export function reviveTargets(state, u) {
+  const out = new Set();
+  if (!canRevive(u)) return out;
+  for (const t of state.units) if (revivable(u, t)) out.add(t.y * state.map.size + t.x);
+  return out;
+}
+
+const canScan = (u) => standing(u) && u.cls === 'recon' && u.ap >= 1 && u.cooldowns.scan <= 0;
+const scanTileOk = (state, u, x, y) => Number.isInteger(x) && Number.isInteger(y)
+  && inBounds(state.map, x, y) && dist(u.x, u.y, x, y) <= SCAN.range;
+
+/**
+ * Scan preview. Never leaks hidden units: `units` lists only enemies in the
+ * area the team can already see. { valid, x, y, radius, units:[{id}] }
+ */
+export function scanPreview(state, u, x, y) {
+  const valid = canScan(u) && scanTileOk(state, u, x, y);
+  const units = [];
+  for (const o of state.units) {
+    if (!o.alive || o.team === u.team || dist(o.x, o.y, x, y) > SCAN.radius) continue;
+    if (teamSeesUnit(state, u.team, o)) units.push({ id: o.id });
+  }
+  return { valid, x, y, radius: SCAN.radius, units };
+}
+
+/** Units patch / revive / smoke would affect. Squadmates: always known. */
+export function smokePreview(state, u, x, y) {
+  const valid = canSmoke(u) && grenadeTileOk(state, u, x, y);
+  const units = state.units.filter((o) => o.alive && dist(o.x, o.y, x, y) <= SMOKE.radius
+    && teamSeesUnit(state, u.team, o)).map((o) => ({ id: o.id, ally: o.team === u.team }));
+  return { valid, x, y, radius: SMOKE.radius, units };
+}
+
 /**
  * Ability buttons for a unit. Pass state as well to also check for targets
  * (e.g. "No cover adjacent"); without it only AP / charges / cooldowns are checked.
+ * Keys: grenade, smoke, aimed (marksman), breach (breacher), patch (medic),
+ * scan (recon), revive (team modes), hunker.
  */
 export function abilityInfo(u, state) {
   const out = [];
@@ -292,23 +390,46 @@ export function abilityInfo(u, state) {
     if (!ready && reason) e.reason = reason;
     out.push(e);
   };
-  const apReason = !u.alive ? 'Down' : u.ap < 1 ? 'No AP' : null;
+  const apReason = !u.alive ? 'Down' : u.downed ? 'Downed' : u.ap < 1 ? 'No AP' : null;
+  const cdReason = (cd) => (cd > 0 ? `Cooldown ${cd}` : apReason);
   {
     let reason = apReason || (u.items.frag < 1 ? 'No grenades' : null);
     if (!reason && state && grenadeTargets(state, u).size === 0) reason = 'No target';
     entry('grenade', !reason, reason, { charges: u.items.frag });
   }
+  {
+    const n = u.items.smoke || 0;
+    let reason = apReason || (n < 1 ? 'No smoke' : null);
+    if (!reason && state && smokeTargets(state, u).size === 0) reason = 'No target';
+    entry('smoke', !reason, reason, { charges: n });
+  }
   if (u.cls === 'marksman') {
     const cd = u.cooldowns.aimed;
-    let reason = cd > 0 ? `Cooldown ${cd}` : apReason;
+    let reason = cdReason(cd);
     if (!reason && state && !state.units.some((t) => aimedPreview(state, u, t))) reason = 'No target';
     entry('aimed', !reason, reason, { cooldown: cd });
   }
   if (u.cls === 'breacher') {
     const cd = u.cooldowns.breach;
-    let reason = cd > 0 ? `Cooldown ${cd}` : apReason;
+    let reason = cdReason(cd);
     if (!reason && state && breachTargets(state, u).size === 0) reason = 'No cover adjacent';
     entry('breach', !reason, reason, { cooldown: cd });
+  }
+  if (u.cls === 'medic') {
+    const cd = u.cooldowns.patch;
+    let reason = cdReason(cd);
+    if (!reason && state && patchTargets(state, u).size === 0) reason = 'Nobody hurt nearby';
+    entry('patch', !reason, reason, { cooldown: cd });
+  }
+  if (u.cls === 'recon') {
+    const cd = u.cooldowns.scan;
+    entry('scan', !cdReason(cd), cdReason(cd), { cooldown: cd });
+  }
+  if (!state || hasSquadmates(state, u)) {
+    let reason = apReason;
+    if (!reason && state && reviveTargets(state, u).size === 0) reason = 'No downed squadmate adjacent';
+    if (!reason && !state) reason = 'No downed squadmate adjacent';
+    entry('revive', !reason, reason, {});
   }
   entry('hunker', !apReason, apReason, {});
   return out;
@@ -318,35 +439,64 @@ export function abilityInfo(u, state) {
 
 function startTeamTurn(state) {
   const t = currentTeamId(state);
+  const events = [];
+  state.turnSerial++;
+  // This team's scans and smoke clouds run out as its turn begins.
+  if (state.reveals.some((r) => r.team === t)) {
+    state.reveals = state.reveals.filter((r) => r.team !== t);
+    events.push({ type: 'reveal_end', team: t });
+  }
+  clearSmokes(state, events, (c) => c.expiresTeam === t && c.expiresRound <= state.round);
   for (const id of state.teams[t].members) {
     const u = state.units[id];
     if (!u.alive) continue;
-    u.ap = u.maxAp;
     u.overwatch = false;
     u.hunkered = false;
-    if (u.cooldowns.aimed > 0) u.cooldowns.aimed--;
-    if (u.cooldowns.breach > 0) u.cooldowns.breach--;
+    u.ap = u.downed ? 0 : u.maxAp;
+    for (const k of Object.keys(u.cooldowns)) if (u.cooldowns[k] > 0) u.cooldowns[k]--;
   }
-  return [{ type: 'turn_start', team: t, round: state.round }];
+  events.push({ type: 'turn_start', team: t, round: state.round });
+  return events;
+}
+
+function clearSmokes(state, events, pred) {
+  if (!state.smokes.some(pred)) return;
+  state.smokes = state.smokes.filter((c) => {
+    if (!pred(c)) return true;
+    events.push({ type: 'smoke_clear', smokeId: c.id });
+    return false;
+  });
 }
 
 export function endTeamTurn(state) {
   if (state.winner !== null) return [];
   const events = [];
   const t = currentTeamId(state);
-  // The tide hurts anyone caught outside at the end of their turn.
-  for (const id of state.teams[t].members) {
-    const u = state.units[id];
+  const members = state.teams[t].members.map((id) => state.units[id]);
+  // Downed squadmates bleed out at the end of their own team's turn.
+  for (const u of members) {
+    if (!u.alive || !u.downed) continue;
+    if (u.downedAt === state.turnSerial) continue; // went down this very turn: the clock starts next turn
+    u.bleed--;
+    if (u.bleed <= 0) {
+      events.push({ type: 'bleed_out', id: u.id });
+      kill(state, u, u.downedBy !== null ? state.units[u.downedBy] : null, events);
+      if (state.winner !== null) return events;
+    }
+  }
+  // The tide hurts anyone caught outside at the end of their turn (and finishes the downed).
+  for (const u of members) {
     if (!u.alive) continue;
     u.ap = 0;
     if (!insideZone(state, u.x, u.y)) {
       const dmg = zoneDamage(state);
       u.hp -= dmg;
-      events.push({ type: 'zone_damage', id: u.id, dmg });
-      if (u.hp <= 0) kill(state, u, null, events);
+      const ev = { type: 'zone_damage', id: u.id, dmg, downed: false };
+      events.push(ev);
+      if (u.hp <= 0) ev.downed = dropUnit(state, u, null, events) === 'downed';
+      if (state.winner !== null) return events;
     }
   }
-  if (state.winner !== null) return events;
 
   // Advance to the next living team.
   let pos = state.turnPos + 1;
@@ -357,10 +507,13 @@ export function endTeamTurn(state) {
     state.order.push(state.order.shift()); // rotate who goes first each round
     pos = 0;
     events.push({ type: 'round_start', round: state.round });
+    // Smoke from a squad that has since been wiped never gets its expiry turn.
+    clearSmokes(state, events, (c) => c.expiresRound < state.round);
     if ((state.round - 1) % ZONE.shrinkEvery === 0) {
       const z = state.zone;
       z.r = Math.max(ZONE.minRadius, z.next);
-      z.next = Math.max(ZONE.minRadius, z.r - ZONE.step);
+      // Shrink in steps down to the final ring, hold it once, then flood everything.
+      z.next = z.r > ZONE.finalRadius ? Math.max(ZONE.finalRadius, z.r - ZONE.step) : ZONE.minRadius;
       z.stage++;
       events.push({ type: 'zone_shrink', r: z.r, next: z.next });
     }
@@ -394,27 +547,68 @@ function supplyDrop(state, events) {
   events.push({ type: 'supply_drop', crate: { ...crate } });
 }
 
-function kill(state, u, killer, events) {
+/**
+ * A unit has hit 0 HP. Downed if a squadmate is still standing (team modes),
+ * otherwise dead; a downed unit hit again dies. Returns 'downed' | 'dead'.
+ */
+function dropUnit(state, u, by, events) {
+  if (!u.alive) return 'dead';
+  const mateUp = !u.downed && state.teams[u.team].members.some((id) => id !== u.id && standing(state.units[id]));
+  if (mateUp) {
+    u.hp = 0;
+    u.downed = true;
+    u.bleed = BLEED_TURNS;
+    u.downedBy = by ? by.id : null;
+    u.downedAt = state.turnSerial;
+    u.ap = 0;
+    u.overwatch = false;
+    u.hunkered = false;
+    events.push({ type: 'downed', id: u.id, by: by ? by.id : null });
+    return 'downed';
+  }
+  kill(state, u, by, events);
+  return 'dead';
+}
+
+function markDead(state, u, killer, events) {
   u.hp = 0;
   u.alive = false;
+  u.downed = false;
+  u.bleed = 0;
+  u.ap = 0;
   u.overwatch = false;
   u.hunkered = false;
   if (killer && killer.team !== u.team) killer.kills++;
   events.push({ type: 'death', id: u.id, by: killer ? killer.id : null });
-  // Leftover medkits (or failing that, grenades) drop as a crate.
-  const drop = u.items.medkit > 0 ? 'medkit' : u.items.frag > 0 ? 'frag' : null;
+  // Leftover medkits (or failing that, grenades / smoke) drop as a crate.
+  const drop = u.items.medkit > 0 ? 'medkit' : u.items.frag > 0 ? 'frag' : u.items.smoke > 0 ? 'smoke' : null;
   if (drop && !state.crates.some((c) => !c.taken && c.x === u.x && c.y === u.y)) {
     const crate = { id: state.crates.length, x: u.x, y: u.y, type: drop, taken: false, dropped: true };
     state.crates.push(crate);
     events.push({ type: 'crate_drop', crate: { ...crate } });
   }
-  if (!teamAlive(state, u.team)) {
+}
+
+function kill(state, u, killer, events) {
+  if (!u.alive) return;
+  markDead(state, u, killer, events);
+  if (!teamAlive(state, u.team) && !state.eliminated.includes(u.team)) {
+    // Squad wipe: nobody left to revive the downed.
+    for (const id of state.teams[u.team].members) {
+      const m = state.units[id];
+      if (m.alive) markDead(state, m, m.downedBy !== null ? state.units[m.downedBy] : killer, events);
+    }
     state.eliminated.push(u.team);
+    if (state.reveals.some((r) => r.team === u.team)) {
+      state.reveals = state.reveals.filter((r) => r.team !== u.team);
+      events.push({ type: 'reveal_end', team: u.team });
+    }
     events.push({ type: 'team_out', team: u.team, place: state.teams.length - state.eliminated.length + 1 });
   }
   const alive = aliveTeams(state);
   if (alive.length <= 1 && state.winner === null) {
-    state.winner = alive.length ? alive[0] : -1;
+    // If the last squads fall together, the last one eliminated takes the win.
+    state.winner = alive.length ? alive[0] : state.eliminated[state.eliminated.length - 1];
     events.push({ type: 'game_over', winner: state.winner });
   }
 }
@@ -437,19 +631,23 @@ function resolveShot(state, s, t, { reaction = false, ability } = {}) {
     t.hp -= dmg;
   }
   s.missStreak = result === 'hit' ? 0 : Math.min(MISS_STREAK_CAP, s.missStreak + 1);
-  events.push({ type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction, ability, cover, flank });
-  if (t.hp <= 0) kill(state, t, s, events);
+  const ev = { type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction, ability, cover, flank, downed: false };
+  events.push(ev);
+  if (result !== 'miss' && (t.hp <= 0 || t.downed)) ev.downed = dropUnit(state, t, s, events) === 'downed';
   return events;
 }
 
-/** Explosive damage (ignores cover). Emits damage (+death) events. */
+/** Explosive damage (ignores cover). Emits damage (+downed/death) events. Stops once the match is decided. */
 function blastDamage(state, attacker, victims, base, source, events) {
-  for (const o of victims) {
-    if (!o.alive) continue;
+  // Enemies first, so a blast that also catches the thrower's squad settles the match in the thrower's favour.
+  const order = [...victims].sort((a, b) => (a.team === attacker.team) - (b.team === attacker.team));
+  for (const o of order) {
+    if (!o.alive || state.winner !== null) continue;
     const dmg = Math.max(1, base - o.armor);
     o.hp -= dmg;
-    events.push({ type: 'damage', id: o.id, dmg, source, by: attacker.id });
-    if (o.hp <= 0) kill(state, o, attacker, events);
+    const ev = { type: 'damage', id: o.id, dmg, source, by: attacker.id, downed: false };
+    events.push(ev);
+    if (o.hp <= 0 || o.downed) ev.downed = dropUnit(state, o, attacker, events) === 'downed';
   }
 }
 
@@ -473,28 +671,42 @@ function pickupCrate(state, u, events) {
   } else {
     if ((type === 'scope' || type === 'barrel' || type === 'armor') && u.mods[type] >= MOD_CAP) type = 'medkit';
     if (type === 'frag' && u.items.frag >= FRAG_CAP) type = 'medkit';
+    if (type === 'smoke' && u.items.smoke >= SMOKE_CAP) type = 'medkit';
     if (type === 'medkit') u.items.medkit++;
     else if (type === 'frag') u.items.frag++;
+    else if (type === 'smoke') u.items.smoke++;
     else if (type === 'armor') { u.mods.armor++; u.armor++; }
     else u.mods[type]++;
   }
   events.push({ type: 'crate', id: u.id, crate: crate.id, item: type });
 }
 
+function reviveUnit(t, hp) {
+  t.downed = false;
+  t.bleed = 0;
+  t.downedBy = null;
+  t.hp = Math.min(t.maxHp, hp);
+  t.ap = 0; // back up, but acts next turn
+}
+
 // ---------- actions ----------
 
 const fail = (error) => ({ ok: false, error, events: [] });
+const intXY = (a) => Number.isInteger(a.x) && Number.isInteger(a.y);
 
 export function act(state, unitId, action) {
   const u = state.units[unitId];
   if (state.winner !== null) return fail('Game over');
   if (!u || !u.alive) return fail('Unit is down');
+  if (u.downed) return fail('Unit is downed');
   if (u.team !== currentTeamId(state)) return fail('Not your turn');
+  if (!action || typeof action.type !== 'string') return fail('Unknown action');
   const events = [];
 
   switch (action.type) {
     case 'move': {
       if (u.ap < 1) return fail('No AP');
+      if (!intXY(action)) return fail('Unreachable');
       const S = state.map.size;
       const reach = moveOptions(state, u);
       const key = action.y * S + action.x;
@@ -509,18 +721,18 @@ export function act(state, unitId, action) {
         u.x = px; u.y = py;
         leg.push([px, py]);
         for (const e of state.units) {
-          if (!e.alive || !e.overwatch || e.team === u.team) continue;
+          if (!standing(e) || !e.overwatch || e.team === u.team) continue;
           if (!teamSeesUnit(state, e.team, u) || !inRangeAndLos(state, e, u)) continue;
           events.push({ type: 'move', id: u.id, path: leg });
           leg = [[px, py]];
           e.overwatch = false;
           events.push({ type: 'overwatch_trigger', id: e.id, target: u.id });
           events.push(...resolveShot(state, e, u, { reaction: true }));
-          if (!u.alive) break outer;
+          if (!standing(u) || state.winner !== null) break outer;
         }
       }
       if (leg.length > 1) events.push({ type: 'move', id: u.id, path: leg });
-      if (u.alive) pickupCrate(state, u, events);
+      if (standing(u)) pickupCrate(state, u, events);
       else u.ap = 0;
       return { ok: true, events };
     }
@@ -565,7 +777,7 @@ export function act(state, unitId, action) {
       if (u.ap < 1) return fail('No AP');
       if (u.items.frag < 1) return fail('No grenades');
       const { x, y } = action;
-      if (!Number.isInteger(x) || !Number.isInteger(y) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
+      if (!intXY(action) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
       u.ap--;
       u.items.frag--;
       events.push({ type: 'grenade', id: u.id, x, y, radius: FRAG.radius });
@@ -576,7 +788,22 @@ export function act(state, unitId, action) {
         const c = state.map.cover[ty * S + tx];
         if (c > 0) setCover(state, tx, ty, c - 1, events);
       }
-      if (!u.alive) u.ap = 0;
+      if (!standing(u)) u.ap = 0;
+      return { ok: true, events };
+    }
+    case 'smoke': {
+      if (u.ap < 1) return fail('No AP');
+      if ((u.items.smoke || 0) < 1) return fail('No smoke');
+      const { x, y } = action;
+      if (!intXY(action) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
+      u.ap--;
+      u.items.smoke--;
+      const cloud = {
+        id: state.nextSmokeId++, x, y, radius: SMOKE.radius, team: u.team,
+        expiresRound: state.round + 1, expiresTeam: u.team,
+      };
+      state.smokes.push(cloud);
+      events.push({ type: 'smoke', id: u.id, x, y, radius: SMOKE.radius, smokeId: cloud.id });
       return { ok: true, events };
     }
     case 'breach': {
@@ -584,7 +811,7 @@ export function act(state, unitId, action) {
       if (u.cooldowns.breach > 0) return fail('Cooldown');
       if (u.ap < 1) return fail('No AP');
       const { x, y } = action;
-      if (!Number.isInteger(x) || !Number.isInteger(y) || !breachTargets(state, u).has(y * state.map.size + x)) return fail('Bad target');
+      if (!intXY(action) || !breachTargets(state, u).has(y * state.map.size + x)) return fail('Bad target');
       u.ap--;
       u.cooldowns.breach = BREACH.cooldown;
       events.push({ type: 'breach', id: u.id, x, y });
@@ -592,6 +819,47 @@ export function act(state, unitId, action) {
       const victims = state.units.filter((o) => o.alive && o.team !== u.team
         && Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) <= BREACH.radius);
       blastDamage(state, u, victims, BREACH.dmg, 'breach', events);
+      return { ok: true, events };
+    }
+    case 'patch': {
+      if (u.cls !== 'medic') return fail('Medic only');
+      if (u.cooldowns.patch > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      const t = action.targetId === undefined ? u : state.units[action.targetId];
+      if (!t || !patchable(u, t)) return fail('Bad target');
+      u.ap--;
+      u.cooldowns.patch = PATCH.cooldown;
+      if (t.downed) {
+        reviveUnit(t, PATCH.reviveHp);
+        events.push({ type: 'patch', id: u.id, target: t.id, amount: t.hp });
+        events.push({ type: 'revive', id: t.id, by: u.id, hp: t.hp });
+      } else {
+        const amount = Math.min(PATCH.heal, t.maxHp - t.hp);
+        t.hp += amount;
+        events.push({ type: 'patch', id: u.id, target: t.id, amount });
+      }
+      return { ok: true, events };
+    }
+    case 'revive': {
+      if (u.ap < 1) return fail('No AP');
+      const t = state.units[action.targetId];
+      if (!t || !revivable(u, t)) return fail('Bad target');
+      u.ap--;
+      reviveUnit(t, REVIVE_HP);
+      events.push({ type: 'revive', id: t.id, by: u.id, hp: t.hp });
+      return { ok: true, events };
+    }
+    case 'scan': {
+      if (u.cls !== 'recon') return fail('Recon only');
+      if (u.cooldowns.scan > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      const { x, y } = action;
+      if (!scanTileOk(state, u, x, y)) return fail('Bad target');
+      u.ap--;
+      u.cooldowns.scan = SCAN.cooldown;
+      const ids = state.units.filter((o) => o.alive && o.team !== u.team && dist(o.x, o.y, x, y) <= SCAN.radius).map((o) => o.id);
+      state.reveals.push({ team: u.team, x, y, radius: SCAN.radius, ids });
+      events.push({ type: 'scan', id: u.id, x, y, radius: SCAN.radius, revealed: [...ids] });
       return { ok: true, events };
     }
     case 'hunker': {

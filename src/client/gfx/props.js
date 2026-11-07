@@ -150,7 +150,7 @@ export class PropField {
       const h = 1.02 + (this.map.wallHeight[k] - 0.95) * 1.0;
       const st = this.style[k];
       if (st === 2) return container(b, r, this.axis[k], this.lineEnd[k], P.containerCols[hash(this.lineId[k]) * P.containerCols.length | 0], 1.12);
-      if (st === 3) return pillar(b, r, h);
+      if (st === 3) { const v = hash(k * 13 + 5); return v < 0.5 ? pillar(b, r, h) : v < 0.78 ? kiosk(b, gb, r, h) : palletStack(b, r, h); }
       return wall(b, gb, r, nb, h, x, y, this);
     }
     // half cover
@@ -163,11 +163,15 @@ export class PropField {
     });
     if (wallNb) return stub(b, r, nb, x, y, this);
     const pick = hash(k * 31 + 7);
-    if (pick < 0.19) return crates(b, r);
-    if (pick < 0.36) return barrels(b, r);
-    if (pick < 0.53) return sandbags(b, r, nb);
-    if (pick < 0.68) return car(b, r);
-    if (pick < 0.8) return jersey(b, r, nb);
+    if (pick < 0.14) return crates(b, r);
+    if (pick < 0.26) return barrels(b, r);
+    if (pick < 0.39) return sandbags(b, r, nb);
+    if (pick < 0.51) return car(b, r);
+    if (pick < 0.61) return jersey(b, r, nb);
+    if (pick < 0.71) return boat(b, r);
+    if (pick < 0.78) return tires(b, r);
+    if (pick < 0.86) return nettedCrates(b, r);
+    if (pick < 0.92) return buoyPile(b, r);
     return rubble(b, r, false);
   }
 
@@ -454,4 +458,152 @@ function debrisScatter(b, r) {
     b.box(s * 1.4, 0.035 + r() * 0.03, s, (r() - 0.5) * 0.8, 0.02, (r() - 0.5) * 0.8, r() < 0.6 ? P.wallDark : P.plaster2, r() * 6);
   }
   b.box(0.5, 0.012, 0.4, (r() - 0.5) * 0.2, 0.006, (r() - 0.5) * 0.2, 0x3a3631, r() * 6);
+}
+
+
+// ---------- 2.0 prop variety ----------
+
+/** Beached rowboat, hull rolled on its side: half cover with a story. */
+function boat(b, r) {
+  const ry = r() * Math.PI * 2;
+  const rot = new THREE.Matrix4().makeRotationY(ry);
+  const old = b.parent;
+  b.setParent(old ? old.clone().multiply(rot) : rot);
+  const hull = jit(r, [P.teal, P.bone, 0x3e5f7d, P.rust][r() * 4 | 0], 0.08);
+  const inside = jit(r, P.wood, 0.08);
+  const keel = new THREE.Color(hull).multiplyScalar(0.7).getHex();
+  const tilt = 0.55;
+  // hull: tapered planks (bow at +x), rolled onto its side
+  for (let i = 0; i < 5; i++) {
+    const t = i / 4, w = 0.9 - Math.abs(t - 0.4) * 0.5;
+    b.box(w, 0.07, 0.07, 0.02 - t * 0.04, 0.08 + t * 0.07, -0.22 + t * 0.12, i === 4 ? P.bone : hull, 0, tilt);
+  }
+  b.box(0.82, 0.05, 0.36, 0, 0.08, 0.02, inside, 0, tilt); // floorboards
+  b.box(0.86, 0.06, 0.05, 0, 0.32, 0.12, keel, 0, tilt); // gunwale
+  b.box(0.08, 0.04, 0.34, -0.1, 0.17, 0.03, P.wood2, 0, tilt); // thwart
+  b.cone(0.14, 0.0, 0.2, 4, 0.48, 0.15, -0.02, hull, Math.PI / 4, 0, Math.PI / 2); // bow point
+  b.box(0.04, 0.3, 0.05, -0.42, 0.18, 0.05, keel, 0, tilt); // transom
+  // oar + rope
+  b.box(0.8, 0.025, 0.04, 0.05, 0.03, 0.38, P.wood, 0.3);
+  b.box(0.16, 0.02, 0.07, 0.42, 0.03, 0.47, P.wood, 0.3);
+  b.cyl(0.07, 0.04, 8, -0.32, 0.02, 0.36, 0xb59d6d);
+  kelpTuft(b, r, 0.3, -0.3);
+  b.setParent(old);
+}
+
+function tires(b, r) {
+  const n = 3 + (r() * 2 | 0);
+  for (let i = 0; i < n; i++) {
+    const x = (i % 2 ? 0.12 : -0.1) + (r() - 0.5) * 0.06, z = (r() - 0.5) * 0.12;
+    b.cyl(0.2, 0.11, 10, x, 0.055 + i * 0.1, z, P.rubber);
+    b.cyl(0.1, 0.112, 8, x, 0.055 + i * 0.1, z, 0x111416);
+  }
+  b.cyl(0.2, 0.11, 10, 0.28, 0.15, 0.25, P.rubber, r(), 0, 1.3); // one leaning
+  if (r() < 0.6) b.trap(0.5, 0.3, 0.2, -0.2, 0.15, 0.28, 0xb8673a, r()); // cone-ish wedge (faded hazard)
+}
+
+function nettedCrates(b, r) {
+  crate(b, r, 0.5, 0, 0, 0, r() * 0.4);
+  crate(b, r, 0.34, 0.12, 0.5, 0.05, r());
+  // fishing net draped over: thin dark boxes + floats
+  const net = 0x2f3b38;
+  for (let i = -2; i <= 2; i++) b.box(0.02, 0.012, 0.62, i * 0.12, 0.52, 0, net, 0, 0, 0.2);
+  for (let i = -2; i <= 2; i++) b.box(0.62, 0.012, 0.02, 0, 0.5, i * 0.12, net, 0, 0.15);
+  for (const [x, z] of [[-0.3, 0.3], [0.3, -0.28], [0.32, 0.3]]) b.sphere(0.045, x, 0.3 + r() * 0.2, z, r() < 0.5 ? P.rust : P.bone, 1, 1, 1, 6, 4);
+  b.box(0.6, 0.02, 0.25, 0.05, 0.02, 0.35, net, r());
+}
+
+function buoyPile(b, r) {
+  const cols = [P.rust, P.bone, P.teal];
+  b.cyl(0.24, 0.48, 9, -0.1, 0.24, -0.05, cols[r() * 3 | 0], 0, Math.PI / 2, 0.4);
+  b.cyl(0.25, 0.08, 9, -0.1, 0.24, -0.05, P.bone, 0, Math.PI / 2, 0.4);
+  b.sphere(0.17, 0.22, 0.17, 0.2, cols[r() * 3 | 0], 1, 1, 1, 8, 6);
+  b.sphere(0.14, 0.27, 0.42, 0.12, P.bone, 1, 1, 1, 8, 6);
+  b.cyl(0.22, 0.06, 10, 0.2, 0.03, -0.25, 0xb59d6d); // rope coil
+  b.cyl(0.12, 0.065, 8, 0.2, 0.031, -0.25, 0x4a3f2c);
+  kelpTuft(b, r, -0.3, 0.3);
+}
+
+/** Single full-cover tile: a rusted harbour kiosk with a lit sign. */
+function kiosk(b, gb, r, H) {
+  const body = jit(r, [0x8d9d95, P.plaster2, 0x7fa3a3][r() * 3 | 0]);
+  b.box(0.7, 0.18, 0.7, 0, 0.09, 0, P.wallConcrete);
+  b.box(0.62, H - 0.3, 0.62, 0, 0.18 + (H - 0.3) / 2, 0, body);
+  b.box(0.74, 0.08, 0.74, 0, H - 0.05, 0, P.steelDark);
+  b.box(0.46, 0.36, 0.64, 0, 0.62, 0, P.window); // shutters / window band
+  b.box(0.64, 0.36, 0.46, 0, 0.62, 0, P.window);
+  for (let i = 0; i < 4; i++) b.box(0.66, 0.025, 0.66, 0, 0.47 + i * 0.1, 0, P.steel);
+  b.box(0.3, 0.14, 0.02, 0, H - 0.2, 0.322, P.bone); // sign
+  if (r() < 0.6) gb.box(0.24, 0.08, 0.025, 0, H - 0.2, 0.325, P.windowGlow);
+  b.box(0.12, 0.3, 0.012, 0.2, 0.75, 0.315, P.rust2); // rust streak
+  rebar(b, r, 0.2, H, 0.1, 2);
+}
+
+function palletStack(b, r, H) {
+  const n = Math.round(H / 0.16);
+  for (let i = 0; i < n; i++) {
+    const ry = (r() - 0.5) * 0.16;
+    b.box(0.74, 0.04, 0.72, (r() - 0.5) * 0.05, 0.02 + i * 0.16, (r() - 0.5) * 0.05, jit(r, P.wood2), ry);
+    b.box(0.7, 0.1, 0.66, (r() - 0.5) * 0.04, 0.09 + i * 0.16, (r() - 0.5) * 0.04, jit(r, P.wood), ry);
+  }
+  b.box(0.8, H * 0.55, 0.04, 0, H * 0.62, 0.36, 0x46574f, 0, 0.06); // tarp hanging off one side
+  b.box(0.82, 0.05, 0.78, 0, n * 0.16 + 0.02, 0, 0x46574f, 0.1);
+}
+
+// ---------- open-ground decor (never taller than ~0.12: must not read as cover) ----------
+
+/**
+ * Low clutter on open, dry tiles: puddles, oil stains, shells and pebbles,
+ * driftwood, rope coils, road paint and manholes on concrete, kelp drifts on
+ * sand, traffic signs flattened on the ground, scattered planks. One merged mesh.
+ */
+export function buildDecor(map, cls, fields, wx, wz, seed) {
+  const S = map.size;
+  const b = new GeoBuilder(true);
+  const m4 = new THREE.Matrix4();
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const k = y * S + x;
+    if (map.cover[k]) continue;
+    const h = hash(k * 977 + (seed & 0xffff));
+    if (h > 0.3) continue;
+    const r = rng((k * 3571) ^ seed);
+    const type = cls.type[k];
+    m4.makeTranslation(wx(x), tileTop(type), wz(y));
+    b.setParent(m4);
+    const ox = (r() - 0.5) * 0.5, oz = (r() - 0.5) * 0.5;
+    const pick = r();
+    if (type === 0) {
+      // sand
+      if (pick < 0.3) { for (let i = 0; i < 4; i++) b.ico(0.03 + r() * 0.03, ox + (r() - 0.5) * 0.4, 0.01, oz + (r() - 0.5) * 0.4, r() < 0.5 ? P.bone : 0xb7ab92, 1, 0.5, 1, r() * 6); }
+      else if (pick < 0.55) b.box(0.55 + r() * 0.3, 0.05, 0.07, ox, 0.025, oz, 0x8a7a63, r() * 6, 0, (r() - 0.5) * 0.1); // driftwood
+      else if (pick < 0.75) kelpDrift(b, r, ox, oz);
+      else if (pick < 0.88) { b.cyl(0.13, 0.05, 10, ox, 0.025, oz, 0xb59d6d); b.cyl(0.06, 0.052, 8, ox, 0.026, oz, 0x6f5f45); }
+      else { b.box(0.3, 0.012, 0.3, ox, 0.006, oz, 0x8f8a7c, r() * 6); b.box(0.1, 0.02, 0.02, ox, 0.02, oz, P.rust2, r() * 6); }
+    } else if (type === 1) {
+      // concrete
+      if (pick < 0.25) b.box(0.08, 0.006, 0.7, ox * 0.4, 0.003, 0, P.bone, (x + y) % 2 ? 0 : Math.PI / 2); // road paint
+      else if (pick < 0.42) { b.cyl(0.2, 0.012, 12, ox, 0.006, oz, 0x575a56); b.cyl(0.16, 0.014, 12, ox, 0.007, oz, 0x6a6d68); }
+      else if (pick < 0.6) b.cyl(0.25 + r() * 0.15, 0.004, 10, ox, 0.002, oz, 0x5d605b, 0, 0, 0, 0.18 + r() * 0.12); // oil stain
+      else if (pick < 0.75) { b.box(0.34, 0.02, 0.24, ox, 0.012, oz, 0xc9c2ae, r() * 6, 0.05); b.box(0.3, 0.005, 0.04, ox, 0.024, oz, 0xa3502e, r() * 6); } // fallen sign
+      else if (pick < 0.88) for (let i = 0; i < 3; i++) b.box(0.08 + r() * 0.08, 0.03, 0.06 + r() * 0.06, ox + (r() - 0.5) * 0.3, 0.015, oz + (r() - 0.5) * 0.3, P.wallDark, r() * 6);
+      else { b.cone(0.07, 0.15, 0.13, 6, ox, 0.065, oz, 0xd28a3a); b.box(0.15, 0.015, 0.15, ox, 0.008, oz, 0x2a2a28); } // traffic cone
+    } else if (type === 2) {
+      if (pick < 0.5) b.box(0.5, 0.025, 0.1, ox, 0.012, oz, P.wood2, cls.dir[k] ? 0 : Math.PI / 2); // loose plank
+      else { b.cyl(0.12, 0.05, 10, ox, 0.025, oz, 0xb59d6d); }
+    } else {
+      // tiled floor (indoors): broken tiles, paper, a chair on its side
+      if (pick < 0.4) for (let i = 0; i < 3; i++) b.box(0.12, 0.012, 0.12, ox + (r() - 0.5) * 0.3, 0.006, oz + (r() - 0.5) * 0.3, 0xcfc6ae, r() * 6);
+      else if (pick < 0.7) { b.box(0.22, 0.02, 0.22, ox, 0.05, oz, P.wood, r() * 6, 1.2); b.box(0.22, 0.02, 0.2, ox + 0.1, 0.015, oz, P.wood, r() * 6); }
+      else b.box(0.18, 0.006, 0.24, ox, 0.003, oz, P.bone, r() * 6);
+    }
+  }
+  if (b.empty) return null;
+  const mat = patchWorld(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }), fields, 'decor');
+  const mesh = new THREE.Mesh(b.build({ ao: false }), mat);
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function kelpDrift(b, r, x, z) {
+  for (let i = 0; i < 5; i++) b.box(0.3 + r() * 0.2, 0.012, 0.05, x + (r() - 0.5) * 0.25, 0.008, z + (r() - 0.5) * 0.25, r() < 0.5 ? P.kelp : P.kelp2, r() * 6);
 }

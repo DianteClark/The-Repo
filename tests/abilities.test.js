@@ -7,45 +7,16 @@ import {
 import { hitChance, losDirect } from '../src/sim/rules.js';
 import { CLASSES, CRATE_LABEL, FRAG_CAP, MOD_CAP, COVER_PENALTY } from '../src/sim/constants.js';
 
-const S = 34;
+import { arena, S, setCover, coverAt } from './helpers.js';
 
-/**
- * Duos match on an empty map with only the listed units alive.
- * spec: { me:[x,y,cls], mate?:[x,y,cls], foes:[[x,y,cls],...] }
- */
-function arena({ me, mate, foes = [] }) {
-  const s = createGame({ seed: 77, mode: 'duos', noHuman: true });
-  s.map = { size: S, cover: new Uint8Array(S * S), wallHeight: new Float32Array(S * S) };
-  s.crates = [];
-  for (const u of s.units) u.alive = false;
-  const myTeam = s.teams[currentTeamId(s)];
-  const other = s.teams.find((t) => t.id !== myTeam.id);
-  const other2 = s.teams.find((t) => t.id !== myTeam.id && t.id !== other.id);
-  const place = (u, [x, y, cls = 'assault']) => {
-    const c = CLASSES[cls];
-    Object.assign(u, {
-      alive: true, x, y, cls, hp: c.hp, maxHp: c.hp, armor: c.armor, move: c.move, ap: u.maxAp,
-      weapon: { ...c.weapon, dmg: [...c.weapon.dmg] }, missStreak: 0, hunkered: false, overwatch: false,
-    });
-    u.mods = { scope: 0, barrel: 0, armor: 0 };
-    u.items = { medkit: 1, frag: cls === 'assault' ? 2 : 0 };
-    u.cooldowns = { aimed: 0, breach: 0 };
-    return u;
-  };
-  const a = place(s.units[myTeam.members[0]], me);
-  const b = mate ? place(s.units[myTeam.members[1]], mate) : null;
-  const pool = [...other.members, ...other2.members];
-  const es = foes.map((f, i) => place(s.units[pool[i]], f));
-  return { s, a, b, es };
-}
-const setCover = (s, x, y, c) => { s.map.cover[y * S + x] = c; };
-const coverAt = (s, x, y) => s.map.cover[y * S + x];
 
 test('new unit fields: frags, cooldowns, hunkered', () => {
   const s = createGame({ seed: 5, mode: 'solos' });
   for (const u of s.units) {
     assert.equal(u.items.frag, u.cls === 'assault' ? 2 : 0);
-    assert.deepEqual(u.cooldowns, { aimed: 0, breach: 0 });
+    assert.deepEqual(u.cooldowns, { aimed: 0, breach: 0, patch: 0, scan: 0 });
+    assert.equal(u.items.smoke, u.cls === 'recon' ? 1 : 0);
+    assert.equal(u.downed, false);
     assert.equal(u.hunkered, false);
   }
   assert.ok(CRATE_LABEL.frag && CRATE_LABEL.cache);
@@ -53,6 +24,7 @@ test('new unit fields: frags, cooldowns, hunkered', () => {
 
 test('grenade: 3x3 blast, friendly fire, armor, cover shredding, keeps the turn going', () => {
   const { s, a, b, es } = arena({ me: [6, 6], mate: [11, 11], foes: [[10, 10], [10, 11, 'breacher'], [14, 14]] });
+  es[1].armor = 1;
   setCover(s, 9, 10, 2); setCover(s, 11, 10, 1); setCover(s, 13, 13, 2);
   const r = act(s, a.id, { type: 'grenade', x: 10, y: 10 });
   assert.ok(r.ok, r.error);
@@ -60,7 +32,7 @@ test('grenade: 3x3 blast, friendly fire, armor, cover shredding, keeps the turn 
   assert.deepEqual(r.events[0], { type: 'grenade', id: a.id, x: 10, y: 10, radius: 1.5 });
   const dmg = Object.fromEntries(r.events.filter((e) => e.type === 'damage').map((e) => [e.id, e]));
   assert.equal(dmg[es[0].id].dmg, 3);
-  assert.equal(dmg[es[1].id].dmg, 2, 'breacher armor 1');
+  assert.equal(dmg[es[1].id].dmg, 2, 'armor 1');
   assert.equal(dmg[b.id].dmg, 3, 'friendly fire');
   assert.equal(dmg[es[0].id].source, 'explosion');
   assert.equal(dmg[es[2].id], undefined, 'outside the radius');
@@ -169,6 +141,7 @@ test('regular shot events carry cover/flank and flanks get +10 aim', () => {
 
 test('breach: blows adjacent cover open, damages adjacent enemies only, cooldown 3', () => {
   const { s, a, b, es } = arena({ me: [5, 5, 'breacher'], mate: [7, 4], foes: [[7, 5], [7, 6, 'breacher'], [9, 5]] });
+  es[1].armor = 1;
   setCover(s, 6, 5, 2);
   assert.deepEqual([...breachTargets(s, a)], [5 * S + 6]);
   const pv = breachPreview(s, a, 6, 5);
@@ -264,7 +237,7 @@ test('frag crates add a grenade, up to the cap', () => {
 test('abilityInfo reports readiness, charges, cooldowns and reasons', () => {
   const { s, a } = arena({ me: [5, 5, 'marksman'], foes: [[20, 20]] });
   let info = abilityInfo(a);
-  assert.deepEqual(info.map((x) => x.key), ['grenade', 'aimed', 'hunker']);
+  assert.deepEqual(info.map((x) => x.key), ['grenade', 'smoke', 'aimed', 'revive', 'hunker']);
   const g = info.find((x) => x.key === 'grenade');
   assert.equal(g.ready, false);
   assert.equal(g.reason, 'No grenades');
@@ -279,5 +252,7 @@ test('abilityInfo reports readiness, charges, cooldowns and reasons', () => {
   a.ap = 0;
   assert.equal(abilityInfo(a).find((x) => x.key === 'hunker').reason, 'No AP');
   const { a: br } = arena({ me: [5, 5, 'breacher'] });
-  assert.deepEqual(abilityInfo(br).map((x) => x.key), ['grenade', 'breach', 'hunker']);
+  assert.deepEqual(abilityInfo(br).map((x) => x.key), ['grenade', 'smoke', 'breach', 'revive', 'hunker']);
+  const solo = createGame({ seed: 3, mode: 'solos' });
+  assert.ok(!abilityInfo(solo.units[0], solo).some((x) => x.key === 'revive'), 'no revive in solos');
 });

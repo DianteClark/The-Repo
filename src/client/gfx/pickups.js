@@ -54,6 +54,7 @@ function sharedAssets() {
     bandMat: new THREE.MeshStandardMaterial({ color: TEAM.cyan, emissive: TEAM.cyan, emissiveIntensity: 2.2 }),
     chuteMat: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, side: THREE.DoubleSide, transparent: true }),
   };
+  for (const o of [box, band, cache, cacheBand, beamGeo, beamMat, shared.chuteGeo, shared.bodyMat, shared.bandMat, shared.chuteMat]) o.userData.shared = true;
   return shared;
 }
 
@@ -78,6 +79,7 @@ export function makeCrate(type) {
 export function makeChute() {
   const A = sharedAssets();
   const m = new THREE.Mesh(A.chuteGeo, A.chuteMat.clone());
+  m.material.userData = {};
   return m;
 }
 
@@ -124,6 +126,84 @@ export function buildScenery(S, seed, fields) {
       b.cone(0.18, 0.2, 0.9, 6, 0, 1.4, 0, P.steelDark);
     }
   }
+  // ---- shoreline: rocks hugging the cliff foot, rotten pier pilings, a beached
+  // fishing boat, a capsized hull, a half-drowned lighthouse and road signs
+  // poking out of the sea where the coast road used to run.
+  const I = new THREE.Matrix4();
+  b.setParent(I);
+  for (let i = 0; i < S * 2.2; i++) {
+    const side = i % 4, along = (r() - 0.5) * (S + 2), out = half + 0.4 + r() * 1.6;
+    const x = side === 0 ? out : side === 1 ? -out : along, z = side === 2 ? out : side === 3 ? -out : along;
+    const sz = 0.14 + r() * 0.32;
+    b.ico(sz, x, -0.12, z, r() < 0.6 ? 0x7d766b : 0x8f897c, 1.3, 0.55 + r() * 0.35, 1, r() * 6, r() * 0.4, 0, 0);
+  }
+  const edgePt = (off) => {
+    const side = (r() * 4) | 0, along = (r() - 0.5) * (S - 6);
+    return { x: side === 0 ? half + off : side === 1 ? -half - off : along, z: side === 2 ? half + off : side === 3 ? -half - off : along, side };
+  };
+  // pier: two rows of pilings running out to sea, a few deck planks left
+  for (let n = 0; n < 2; n++) {
+    const e = edgePt(0.5);
+    const dx = e.side === 0 ? 1 : e.side === 1 ? -1 : 0, dz = e.side === 2 ? 1 : e.side === 3 ? -1 : 0;
+    for (let i = 0; i < 7; i++) {
+      for (const o of [-0.45, 0.45]) {
+        const px = e.x + dx * i * 0.9 + (dz ? o : 0), pz = e.z + dz * i * 0.9 + (dx ? o : 0);
+        const h = 0.6 + r() * 0.5 - i * 0.05;
+        b.cyl(0.07, h + 0.8, 6, px, h / 2 - 0.4, pz, P.wood2, 0, (r() - 0.5) * 0.15, (r() - 0.5) * 0.15);
+      }
+      if (r() < 0.45) b.box(dx ? 0.22 : 1.1, 0.05, dx ? 1.1 : 0.22, e.x + dx * i * 0.9, 0.35 - i * 0.03, e.z + dz * i * 0.9, P.wood, 0, (r() - 0.5) * 0.2, (r() - 0.5) * 0.2);
+    }
+  }
+  // beached fishing boat leaning on the rocks
+  {
+    const e = edgePt(1.6);
+    const ry = Math.atan2(e.x, e.z) + (r() - 0.5);
+    const m = new THREE.Matrix4().makeRotationY(ry).setPosition(e.x, -0.1, e.z);
+    b.setParent(m);
+    const hull = [P.teal, 0x3e5f7d, P.rust][(r() * 3) | 0];
+    b.box(1.0, 0.55, 3.0, 0, 0.2, 0, hull, 0, 0.08, 0.35);
+    b.box(1.02, 0.12, 3.02, 0, 0.5, 0, P.bone, 0, 0.08, 0.35);
+    b.cone(0.5, 0.0, 0.9, 4, 0, 0.25, 1.85, hull, Math.PI / 4, Math.PI / 2, 0.35);
+    b.box(0.7, 0.6, 0.8, 0.12, 0.75, -0.6, P.bone, 0, 0.08, 0.35); // wheelhouse
+    b.box(0.72, 0.18, 0.5, 0.12, 0.85, -0.45, P.window, 0, 0.08, 0.35);
+    b.cyl(0.04, 1.6, 5, 0.3, 1.3, 0.3, P.steelDark, 0, 0.08, 0.35); // mast
+    b.box(0.04, 0.04, 1.2, 0.5, 1.6, 0.3, P.steelDark, 0, 0.08, 0.35);
+    b.box(0.5, 0.1, 0.5, -0.7, -0.05, 0.6, 0x2f3b38, 0.4); // net spilling out
+  }
+  // capsized hull further out
+  {
+    const e = edgePt(9 + r() * 5);
+    const m = new THREE.Matrix4().makeRotationY(r() * 6).setPosition(e.x, -0.25, e.z);
+    b.setParent(m);
+    b.box(2.0, 0.5, 6.0, 0, 0.15, 0, P.rust2, 0, 0, Math.PI - 0.15);
+    b.box(0.18, 0.3, 6.1, -0.05, 0.45, 0, P.rustDark, 0, 0, -0.15);
+    b.cone(1.0, 0.0, 1.8, 4, 0, 0.1, 3.8, P.rust2, Math.PI / 4, Math.PI / 2, Math.PI - 0.15);
+    b.cyl(0.3, 0.08, 8, 0.1, 0.5, -2.6, 0x5a4a3a, 0, Math.PI / 2, 0); // propeller hub
+  }
+  // half-drowned lighthouse on its own rock
+  {
+    const e = edgePt(14 + r() * 4);
+    const m = new THREE.Matrix4().makeTranslation(e.x, -0.4, e.z);
+    b.setParent(m);
+    b.ico(1.8, 0, -0.4, 0, P.cliff, 1.3, 0.7, 1.1, r() * 6);
+    b.cyl(0.62, 4.2, 10, 0, 2.3, 0, P.bone, 0, 0.06, 0);
+    for (const y of [1.2, 2.6]) b.cyl(0.64, 0.5, 10, 0, y, 0, P.rust, 0, 0.06, 0);
+    b.cyl(0.78, 0.12, 10, 0.25, 4.4, 0, P.steelDark, 0, 0.06, 0);
+    b.cyl(0.42, 0.55, 8, 0.27, 4.75, 0, P.window, 0, 0.06, 0);
+    b.cone(0.5, 0.0, 0.45, 8, 0.29, 5.25, 0, P.rust2, 0, 0.06, 0);
+  }
+  // coast-road signs sticking out of the water
+  for (let i = 0; i < 4; i++) {
+    const e = edgePt(2.2 + r() * 4);
+    const m = new THREE.Matrix4().makeRotationY(r() * 6).setPosition(e.x, -0.3, e.z);
+    b.setParent(m);
+    const lean = (r() - 0.5) * 0.4;
+    b.cyl(0.035, 1.6, 5, 0, 0.8, 0, P.steel, 0, lean, 0);
+    if (r() < 0.5) b.box(0.55, 0.38, 0.03, lean * -1.6, 1.5, 0, P.tealDeep, 0, lean, 0);
+    else b.cyl(0.26, 0.03, 3, lean * -1.6, 1.5, 0, P.bone, 0, Math.PI / 2 + lean, 0);
+    b.box(0.4, 0.06, 0.035, lean * -1.6, 1.5, 0.02, P.bone, 0, lean, 0);
+  }
+  b.setParent(null);
   const mat = patchWorld(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }), fields, 'scenery');
   const mesh = new THREE.Mesh(b.build({ stain: true }), mat);
   mesh.receiveShadow = false;

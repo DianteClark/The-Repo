@@ -14,12 +14,21 @@ const DEFAULTS = {
   cls: 'assault',
   loneWolf: false,
   seenHowTo: false,
+  seenTutorial: false, // first-launch tips on the title screen
+  haptics: true,       // navigator.vibrate on hits, kills and turn start
+  callsign: '',        // shown on squad cards and the end screen
 };
 
 let data = { ...DEFAULTS };
 try {
   const raw = localStorage.getItem(KEY);
-  if (raw) data = { ...DEFAULTS, ...JSON.parse(raw) };
+  if (raw) {
+    const saved = JSON.parse(raw);
+    // Only keep known keys with the right type, so a corrupt or old save can't break the UI.
+    for (const k of Object.keys(DEFAULTS)) {
+      if (saved && typeof saved[k] === typeof DEFAULTS[k]) data[k] = saved[k];
+    }
+  }
 } catch { /* private mode etc. */ }
 
 const listeners = new Set();

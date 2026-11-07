@@ -109,6 +109,7 @@ void main() {
   float alpha = mix(0.6, 0.97, smoothstep(0.0, 3.0, sd));
   alpha = max(alpha, foam);
 
+  col *= mix(1.0, cloudShade(p), 0.8);
   col = applyFog(col, p);
   // distance fog matching scene fog
   float fogF = smoothstep(uFogNear, uFogFar, vViewZ);

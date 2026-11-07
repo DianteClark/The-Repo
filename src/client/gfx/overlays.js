@@ -7,6 +7,7 @@ import { TEAM, P } from './palette.js';
 import { roundRect } from './util.js';
 
 const Y = 0.125; // above the water line
+const _m4 = new THREE.Matrix4();
 
 const TILE_VERT = /* glsl */`
 attribute float aEdge;
@@ -82,6 +83,18 @@ function shieldTex(full) {
   return t;
 }
 
+function reviveTex() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.beginPath(); g.arc(64, 64, 52, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(8,20,24,0.85)'; g.fill();
+  g.lineWidth = 8; g.strokeStyle = '#7fe9ff'; g.stroke();
+  g.fillStyle = '#7fe9ff';
+  g.fillRect(52, 28, 24, 72); g.fillRect(28, 52, 72, 24);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
 export class Overlays {
   constructor(world, overlay, wx, wz, S) {
     this.world = world; this.overlay = overlay; this.wx = wx; this.wz = wz; this.S = S;
@@ -89,7 +102,7 @@ export class Overlays {
     this.hl = tileMesh(S * S, 0.1);
     this.hl.position.y = Y;
     world.add(this.hl);
-    this.aoeTiles = tileMesh(64, 0.3);
+    this.aoeTiles = tileMesh(256, 0.3);
     this.aoeTiles.position.y = Y + 0.005;
     world.add(this.aoeTiles);
 
@@ -118,8 +131,34 @@ export class Overlays {
     const ad = new THREE.CircleGeometry(1, 48); ad.rotateX(-Math.PI / 2);
     this.aoeDisc = new THREE.Mesh(ad, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, opacity: 0.12 }));
     this.aoeDisc.visible = false; this.aoeDisc.renderOrder = 5;
-    world.add(this.aoeRing, this.aoeDisc);
+    // scan sweep wedge (radar arm) + smoke puff dots around the rim
+    const sg = new THREE.CircleGeometry(1, 24, 0, 0.9); sg.rotateX(-Math.PI / 2);
+    this.aoeSweep = new THREE.Mesh(sg, new THREE.ShaderMaterial({
+      uniforms: { uCol: { value: new THREE.Color(TEAM.cyan) } },
+      vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: 'uniform vec3 uCol; varying vec3 vP; void main(){ float a = atan(-vP.z, vP.x) / 0.9; gl_FragColor = vec4(uCol * 1.5, pow(clamp(a, 0.0, 1.0), 3.0) * 0.45 * smoothstep(1.0, 0.6, length(vP.xz))); }',
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    }));
+    this.aoeSweep.visible = false; this.aoeSweep.renderOrder = 6;
+    const pg = new THREE.CircleGeometry(0.16, 12); pg.rotateX(-Math.PI / 2);
+    this.aoePuffs = new THREE.InstancedMesh(pg, new THREE.MeshBasicMaterial({ color: 0xe8e4d8, transparent: true, opacity: 0.55, depthWrite: false }), 14);
+    this.aoePuffs.visible = false; this.aoePuffs.renderOrder = 6; this.aoePuffs.frustumCulled = false;
+    world.add(this.aoeRing, this.aoeDisc, this.aoeSweep, this.aoePuffs);
     this.aoe = null;
+
+    // revive markers: pulsing cyan "+" over downed squadmates that can be revived
+    this.reviveTex = reviveTex();
+    this.revives = [];
+    for (let i = 0; i < 6; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.reviveTex, transparent: true, depthTest: false, toneMapped: false }));
+      s.visible = false; s.renderOrder = 26; s.center.set(0.5, 0);
+      overlay.add(s);
+      const rg2 = new THREE.RingGeometry(0.5, 0.58, 40); rg2.rotateX(-Math.PI / 2);
+      const ring = new THREE.Mesh(rg2, new THREE.MeshBasicMaterial({ color: new THREE.Color(TEAM.cyan).multiplyScalar(1.4), transparent: true, depthWrite: false, toneMapped: false }));
+      ring.visible = false; ring.renderOrder = 6;
+      world.add(ring);
+      this.revives.push({ s, ring, id: -1 });
+    }
 
     // hover cursor
     const hg = new THREE.EdgesGeometry(new THREE.PlaneGeometry(0.96, 0.96)); hg.rotateX(-Math.PI / 2);
@@ -231,18 +270,23 @@ export class Overlays {
   }
 
   // ---------- AOE ----------
+  /** a: {x, y, radius, valid, kind?: 'frag'|'smoke'|'scan'} */
   setAoe(a, coverAt) {
     this.aoe = a;
     const m = this.aoeTiles;
-    if (!a) { m.count = 0; this.aoeRing.visible = this.aoeDisc.visible = false; return; }
+    if (!a) { m.count = 0; this.aoeRing.visible = this.aoeDisc.visible = this.aoeSweep.visible = this.aoePuffs.visible = false; return; }
+    const kind = a.kind === 'smoke' || a.kind === 'scan' ? a.kind : 'frag';
     const S = this.S, m4 = new THREE.Matrix4();
-    const col = new THREE.Color(a.valid ? 0xffc890 : 0x9aa4a6);
+    const base = { frag: 0xffc890, smoke: 0xe2ddd0, scan: TEAM.cyan }[kind];
+    const col = new THREE.Color(a.valid ? base : 0x9aa4a6);
     const R = Math.ceil(a.radius);
     const inside = (x, y) => x >= 0 && y >= 0 && x < S && y < S && Math.hypot(x - a.x, y - a.y) <= a.radius;
     const edge = m.geometry.attributes.aEdge.array;
+    m.material.uniforms.uFill.value = kind === 'scan' ? 0.12 : kind === 'smoke' ? 0.22 : 0.3;
     let i = 0;
+    const cap = m.instanceMatrix.count;
     for (let y = a.y - R; y <= a.y + R; y++) for (let x = a.x - R; x <= a.x + R; x++) {
-      if (!inside(x, y) || i >= 64) continue;
+      if (!inside(x, y) || i >= cap) continue;
       m4.makeTranslation(this.wx(x), coverAt && coverAt(x, y) ? 0.6 : 0, this.wz(y));
       m.setMatrixAt(i, m4); m.setColorAt(i, col);
       edge[i] = (inside(x + 1, y) ? 1 : 0) + (inside(x - 1, y) ? 2 : 0) + (inside(x, y + 1) ? 4 : 0) + (inside(x, y - 1) ? 8 : 0);
@@ -255,6 +299,16 @@ export class Overlays {
       o.position.set(this.wx(a.x), Y + 0.02, this.wz(a.y));
       o.scale.setScalar(a.radius + 0.08);
       o.material.color.copy(col).multiplyScalar(a.valid ? 1.6 : 1);
+    }
+    this.aoeDisc.material.opacity = kind === 'smoke' ? 0.2 : 0.12;
+    this.aoeKind = kind;
+    this.aoeSweep.visible = kind === 'scan' && a.valid;
+    this.aoeSweep.position.set(this.wx(a.x), Y + 0.03, this.wz(a.y));
+    this.aoeSweep.scale.setScalar(a.radius + 0.08);
+    this.aoePuffs.visible = kind === 'smoke';
+    if (kind === 'smoke') {
+      this.aoePuffs.material.color.copy(col);
+      this._aoeC = [this.wx(a.x), this.wz(a.y), a.radius + 0.08];
     }
   }
 
@@ -330,6 +384,39 @@ export class Overlays {
     if (this.endRing.visible) this.endRing.scale.setScalar(1 + Math.sin(this.time * 5) * 0.08);
     if (this.reticle.visible) { this.reticle.rotation.y += dt * 1.2; this.reticle.scale.setScalar(1 + Math.sin(this.time * 6) * 0.05); }
     if (this.aoeRing.visible) this.aoeRing.material.opacity = 0.7 + Math.sin(this.time * 6) * 0.3;
+    if (this.aoeSweep.visible) this.aoeSweep.rotation.y = -this.time * 2.6;
+    if (this.aoePuffs.visible && this._aoeC) {
+      const [cx, cz, r] = this._aoeC, n = this.aoePuffs.count;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 + this.time * 0.35;
+        const s = 0.8 + 0.35 * Math.sin(this.time * 2.2 + i * 1.7);
+        _m4.makeScale(s, 1, s); _m4.setPosition(cx + Math.cos(a) * r, Y + 0.025, cz + Math.sin(a) * r);
+        this.aoePuffs.setMatrixAt(i, _m4);
+      }
+      this.aoePuffs.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  // ---------- revive markers ----------
+  setRevive(ids) {
+    for (const r of this.revives) { r.id = -1; r.s.visible = false; r.ring.visible = false; }
+    if (!ids) return;
+    let i = 0;
+    for (const id of ids) { if (i >= this.revives.length) break; this.revives[i++].id = id; }
+  }
+  updateRevive(posOf) {
+    for (const r of this.revives) {
+      if (r.id < 0) continue;
+      const p = posOf(r.id);
+      if (!p) { r.s.visible = r.ring.visible = false; continue; }
+      const k = 0.5 + 0.5 * Math.sin(this.time * 5);
+      r.s.visible = r.ring.visible = true;
+      r.s.position.set(p.x, 1.42 + k * 0.08, p.z);
+      r.s.scale.set(0.62 + k * 0.06, 0.62 + k * 0.06, 1);
+      r.ring.position.set(p.x, Y + 0.03, p.z);
+      r.ring.scale.setScalar(1 + k * 0.15);
+      r.ring.material.opacity = 0.5 + k * 0.5;
+    }
   }
 }
 
@@ -347,7 +434,7 @@ export class Label {
     this.key = '';
   }
   draw(u, mine, hp, status) {
-    const key = [u.name, mine, hp, u.maxHp, u.armor, status.ow, status.hk, status.lw, u.team].join('|');
+    const key = [u.name, mine, hp, u.maxHp, u.armor, status.ow, status.hk, status.lw, u.team, status.dn ?? -1, status.rv ? 1 : 0].join('|');
     if (key === this.key) return;
     this.key = key;
     const g = this.c.getContext('2d');
@@ -375,6 +462,19 @@ export class Label {
     cx += g.measureText(tag).width + 8;
     if (status.ow) { drawEye(g, cx + 12, 26); cx += 28; }
     if (status.hk) { drawShield(g, cx + 10, 26); cx += 26; }
+    if (status.dn !== undefined && status.dn !== null) {
+      // downed: label reads DOWNED + bleed-out pips (turns left), no HP bar
+      g.font = '900 20px system-ui, -apple-system, "Segoe UI", sans-serif';
+      g.fillStyle = team;
+      g.fillText('DOWNED', x0 + 18, 56);
+      const bx = x0 + 18 + g.measureText('DOWNED').width + 10;
+      for (let i = 0; i < (status.dnMax || 2); i++) {
+        g.beginPath(); g.arc(bx + 9 + i * 22, 56, 7, 0, Math.PI * 2);
+        if (i < status.dn) { g.fillStyle = team; g.fill(); } else { g.lineWidth = 2.5; g.strokeStyle = team; g.stroke(); }
+      }
+      this.tex.needsUpdate = true;
+      return;
+    }
     // HP pips
     const n = u.maxHp, pw0 = W - 34, gap = 3;
     const pw = (pw0 - gap * (n - 1)) / n;

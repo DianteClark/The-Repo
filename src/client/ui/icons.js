@@ -47,6 +47,20 @@ export const ICON = {
   tap: S('<path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11"/><path d="M12 10.5V9.5a1.5 1.5 0 0 1 3 0v2a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-.7a6 6 0 0 1-4.7-2.3L4 15.3a1.5 1.5 0 0 1 2.3-1.9L9 15.5"/>'),
   warn: S('<path d="M12 3.5L22 20H2z"/><path d="M12 10v4.5M12 17.5v.01"/>'),
   trophy: S('<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H4.5a3 3 0 0 0 3.5 4M16 6h3.5a3 3 0 0 1-3.5 4"/><path d="M12 13v4M8 21h8M9.5 17h5v4h-5z"/>'),
+  patch: S('<path d="M4.5 9.5l5-5a3.5 3.5 0 0 1 5 0l5 5a3.5 3.5 0 0 1 0 5l-5 5a3.5 3.5 0 0 1-5 0l-5-5a3.5 3.5 0 0 1 0-5z"/><path d="M12 9v6M9 12h6"/>'),
+  scan: S('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5" opacity=".6"/><path d="M12 12l6.4-6.4"/><circle cx="15.5" cy="9" r="1.2" fill="currentColor"/><circle cx="8" cy="15" r="1" fill="currentColor"/>'),
+  smoke: S('<path d="M6.5 18a4 4 0 0 1-.6-7.95A5.5 5.5 0 0 1 16.6 8.5 4.5 4.5 0 0 1 17.5 18z"/><path d="M8 21.5h8M10 14.5c1-1 3-1 4 0" opacity=".7"/>'),
+  revive: S('<path d="M12 20.5s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.5a4.3 4.3 0 0 1 7.5 2.8c0 5.6-7.5 10.2-7.5 10.2z"/><path d="M7.5 13h2.5l1.2-2.5 1.8 5 1.3-2.5h2.2"/>'),
+  downed: S('<path d="M3 19h18"/><circle cx="6.5" cy="14.5" r="2.3"/><path d="M9 15.5l4-1.5 3 1.5 4-1"/><path d="M12.5 5v4M10.5 7h4" opacity=".8"/>'),
+  user: S('<circle cx="12" cy="8" r="4"/><path d="M4 21c.8-4.2 4-6.5 8-6.5s7.2 2.3 8 6.5"/>'),
+  vibrate: S('<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M3 8v8M21 8v8M11 18h2"/>'),
+  chevL: S('<path d="M15 4.5L7.5 12 15 19.5"/>'),
+  chevR: S('<path d="M9 4.5l7.5 7.5L9 19.5"/>'),
+  medal: S('<path d="M8 2.5h8l-2 6h-4z"/><circle cx="12" cy="15" r="6"/><path d="M12 12l.9 1.9 2 .3-1.5 1.4.4 2-1.8-1-1.8 1 .4-2-1.5-1.4 2-.3z" fill="currentColor" stroke="none"/>'),
+  target: S('<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/>'),
+  sparkle: S('<path d="M12 3l1.8 5.4L19 10l-5.2 1.7L12 17l-1.8-5.3L5 10l5.2-1.6z"/><path d="M19 16l.7 1.8 1.8.7-1.8.7L19 21l-.7-1.8-1.8-.7 1.8-.7z"/>'),
+  refresh: S('<path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20.5V16h-4.5"/>'),
+  bleed: S('<path d="M12 3s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11z"/><path d="M12 10v4.5l2.2 1.3"/>'),
 };
 
 // Class silhouettes: filled figures, used in the class picker, the unit card and the turn strip.
@@ -79,6 +93,26 @@ export const SILHOUETTE = {
       <path d="M17 27c0-3.5 3.5-6 7-6h12c3.5 0 7 2.5 7 6v20l-4 2v25h-7V53h-4v21h-7V49l-4-2z"/>
       <path d="M40 24h16a2 2 0 0 1 2 2v30a2 2 0 0 1-2 2H40z" opacity=".85"/>
       <rect x="44" y="30" width="10" height="3" rx="1" class="visor"/>
+    </g>`),
+  medic: SIL(`
+    <g fill="currentColor">
+      <circle cx="31" cy="13" r="7.8"/>
+      <rect x="24" y="10" width="14" height="3.3" rx="1.5" class="visor"/>
+      <path d="M21 26c0-3 3-5 6-5h10c3 0 6 2 6 5v20l-3 2v26h-6V52h-4v22h-6V48l-3-2z"/>
+      <path d="M8 27h14v17a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z" opacity=".85"/>
+      <path d="M13.6 31h2.8v3h3v2.8h-3v3h-2.8v-3h-3V34h3z" class="visor"/>
+      <path d="M33 34h19v3.5H44l-1 4h-3.5l.8-4H33z"/>
+      <rect x="40" y="37" width="3" height="6" rx="1"/>
+    </g>`),
+  recon: SIL(`
+    <g fill="currentColor">
+      <path d="M22 15c0-6 4.5-10 9.5-10S41 9 41 15v3H22z"/>
+      <rect x="25" y="12.5" width="13" height="3" rx="1.4" class="visor"/>
+      <path d="M21 27c0-3 3-5 6-5h10c3 0 6 2 6 5v19l-3 2v26h-6V52h-4v22h-6V48l-3-2z"/>
+      <rect x="11" y="23" width="9" height="13" rx="2" opacity=".8"/>
+      <path d="M6 18h18v2.4H6z" opacity=".9"/>
+      <circle cx="7" cy="17" r="2.6" opacity=".9"/><circle cx="23" cy="17" r="2.6" opacity=".9"/>
+      <path d="M30 33h28v3.5H45l-1.4 4.5h-3.8l1-4.5H30z"/>
     </g>`),
 };
 

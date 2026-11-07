@@ -58,9 +58,12 @@ export class WorldFields {
       uSunCol: { value: new THREE.Color(1, 0.8, 0.6) },
       uSkyCol: { value: new THREE.Color(0.6, 0.8, 0.8) },
       uZone: { value: new THREE.Vector4(0, 0, 99, 99) }, // world cx, cz, r, next
+      uCloud: { value: 0.2 },
     };
     this.fogAnimating = false;
   }
+
+  dispose() { this.fogTex.dispose(); this.tideTex.dispose(); this.noiseTex.dispose(); }
 
   /** vis: Uint8Array S*S of 0/1. */
   setFog(vis, instant) {
@@ -162,6 +165,7 @@ uniform float uTime;
 uniform float uStorm;
 uniform float uFogDark;
 uniform float uGridOff;
+uniform float uCloud;
 varying vec3 vWPos;
 float tideSD(vec2 p) {
   vec2 uv = (p - uTideMin) / uTideExt;
@@ -179,6 +183,12 @@ vec3 applyFog(vec3 c, vec2 p) {
   float l = dot(c, vec3(0.299, 0.587, 0.114));
   vec3 f = mix(vec3(l), c, 0.35) * uFogDark * vec3(0.78, 0.93, 1.12);
   return mix(f, c, v);
+}
+float cloudShade(vec2 p) {
+  // big soft cloud shadows drifting across the island
+  float c = texture2D(uNoise, p * 0.0009 + vec2(uTime * 0.00011, uTime * 0.00006)).g;
+  c = c * 0.6 + texture2D(uNoise, p * 0.0023 - vec2(uTime * 0.00008, 0.0)).b * 0.4;
+  return 1.0 - uCloud * 0.42 * smoothstep(0.45, 0.68, c);
 }
 float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float vnoise(vec2 p) { return texture2D(uNoise, (p + 0.5) * (1.0 / 256.0)).r; }
@@ -208,7 +218,7 @@ export function patchWorld(mat, fields, key, extra = {}) {
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FIELDS_GLSL + (extra.fragDecl || ''))
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + (extra.colorFrag || ''))
-      .replace('#include <opaque_fragment>', (extra.preOut || '') + '\noutgoingLight = applyFog(outgoingLight, vWPos.xz);\n#include <opaque_fragment>');
+      .replace('#include <opaque_fragment>', (extra.preOut || '') + '\noutgoingLight *= cloudShade(vWPos.xz);\noutgoingLight = applyFog(outgoingLight, vWPos.xz);\n#include <opaque_fragment>');
   };
   mat.customProgramCacheKey = () => 'tf-' + key;
   return mat;

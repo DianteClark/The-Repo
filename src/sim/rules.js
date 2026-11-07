@@ -1,5 +1,5 @@
 import {
-  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED,
+  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED, SMOKE,
 } from './constants.js';
 
 export const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
@@ -65,17 +65,34 @@ export function canSeeTile(map, ux, uy, x, y) {
   return dist(ux, uy, x, y) <= SIGHT && los(map, ux, uy, x, y);
 }
 
-/** Does any living member of `team` see the given tile? */
+/** Alive and not downed: can act, spot and take cover. */
+export const standing = (u) => u.alive && !u.downed;
+
+/** Does any standing member of `team` see the given tile? (Downed units don't spot.) */
 export function teamSeesTile(state, team, x, y) {
   for (const u of state.units) {
-    if (u.alive && u.team === team && canSeeTile(state.map, u.x, u.y, x, y)) return true;
+    if (u.team === team && standing(u) && canSeeTile(state.map, u.x, u.y, x, y)) return true;
   }
+  return false;
+}
+
+/** Is the unit tagged by an active Recon scan of `team`? */
+export function revealedTo(state, team, target) {
+  if (!state.reveals) return false;
+  for (const r of state.reveals) if (r.team === team && r.ids.includes(target.id)) return true;
   return false;
 }
 
 export function teamSeesUnit(state, team, target) {
   if (target.team === team) return true;
-  return teamSeesTile(state, team, target.x, target.y);
+  return revealedTo(state, team, target) || teamSeesTile(state, team, target.x, target.y);
+}
+
+/** The smoke cloud covering (x,y), if any. */
+export function smokeAt(state, x, y) {
+  if (!state.smokes) return null;
+  for (const c of state.smokes) if (dist(c.x, c.y, x, y) <= c.radius) return c;
+  return null;
 }
 
 export function weaponRange(u) {
@@ -96,12 +113,12 @@ export function isFlanked(map, tx, ty, ax, ay) {
 /**
  * Hit chance as an integer percentage, plus a breakdown for the UI.
  * opts.reaction: overwatch shot. opts.ability: 'aimed' for the Marksman's aimed shot.
- * Returns { chance, cover, flank, hunkered, notes }.
+ * Returns { chance, cover, flank, hunkered, smoke, notes }.
  */
 export function hitChance(state, shooter, target, { reaction = false, ability } = {}) {
   const d = dist(shooter.x, shooter.y, target.x, target.y);
   const range = weaponRange(shooter);
-  if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, notes: ['Out of range'] };
+  if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, smoke: false, notes: ['Out of range'] };
   const w = shooter.weapon;
   const notes = [];
   let aim = w.aim + shooter.mods.scope * 5;
@@ -122,6 +139,7 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
   if (w.closePenalty && d < 4) { aim -= 15; notes.push('Too close -15'); }
   const longP = Math.max(0, Math.round((d - range * 0.6) * 2));
   if (longP) { aim -= longP; notes.push('Long range -' + longP); }
+  if (smokeAt(state, target.x, target.y)) { aim -= SMOKE.defense; notes.push('Smoke -' + SMOKE.defense); }
   if (shooter.missStreak) {
     const b = shooter.missStreak * MISS_STREAK_BONUS;
     aim += b; notes.push('Miss streak +' + b);
@@ -129,7 +147,7 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
   if (ability === 'aimed') { aim += AIMED.aim; notes.push('Aimed +' + AIMED.aim); }
   if (reaction) { aim -= REACTION_PENALTY; notes.push('Reaction -' + REACTION_PENALTY); }
   const chance = Math.max(5, Math.min(95, Math.round(aim)));
-  return { chance, cover, flank, hunkered, notes };
+  return { chance, cover, flank, hunkered, smoke: !!smokeAt(state, target.x, target.y), notes };
 }
 
 /** BFS over 8 directions without cutting corners. Returns Map<tileKey, {d, prev}>. */
