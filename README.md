@@ -1,5 +1,7 @@
 # Tidefall (working title)
 
+**▶ Play now: https://dianteclark.github.io/The-Repo/**
+
 A 16-player, turn-based, XCOM-style battle royale that runs in the browser.
 One soldier per player. Rival salvage crews fight across a drowning archipelago
 while the storm tide (**the Surge**) floods the map from the edges in.
@@ -10,7 +12,7 @@ while the storm tide (**the Surge**) floods the map from the edges in.
 ## Play it
 
 - **Locally:** `npm start`, then open http://localhost:8080. Or use any static file server; there's no build step.
-- **Online:** turn on GitHub Pages under Settings → Pages → Source: **GitHub Actions**. The game then deploys on every push to `main`.
+- **Online:** https://dianteclark.github.io/The-Repo/ — every push to `main` redeploys it through GitHub Pages.
 
 **Controls:**
 - Tap a tile to move: cyan costs 1 AP, gold is a 2 AP dash.
