@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#14232a" />
+  <title>Tidefall — tactical battle royale</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- Menu -->
+  <div id="menu" class="overlay">
+    <div class="panel menu-panel">
+      <h1>TIDEFALL</h1>
+      <p class="sub">16-player turn-based tactical battle royale · rough draft v0.1</p>
+
+      <h3>Mode</h3>
+      <div class="choices" id="modeChoices"></div>
+      <label id="wolfRow" class="wolf hidden">
+        <input type="checkbox" id="wolfBox" />
+        <span><b>Volunteer as Lone Wolf</b> — spawn solo with +1 AP, +50% HP, +1 armor</span>
+      </label>
+
+      <h3>Class</h3>
+      <div class="choices" id="classChoices"></div>
+
+      <button id="playBtn" class="primary big">Deploy</button>
+      <button class="ghost" disabled title="Online lobbies are the next build">Join with invite code (next build)</button>
+      <p class="hint">Tap a tile to move · tap a visible enemy to aim · drag to pan · pinch or scroll to zoom</p>
+    </div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="topbar">
+      <div id="roundInfo"></div>
+      <div id="turnInfo"></div>
+      <div id="timerWrap"><div id="timerBar"></div><span id="timerText"></span></div>
+    </div>
+    <div id="feed"></div>
+    <div id="banner" class="hidden"></div>
+
+    <div id="camBtns">
+      <button id="rotL" title="Rotate left">⟲</button>
+      <button id="rotR" title="Rotate right">⟳</button>
+      <button id="focusBtn" title="Center on me">◎</button>
+      <button id="muteBtn" title="Sound">🔊</button>
+    </div>
+
+    <div id="targetPanel" class="panel hidden">
+      <div class="tp-head"><span id="tpName"></span><button id="tpClose" class="ghost small">✕</button></div>
+      <div class="tp-chance"><span id="tpChance"></span><small>hit</small><span id="tpGraze"></span></div>
+      <div id="tpDmg"></div>
+      <div id="tpNotes"></div>
+      <button id="fireBtn" class="primary">Fire (ends turn)</button>
+    </div>
+
+    <div id="bottom" class="panel">
+      <div id="unitCard"></div>
+      <div id="actions">
+        <button id="owBtn">Overwatch</button>
+        <button id="medBtn">Medkit</button>
+        <button id="endBtn" class="primary">End turn</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- End screen -->
+  <div id="endScreen" class="overlay hidden">
+    <div class="panel menu-panel">
+      <h1 id="endTitle"></h1>
+      <p id="endStats" class="sub"></p>
+      <button id="againBtn" class="primary big">Play again</button>
+    </div>
+  </div>
+
+  <script type="module" src="src/client/main.js"></script>
+</body>
+</html>

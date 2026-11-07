@@ -1,0 +1,11 @@
+{
+  "name": "tidefall",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn-based XCOM-style 16-player battle royale in the browser.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "start": "npx --yes serve -l 8080 ."
+  }
+}
