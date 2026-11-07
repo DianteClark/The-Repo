@@ -6,8 +6,7 @@ A 16-player, turn-based, XCOM-style battle royale that runs in the browser.
 One soldier per player. Rival salvage crews fight across a drowning archipelago
 while the storm tide (**the Surge**) floods the map from the edges in.
 
-> **Status: rough draft v0.1.** Single device against 15 bots. Online invite-code
-> lobbies are the next build.
+> **Status: v1.0.** Single device against 15 bots. Online invite-code lobbies are the next build.
 
 ## Play it
 
@@ -19,19 +18,19 @@ while the storm tide (**the Surge**) floods the map from the edges in.
 - Tap a visible enemy to aim, then **Fire**. Firing ends your turn.
 - Drag to pan the map. Pinch or scroll to zoom. ⟲ ⟳ rotate the camera.
 
-## What's in v0.1
+## What's in 1.0
 
-| Area | Draft rules |
+| Area | Details |
 | --- | --- |
 | Modes | Solos 16×1 · Duos 8×2 · Trios 5×3 + 1 **Lone Wolf** (+1 AP, +50% HP, +1 armor; volunteer in the menu) · Quads 4×4 |
-| Turns | Each squad gets **20 s**. Teammates act in the same window. Who goes first rotates each round. When time runs out, your unit goes on overwatch |
-| Actions | 2 AP: move, dash, shoot (ends turn), overwatch, medkit |
-| Combat | Half and full cover, flanking, step-out line of sight, graze band (near-misses do half damage), visible miss-streak bonus, seeded rolls |
-| Classes | Assault (rifle) · Marksman (long rifle) · Breacher (shotgun + shield) |
-| Gear | You drop in with your class weapon. Crates hold **supplies and upgrades only**: medkits, armor plates, scopes (+range/aim), heavy barrels (+damage) |
-| The Surge | Shrinks every 2 rounds. Cyan ring = next safe edge, foam ring = current edge. Tide damage grows over time and eventually covers everything |
-| Fog of war | Your squad shares vision. Gunfire you can't see shows as a rough ping |
-| Mobile | Touch controls, portrait layout, screen wake lock |
+| Turns | Each squad gets **20 s**. Teammates act in the same window, and the clock pauses while your own action animates. When time runs out, your unit goes on overwatch |
+| Actions | Move/dash · Shoot · Frag grenade (destroys cover) · Aimed Shot (Marksman) · Breach charge (Breacher) · Hunker · Overwatch · Medkit |
+| Combat | Destructible cover · flanking (+aim, +damage) · step-out line of sight · graze band · visible miss-streak bonus · seeded rolls |
+| Loot | You drop in with your class weapon. Crates hold medkits, armor, frags, scopes and barrels. **Supply caches** fall on rounds 4, 8 and 12 |
+| The Surge | The tide floods in every 2 rounds and its damage grows. The storm grade, rain and lightning intensify late game |
+| Graphics | Stylized diorama: ACES, soft shadows, bloom, animated water and tide, prop-based cover, debris, action cam, hit-stop. Auto quality (`?gfx=low\|high` to force) |
+| Audio | Fully synthesized weapons per class, explosions, radio-style UI, adaptive music |
+| UI | Tap to preview, tap again to confirm. Hit-% badges, grenade AoE preview, minimap, kill feed, turn-order strip, spectator mode, and keyboard shortcuts on desktop |
 
 ## Layout
 
@@ -43,7 +42,8 @@ src/sim/                  game rules: pure, deterministic, no DOM
   rules.js                line of sight, cover, hit chance, pathfinding
   map.js                  seeded map generation
   ai.js                   bots (same rules, same fog as players)
-src/client/               rendering, input, audio, wake lock
+src/client/               main.js (match flow), render.js + gfx/ (graphics), ui/ (HUD/menu), audio.js + sfx/
+docs/V1_SPEC.md           contract between sim, graphics, UI and audio
 tests/                    node:test suite incl. full bot-only matches
 ```
 

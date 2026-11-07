@@ -4,11 +4,12 @@
 import {
   TOTAL_PLAYERS, MAP_SIZE, BASE_AP, CLASSES, MODES, LONE_WOLF, GRAZE_BAND,
   MISS_STREAK_CAP, MEDKIT_HEAL, ZONE, CRATE_COUNT, CRATE_TABLE, MOD_CAP, CALLSIGNS,
+  FRAG, FRAG_CAP, AIMED, BREACH, START_FRAGS, SUPPLY_DROP_ROUNDS, ABILITY_TEXT, FLANK_DMG,
 } from './constants.js';
 import { generateMap } from './map.js';
 import { makeRng, roll } from './rng.js';
 import {
-  reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, dist,
+  reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, teamSeesTile, dist, los, inBounds, DIRS8,
 } from './rules.js';
 
 const CLASS_KEYS = Object.keys(CLASSES);
@@ -53,12 +54,13 @@ export function createGame(opts = {}) {
   const anchors = [];
   for (let t = 0; t < teams.length; t++) {
     let best = null;
-    for (let tries = 0; tries < 60; tries++) {
+    // Best-of-N candidates: maximise the distance to the nearest squad already placed.
+    for (let tries = 0; tries < 120; tries++) {
       const x = 2 + Math.floor(rng() * (S - 4)), y = 2 + Math.floor(rng() * (S - 4));
       if (map.cover[y * S + x]) continue;
       const gap = anchors.length ? Math.min(...anchors.map((a) => dist(a[0], a[1], x, y))) : 99;
       if (!best || gap > best.gap) best = { x, y, gap };
-      if (gap >= 8) break;
+      if (gap >= 14) break;
     }
     anchors.push([best.x, best.y]);
   }
@@ -120,7 +122,9 @@ function makeUnit(id, team, cls, name, isPlayer, isLoneWolf) {
     alive: true, overwatch: false, missStreak: 0, kills: 0,
     weapon: { ...c.weapon, dmg: [...c.weapon.dmg] },
     mods: { scope: 0, barrel: 0, armor: 0 },
-    items: { medkit: 1 },
+    items: { medkit: 1, frag: START_FRAGS[cls] || 0 },
+    cooldowns: { aimed: 0, breach: 0 },
+    hunkered: false,
   };
 }
 
@@ -163,17 +167,151 @@ export function moveOptions(state, u) {
   return reachable(state, u, steps);
 }
 
-export function shotPreview(state, shooter, target) {
-  if (!target.alive || target.team === shooter.team) return null;
+/** Damage range of a shot, after barrel, ability, flank and armor. */
+function shotDamage(shooter, target, hc, ability) {
+  const bonus = shooter.mods.barrel + (ability === 'aimed' ? AIMED.dmg : 0) + (hc.flank ? FLANK_DMG : 0);
+  const [mn, mx] = shooter.weapon.dmg;
+  return [Math.max(1, mn + bonus - target.armor), Math.max(1, mx + bonus - target.armor)];
+}
+
+/**
+ * Shot preview against a target, or null if there is no legal shot.
+ * { chance, cover, flank, hunkered, notes, graze, dmg:[min,max] }
+ */
+export function shotPreview(state, shooter, target, { ability } = {}) {
+  if (!target || !target.alive || target.team === shooter.team) return null;
   if (!teamSeesUnit(state, shooter.team, target)) return null;
   if (!inRangeAndLos(state, shooter, target)) return null;
-  const hc = hitChance(state, shooter, target);
-  const graze = Math.max(0, Math.min(GRAZE_BAND, 100 - hc.chance));
-  const [mn, mx] = shooter.weapon.dmg;
-  return {
-    ...hc, graze,
-    dmg: [Math.max(1, mn + shooter.mods.barrel - target.armor), Math.max(1, mx + shooter.mods.barrel - target.armor)],
+  const hc = hitChance(state, shooter, target, { ability });
+  const graze = hc.hunkered ? 0 : Math.max(0, Math.min(GRAZE_BAND, 100 - hc.chance));
+  return { ...hc, graze, dmg: shotDamage(shooter, target, hc, ability) };
+}
+
+/** Same shape as shotPreview with the aimed-shot modifiers applied (null if not usable). */
+export function aimedPreview(state, u, target) {
+  if (u.cls !== 'marksman') return null;
+  return shotPreview(state, u, target, { ability: 'aimed' });
+}
+
+const blastTiles = (map, x, y, r) => {
+  const out = [];
+  const R = Math.ceil(r);
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      if (Math.hypot(dx, dy) <= r && inBounds(map, x + dx, y + dy)) out.push([x + dx, y + dy]);
+    }
+  }
+  return out;
+};
+
+function grenadeTileOk(state, u, x, y) {
+  return inBounds(state.map, x, y)
+    && dist(u.x, u.y, x, y) <= FRAG.range
+    && teamSeesTile(state, u.team, x, y)
+    && los(state.map, u.x, u.y, x, y);
+}
+
+const canGrenade = (u) => u.alive && u.ap >= 1 && u.items.frag > 0;
+
+/** Valid grenade target tiles (Set of y*size+x). Empty if the unit can't throw right now. */
+export function grenadeTargets(state, u) {
+  const out = new Set();
+  if (!canGrenade(u)) return out;
+  const S = state.map.size;
+  const R = FRAG.range;
+  for (let y = Math.max(0, u.y - R); y <= Math.min(S - 1, u.y + R); y++) {
+    for (let x = Math.max(0, u.x - R); x <= Math.min(S - 1, u.x + R); x++) {
+      if (grenadeTileOk(state, u, x, y)) out.add(y * S + x);
+    }
+  }
+  return out;
+}
+
+/**
+ * What a grenade at (x,y) would do. Only lists units the thrower's team can see.
+ * { valid, x, y, radius, units:[{id, dmg, lethal, ally}], cover:[{x,y,from,to}] }
+ */
+export function grenadePreview(state, u, x, y) {
+  const valid = canGrenade(u) && grenadeTileOk(state, u, x, y);
+  const { map } = state;
+  const S = map.size;
+  const units = [];
+  const cover = [];
+  if (inBounds(map, x, y)) {
+    for (const o of state.units) {
+      if (!o.alive || dist(o.x, o.y, x, y) > FRAG.radius) continue;
+      if (!teamSeesUnit(state, u.team, o)) continue;
+      const dmg = Math.max(1, FRAG.dmg - o.armor);
+      units.push({ id: o.id, dmg, lethal: dmg >= o.hp, ally: o.team === u.team });
+    }
+    for (const [tx, ty] of blastTiles(map, x, y, FRAG.radius)) {
+      const from = map.cover[ty * S + tx];
+      if (from > 0) cover.push({ x: tx, y: ty, from, to: from - 1 });
+    }
+  }
+  return { valid, x, y, radius: FRAG.radius, units, cover };
+}
+
+const canBreach = (u) => u.alive && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0;
+
+/** Adjacent (8-way) tiles with cover the Breacher can blow open. Empty if not usable now. */
+export function breachTargets(state, u) {
+  const out = new Set();
+  if (!canBreach(u)) return out;
+  const { map } = state;
+  for (const [dx, dy] of DIRS8) {
+    const x = u.x + dx, y = u.y + dy;
+    if (inBounds(map, x, y) && map.cover[y * map.size + x] > 0) out.add(y * map.size + x);
+  }
+  return out;
+}
+
+/** Breach preview: enemies the team can see that would be hit. { valid, units:[{id,dmg,lethal}], cover:[{x,y,from,to}] } */
+export function breachPreview(state, u, x, y) {
+  const S = state.map.size;
+  const valid = breachTargets(state, u).has(y * S + x);
+  const units = [];
+  for (const o of state.units) {
+    if (!o.alive || o.team === u.team || Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) > BREACH.radius) continue;
+    if (!teamSeesUnit(state, u.team, o)) continue;
+    const dmg = Math.max(1, BREACH.dmg - o.armor);
+    units.push({ id: o.id, dmg, lethal: dmg >= o.hp });
+  }
+  const from = inBounds(state.map, x, y) ? state.map.cover[y * S + x] : 0;
+  return { valid, units, cover: from ? [{ x, y, from, to: 0 }] : [] };
+}
+
+/**
+ * Ability buttons for a unit. Pass state as well to also check for targets
+ * (e.g. "No cover adjacent"); without it only AP / charges / cooldowns are checked.
+ */
+export function abilityInfo(u, state) {
+  const out = [];
+  const entry = (key, ready, reason, extra) => {
+    const e = { key, ...ABILITY_TEXT[key], ready, ...extra };
+    if (!ready && reason) e.reason = reason;
+    out.push(e);
   };
+  const apReason = !u.alive ? 'Down' : u.ap < 1 ? 'No AP' : null;
+  {
+    let reason = apReason || (u.items.frag < 1 ? 'No grenades' : null);
+    if (!reason && state && grenadeTargets(state, u).size === 0) reason = 'No target';
+    entry('grenade', !reason, reason, { charges: u.items.frag });
+  }
+  if (u.cls === 'marksman') {
+    const cd = u.cooldowns.aimed;
+    let reason = cd > 0 ? `Cooldown ${cd}` : apReason;
+    if (!reason && state && !state.units.some((t) => aimedPreview(state, u, t))) reason = 'No target';
+    entry('aimed', !reason, reason, { cooldown: cd });
+  }
+  if (u.cls === 'breacher') {
+    const cd = u.cooldowns.breach;
+    let reason = cd > 0 ? `Cooldown ${cd}` : apReason;
+    if (!reason && state && breachTargets(state, u).size === 0) reason = 'No cover adjacent';
+    entry('breach', !reason, reason, { cooldown: cd });
+  }
+  entry('hunker', !apReason, apReason, {});
+  return out;
 }
 
 // ---------- turn flow ----------
@@ -185,6 +323,9 @@ function startTeamTurn(state) {
     if (!u.alive) continue;
     u.ap = u.maxAp;
     u.overwatch = false;
+    u.hunkered = false;
+    if (u.cooldowns.aimed > 0) u.cooldowns.aimed--;
+    if (u.cooldowns.breach > 0) u.cooldowns.breach--;
   }
   return [{ type: 'turn_start', team: t, round: state.round }];
 }
@@ -223,21 +364,47 @@ export function endTeamTurn(state) {
       z.stage++;
       events.push({ type: 'zone_shrink', r: z.r, next: z.next });
     }
+    if (SUPPLY_DROP_ROUNDS.includes(state.round)) supplyDrop(state, events);
   }
   state.turnPos = pos;
   events.push(...startTeamTurn(state));
   return events;
 }
 
+/** A cache lands on a random free open tile inside the next safe zone. */
+function supplyDrop(state, events) {
+  const { map, zone } = state;
+  const S = map.size;
+  const busy = new Set();
+  for (const o of state.units) if (o.alive) busy.add(o.y * S + o.x);
+  for (const c of state.crates) if (!c.taken) busy.add(c.y * S + c.x);
+  let spots = [];
+  for (const r of [zone.next, zone.r, Infinity]) {
+    spots = [];
+    for (let k = 0; k < S * S; k++) {
+      if (map.cover[k] || busy.has(k)) continue;
+      if (dist(k % S, (k / S) | 0, zone.x, zone.y) <= r) spots.push(k);
+    }
+    if (spots.length) break;
+  }
+  if (!spots.length) return;
+  const k = spots[Math.floor(roll(state.seed, state.rollCounter++) * spots.length)];
+  const crate = { id: state.crates.length, x: k % S, y: (k / S) | 0, type: 'cache', taken: false, dropped: true };
+  state.crates.push(crate);
+  events.push({ type: 'supply_drop', crate: { ...crate } });
+}
+
 function kill(state, u, killer, events) {
   u.hp = 0;
   u.alive = false;
   u.overwatch = false;
-  if (killer) killer.kills++;
+  u.hunkered = false;
+  if (killer && killer.team !== u.team) killer.kills++;
   events.push({ type: 'death', id: u.id, by: killer ? killer.id : null });
-  // Leftover medkits drop as a crate.
-  if (u.items.medkit > 0) {
-    const crate = { id: state.crates.length, x: u.x, y: u.y, type: 'medkit', taken: false, dropped: true };
+  // Leftover medkits (or failing that, grenades) drop as a crate.
+  const drop = u.items.medkit > 0 ? 'medkit' : u.items.frag > 0 ? 'frag' : null;
+  if (drop && !state.crates.some((c) => !c.taken && c.x === u.x && c.y === u.y)) {
+    const crate = { id: state.crates.length, x: u.x, y: u.y, type: drop, taken: false, dropped: true };
     state.crates.push(crate);
     events.push({ type: 'crate_drop', crate: { ...crate } });
   }
@@ -252,25 +419,46 @@ function kill(state, u, killer, events) {
   }
 }
 
-function resolveShot(state, s, t, { reaction = false } = {}) {
+function resolveShot(state, s, t, { reaction = false, ability } = {}) {
   const events = [];
-  const { chance } = hitChance(state, s, t, { reaction });
+  const hc = hitChance(state, s, t, { reaction, ability });
+  const { chance, cover, flank } = hc;
   const r = roll(state.seed, state.rollCounter++) * 100;
   let result = 'miss';
   if (r < chance) result = 'hit';
-  else if (r < chance + GRAZE_BAND) result = 'graze';
+  else if (!hc.hunkered && r < chance + GRAZE_BAND) result = 'graze';
   let dmg = 0;
   if (result !== 'miss') {
     const [mn, mx] = s.weapon.dmg;
-    let base = mn + Math.floor(roll(state.seed, state.rollCounter++) * (mx - mn + 1)) + s.mods.barrel;
+    const bonus = s.mods.barrel + (ability === 'aimed' ? AIMED.dmg : 0) + (flank ? FLANK_DMG : 0);
+    let base = mn + Math.floor(roll(state.seed, state.rollCounter++) * (mx - mn + 1)) + bonus;
     if (result === 'graze') base = Math.ceil(base / 2);
     dmg = Math.max(1, base - t.armor);
     t.hp -= dmg;
   }
   s.missStreak = result === 'hit' ? 0 : Math.min(MISS_STREAK_CAP, s.missStreak + 1);
-  events.push({ type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction });
+  events.push({ type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction, ability, cover, flank });
   if (t.hp <= 0) kill(state, t, s, events);
   return events;
+}
+
+/** Explosive damage (ignores cover). Emits damage (+death) events. */
+function blastDamage(state, attacker, victims, base, source, events) {
+  for (const o of victims) {
+    if (!o.alive) continue;
+    const dmg = Math.max(1, base - o.armor);
+    o.hp -= dmg;
+    events.push({ type: 'damage', id: o.id, dmg, source, by: attacker.id });
+    if (o.hp <= 0) kill(state, o, attacker, events);
+  }
+}
+
+function setCover(state, x, y, to, events) {
+  const S = state.map.size;
+  const from = state.map.cover[y * S + x];
+  if (from === to) return;
+  state.map.cover[y * S + x] = to;
+  events.push({ type: 'cover_change', x, y, from, to });
 }
 
 function pickupCrate(state, u, events) {
@@ -278,10 +466,18 @@ function pickupCrate(state, u, events) {
   if (!crate) return;
   crate.taken = true;
   let type = crate.type;
-  if ((type === 'scope' || type === 'barrel' || type === 'armor') && u.mods[type] >= MOD_CAP) type = 'medkit';
-  if (type === 'medkit') u.items.medkit++;
-  else if (type === 'armor') { u.mods.armor++; u.armor++; }
-  else u.mods[type]++;
+  if (type === 'cache') {
+    if (u.mods.scope < MOD_CAP) u.mods.scope++;
+    if (u.mods.barrel < MOD_CAP) u.mods.barrel++;
+    if (u.items.frag < FRAG_CAP) u.items.frag++;
+  } else {
+    if ((type === 'scope' || type === 'barrel' || type === 'armor') && u.mods[type] >= MOD_CAP) type = 'medkit';
+    if (type === 'frag' && u.items.frag >= FRAG_CAP) type = 'medkit';
+    if (type === 'medkit') u.items.medkit++;
+    else if (type === 'frag') u.items.frag++;
+    else if (type === 'armor') { u.mods.armor++; u.armor++; }
+    else u.mods[type]++;
+  }
   events.push({ type: 'crate', id: u.id, crate: crate.id, item: type });
 }
 
@@ -352,6 +548,58 @@ export function act(state, unitId, action) {
       const heal = Math.min(MEDKIT_HEAL, u.maxHp - u.hp);
       u.hp += heal;
       events.push({ type: 'heal', id: u.id, amount: heal });
+      return { ok: true, events };
+    }
+    case 'aimed': {
+      if (u.cls !== 'marksman') return fail('Marksman only');
+      if (u.cooldowns.aimed > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      const t = state.units[action.targetId];
+      if (!t || !aimedPreview(state, u, t)) return fail('No shot');
+      u.ap = 0;
+      u.cooldowns.aimed = AIMED.cooldown;
+      events.push(...resolveShot(state, u, t, { ability: 'aimed' }));
+      return { ok: true, events };
+    }
+    case 'grenade': {
+      if (u.ap < 1) return fail('No AP');
+      if (u.items.frag < 1) return fail('No grenades');
+      const { x, y } = action;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
+      u.ap--;
+      u.items.frag--;
+      events.push({ type: 'grenade', id: u.id, x, y, radius: FRAG.radius });
+      const victims = state.units.filter((o) => o.alive && dist(o.x, o.y, x, y) <= FRAG.radius);
+      blastDamage(state, u, victims, FRAG.dmg, 'explosion', events);
+      const S = state.map.size;
+      for (const [tx, ty] of blastTiles(state.map, x, y, FRAG.radius)) {
+        const c = state.map.cover[ty * S + tx];
+        if (c > 0) setCover(state, tx, ty, c - 1, events);
+      }
+      if (!u.alive) u.ap = 0;
+      return { ok: true, events };
+    }
+    case 'breach': {
+      if (u.cls !== 'breacher') return fail('Breacher only');
+      if (u.cooldowns.breach > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      const { x, y } = action;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || !breachTargets(state, u).has(y * state.map.size + x)) return fail('Bad target');
+      u.ap--;
+      u.cooldowns.breach = BREACH.cooldown;
+      events.push({ type: 'breach', id: u.id, x, y });
+      setCover(state, x, y, 0, events);
+      const victims = state.units.filter((o) => o.alive && o.team !== u.team
+        && Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) <= BREACH.radius);
+      blastDamage(state, u, victims, BREACH.dmg, 'breach', events);
+      return { ok: true, events };
+    }
+    case 'hunker': {
+      if (u.ap < 1) return fail('No AP');
+      u.ap = 0;
+      u.overwatch = false;
+      u.hunkered = true;
+      events.push({ type: 'hunker', id: u.id });
       return { ok: true, events };
     }
     case 'hold': {

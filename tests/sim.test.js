@@ -85,3 +85,40 @@ test('bot-only matches finish with a single winner in every mode', () => {
     }
   }
 });
+
+/** Same as simulate, but returns every event too. */
+function simulateLog(opts) {
+  const state = createGame(opts);
+  const log = [...state.startEvents];
+  let guard = 0;
+  while (state.winner === null && guard++ < 3000) {
+    const t = currentTeamId(state);
+    for (const id of state.teams[t].members) log.push(...botTakeTurn(state, id));
+    log.push(...endTeamTurn(state));
+  }
+  return { state, log };
+}
+
+test('same seed, same event stream (abilities and destruction included)', () => {
+  const a = simulateLog({ seed: 99, mode: 'trios', noHuman: true });
+  const b = simulateLog({ seed: 99, mode: 'trios', noHuman: true });
+  assert.deepEqual(a.log, b.log);
+  assert.deepEqual(a.state.map.cover, b.state.map.cover);
+});
+
+test('bots use grenades, aimed shots and breach charges; supply drops happen', () => {
+  const count = {};
+  for (const mode of Object.keys(MODES)) {
+    for (let seed = 1; seed <= 4; seed++) {
+      for (const e of simulateLog({ seed, mode, noHuman: true }).log) {
+        const k = e.type === 'shot' && e.ability ? 'aimed' : e.type;
+        count[k] = (count[k] || 0) + 1;
+        if (e.type === 'shot') {
+          assert.ok([0, 1, 2].includes(e.cover));
+          assert.equal(typeof e.flank, 'boolean');
+        }
+      }
+    }
+  }
+  for (const k of ['grenade', 'aimed', 'breach', 'cover_change', 'supply_drop', 'damage']) assert.ok(count[k] > 0, k);
+});

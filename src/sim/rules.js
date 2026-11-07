@@ -1,5 +1,5 @@
 import {
-  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY,
+  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED,
 } from './constants.js';
 
 export const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
@@ -87,18 +87,34 @@ export function inRangeAndLos(state, shooter, target) {
     && los(state.map, shooter.x, shooter.y, target.x, target.y);
 }
 
-/** Hit chance as an integer percentage, plus a breakdown for the UI. */
-export function hitChance(state, shooter, target, { reaction = false } = {}) {
+/** Is the target in cover from some direction, but not against this attacker? */
+export function isFlanked(map, tx, ty, ax, ay) {
+  if (coverVs(map, tx, ty, ax, ay) > 0) return false;
+  return tileCoverDirs(map, tx, ty).some((c) => c > 0);
+}
+
+/**
+ * Hit chance as an integer percentage, plus a breakdown for the UI.
+ * opts.reaction: overwatch shot. opts.ability: 'aimed' for the Marksman's aimed shot.
+ * Returns { chance, cover, flank, hunkered, notes }.
+ */
+export function hitChance(state, shooter, target, { reaction = false, ability } = {}) {
   const d = dist(shooter.x, shooter.y, target.x, target.y);
   const range = weaponRange(shooter);
-  if (d > range) return { chance: 0, cover: 0, notes: ['Out of range'] };
+  if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, notes: ['Out of range'] };
   const w = shooter.weapon;
   const notes = [];
   let aim = w.aim + shooter.mods.scope * 5;
+  if (shooter.mods.scope) notes.push('Scope +' + shooter.mods.scope * 5);
   const cover = coverVs(state.map, target.x, target.y, shooter.x, shooter.y);
-  aim -= COVER_PENALTY[cover];
-  if (cover === 0) { aim += FLANK_BONUS; notes.push('Flanked +' + FLANK_BONUS); }
-  else notes.push((cover === 2 ? 'Full' : 'Half') + ' cover -' + COVER_PENALTY[cover]);
+  const flank = cover === 0 && isFlanked(state.map, target.x, target.y, shooter.x, shooter.y);
+  const hunkered = !!target.hunkered && cover > 0;
+  if (cover) {
+    const p = COVER_PENALTY[cover] * (hunkered ? HUNKER_MULT : 1);
+    aim -= p;
+    notes.push((cover === 2 ? 'Full' : 'Half') + ' cover' + (hunkered ? ' (hunkered)' : '') + ' -' + p);
+  } else if (flank) { aim += FLANK_BONUS; notes.push('Flanked +' + FLANK_BONUS); }
+  else notes.push('Exposed');
   if (w.falloff) {
     const p = Math.max(0, Math.round(d) - 2) * 7;
     if (p) { aim -= p; notes.push('Shotgun falloff -' + p); }
@@ -110,9 +126,10 @@ export function hitChance(state, shooter, target, { reaction = false } = {}) {
     const b = shooter.missStreak * MISS_STREAK_BONUS;
     aim += b; notes.push('Miss streak +' + b);
   }
+  if (ability === 'aimed') { aim += AIMED.aim; notes.push('Aimed +' + AIMED.aim); }
   if (reaction) { aim -= REACTION_PENALTY; notes.push('Reaction -' + REACTION_PENALTY); }
   const chance = Math.max(5, Math.min(95, Math.round(aim)));
-  return { chance, cover, notes };
+  return { chance, cover, flank, hunkered, notes };
 }
 
 /** BFS over 8 directions without cutting corners. Returns Map<tileKey, {d, prev}>. */

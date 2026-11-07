@@ -3,82 +3,166 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#14232a" />
-  <title>Tidefall — tactical battle royale</title>
+  <meta name="theme-color" content="#0b171c" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="description" content="Tidefall: a 16-player turn-based tactical battle royale on a drowning archipelago." />
+  <title>Tidefall | Tactical battle royale</title>
+  <link rel="preload" href="src/client/ui/fonts/barlow-condensed-latin-800-normal.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="styles.css" />
   <script type="importmap">
-    { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+      }
+    }
   </script>
 </head>
-<body>
+<body class="in-menu">
   <canvas id="scene"></canvas>
+  <div id="vignette"></div>
 
-  <!-- Menu -->
-  <div id="menu" class="overlay">
-    <div class="panel menu-panel">
-      <h1>TIDEFALL</h1>
-      <p class="sub">16-player turn-based tactical battle royale · rough draft v0.1</p>
+  <!-- ============ MENU ============ -->
+  <div id="menu" class="screen">
+    <div class="menu-fx" aria-hidden="true">
+      <div class="scan"></div>
+      <svg class="waves" viewBox="0 0 1200 200" preserveAspectRatio="none">
+        <path class="w1" d="M0 120 C150 90 300 150 450 120 S750 90 900 120 S1100 150 1200 120 V200 H0Z" />
+        <path class="w2" d="M0 140 C150 115 300 165 450 140 S750 115 900 140 S1100 165 1200 140 V200 H0Z" />
+        <path class="w3" d="M0 160 C150 140 300 180 450 160 S750 140 900 160 S1100 180 1200 160 V200 H0Z" />
+      </svg>
+    </div>
 
-      <h3>Mode</h3>
-      <div class="choices" id="modeChoices"></div>
-      <label id="wolfRow" class="wolf hidden">
+    <header class="brand">
+      <div class="kicker"><span>16 players</span><span>Turn-based</span><span>Battle royale</span></div>
+      <h1 class="logo" aria-label="Tidefall"><span data-t="TIDEFALL">TIDEFALL</span></h1>
+      <p class="tagline">The tide takes everyone eventually. Be the last squad above it.</p>
+      <div class="brand-meta"><span class="dot"></span>Offline vs 15 bots<span class="sep"></span>v1.0</div>
+    </header>
+
+    <section class="loadout panel" aria-label="Loadout">
+      <div class="sec-h"><span class="n">01</span>Mode<small id="modeDesc"></small></div>
+      <div id="modeChoices" class="mode-grid"></div>
+      <label id="wolfRow" class="wolf collapsed">
         <input type="checkbox" id="wolfBox" />
-        <span><b>Volunteer as Lone Wolf</b> — spawn solo with +1 AP, +50% HP, +1 armor</span>
+        <span class="switch"><i></i></span>
+        <span class="wolf-txt"><b>Volunteer as Lone Wolf</b><small>Drop solo with +1 AP, +50% HP and +1 armor</small></span>
       </label>
 
-      <h3>Class</h3>
-      <div class="choices" id="classChoices"></div>
+      <div class="sec-h"><span class="n">02</span>Class</div>
+      <div id="classChoices" class="class-grid"></div>
+      <div id="classDetail" class="class-detail"></div>
 
-      <button id="playBtn" class="primary big">Deploy</button>
-      <button class="ghost" disabled title="Online lobbies are the next build">Join with invite code (next build)</button>
-      <p class="hint">Tap a tile to move · tap a visible enemy to aim · drag to pan · pinch or scroll to zoom</p>
+      <button id="playBtn" class="btn primary xl"><span>Deploy</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+      <div class="menu-row">
+        <button id="howBtn" class="btn ghost">How to play</button>
+        <button id="setBtn" class="btn ghost">Settings</button>
+      </div>
+      <button id="inviteBtn" class="btn ghost invite" aria-disabled="true">
+        <span>Join with invite code</span><span class="soon">Coming next</span>
+      </button>
+    </section>
+  </div>
+
+  <!-- ============ HUD ============ -->
+  <div id="hud" class="hidden">
+    <div id="top">
+      <div id="timer" class="timer ring idle">
+        <svg class="tring" viewBox="0 0 52 52" aria-hidden="true">
+          <circle class="trk" cx="26" cy="26" r="22" />
+          <circle id="timerArc" class="arc" cx="26" cy="26" r="22" />
+        </svg>
+        <div class="tbar"><i id="timerBarFill"></i></div>
+        <span id="timerText"></span>
+        <span class="tspin" aria-hidden="true"></span>
+      </div>
+      <div id="topMid">
+        <div id="turnInfo" class="turn-label"></div>
+        <div id="turnStrip"></div>
+      </div>
+      <button id="pauseBtn" class="icon-btn" title="Menu [Esc]"></button>
+    </div>
+    <div id="roundInfo" class="chips"></div>
+
+    <div id="sideR">
+      <div id="minimapWrap"><canvas id="minimap"></canvas><span class="mm-n">N</span></div>
+      <div id="camBtns">
+        <button id="rotL" class="icon-btn" title="Rotate left [Q]"></button>
+        <button id="rotR" class="icon-btn" title="Rotate right [E]"></button>
+        <button id="focusBtn" class="icon-btn" title="Find me [F]"></button>
+        <button id="muteBtn" class="icon-btn" title="Sound"></button>
+      </div>
+    </div>
+
+    <div id="feed"></div>
+    <div id="toasts"></div>
+    <div id="banner" class="banner"></div>
+
+    <div id="targetPanel" class="panel ctx hidden">
+      <div id="ctxBody"></div>
+      <div class="ctx-btns">
+        <button id="tpClose" class="btn ghost">Cancel</button>
+        <button id="fireBtn" class="btn primary">Confirm</button>
+      </div>
+    </div>
+
+    <div id="specBar" class="panel hidden">
+      <span class="spec-l"><i class="live"></i><span id="specText">Spectating</span></span>
+      <button id="speedBtn" class="btn ghost sm">2×</button>
+      <button id="skipBtn" class="btn primary sm">Skip to results</button>
+    </div>
+
+    <div id="dock" class="panel">
+      <div id="unitCard"></div>
+      <button id="endBtn" class="act end off"></button>
+      <div id="actions"></div>
     </div>
   </div>
 
-  <!-- HUD -->
-  <div id="hud" class="hidden">
-    <div id="topbar">
-      <div id="roundInfo"></div>
-      <div id="turnInfo"></div>
-      <div id="timerWrap"><div id="timerBar"></div><span id="timerText"></span></div>
-    </div>
-    <div id="feed"></div>
-    <div id="banner" class="hidden"></div>
-
-    <div id="camBtns">
-      <button id="rotL" title="Rotate left">⟲</button>
-      <button id="rotR" title="Rotate right">⟳</button>
-      <button id="focusBtn" title="Center on me">◎</button>
-      <button id="muteBtn" title="Sound">🔊</button>
-    </div>
-
-    <div id="targetPanel" class="panel hidden">
-      <div class="tp-head"><span id="tpName"></span><button id="tpClose" class="ghost small">✕</button></div>
-      <div class="tp-chance"><span id="tpChance"></span><small>hit</small><span id="tpGraze"></span></div>
-      <div id="tpDmg"></div>
-      <div id="tpNotes"></div>
-      <button id="fireBtn" class="primary">Fire (ends turn)</button>
-    </div>
-
-    <div id="bottom" class="panel">
-      <div id="unitCard"></div>
-      <div id="actions">
-        <button id="owBtn">Overwatch</button>
-        <button id="medBtn">Medkit</button>
-        <button id="endBtn" class="primary">End turn</button>
+  <!-- ============ END ============ -->
+  <div id="endScreen" class="screen hidden">
+    <div class="end-card panel">
+      <div id="endKicker" class="kicker"></div>
+      <div id="endPlace" class="end-place"></div>
+      <h1 id="endTitle"></h1>
+      <p id="endSub" class="end-sub"></p>
+      <div id="endStats" class="end-stats"></div>
+      <div class="end-btns">
+        <button id="againBtn" class="btn primary xl"><span>Play again</span></button>
+        <button id="loadoutBtn" class="btn ghost">Change loadout</button>
       </div>
     </div>
   </div>
 
-  <!-- End screen -->
-  <div id="endScreen" class="overlay hidden">
-    <div class="panel menu-panel">
-      <h1 id="endTitle"></h1>
-      <p id="endStats" class="sub"></p>
-      <button id="againBtn" class="primary big">Play again</button>
+  <!-- ============ SHEETS ============ -->
+  <div id="settingsSheet" class="sheet hidden">
+    <div class="sheet-card panel">
+      <div class="sheet-h"><h2>Settings</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <div id="settingsBody"></div>
+    </div>
+  </div>
+  <div id="howSheet" class="sheet hidden">
+    <div class="sheet-card panel wide">
+      <div class="sheet-h"><h2>How to play</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <div id="howBody" class="how-grid"></div>
+      <button class="btn primary" data-close>Got it</button>
+    </div>
+  </div>
+  <div id="pauseSheet" class="sheet hidden">
+    <div class="sheet-card panel narrow">
+      <div class="sheet-h"><h2>Paused</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <p class="sheet-note" id="pauseNote">Your turn timer is paused.</p>
+      <div class="pause-btns">
+        <button class="btn primary" data-close>Resume</button>
+        <button id="pSettings" class="btn ghost">Settings</button>
+        <button id="pHow" class="btn ghost">How to play</button>
+        <button id="pQuit" class="btn ghost danger">Leave match</button>
+      </div>
     </div>
   </div>
 
+  <div id="bootErr" class="hidden"></div>
   <script type="module" src="src/client/main.js"></script>
 </body>
 </html>
