@@ -2,16 +2,19 @@
 import { createGame, currentTeamId, endTeamTurn } from '../src/sim/game.js';
 import { CLASSES } from '../src/sim/constants.js';
 
-export const S = 34;
+export const S = 44;
 
 /**
  * Duos match on an empty map with only the listed units alive.
  * spec: { me:[x,y,cls], mate?:[x,y,cls], foes:[[x,y,cls],...], mode? }
  * foes alternate squads: es[0] & es[2] are squadmates, as are es[1] & es[3].
  */
-export function arena({ me, mate, foes = [], mode = 'duos' }) {
-  const s = createGame({ seed: 77, mode, noHuman: true });
-  s.map = { size: S, cover: new Uint8Array(S * S), wallHeight: new Float32Array(S * S) };
+export function arena({ me, mate, foes = [], mode = 'duos', stage = 'harbor' }) {
+  const s = createGame({ seed: 77, mode, stage, noHuman: true });
+  s.map = {
+    size: S, cover: new Uint8Array(S * S), terrain: new Uint8Array(S * S), explosive: new Uint8Array(S * S),
+    wallHeight: new Float32Array(S * S), sight: s.map.sight, stage: s.map.stage,
+  };
   s.crates = [];
   for (const u of s.units) u.alive = false;
   const myTeam = s.teams[currentTeamId(s)];

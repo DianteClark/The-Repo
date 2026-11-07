@@ -2,10 +2,13 @@
 // callsign, career strip) plus the settings / how-to / tutorial sheets.
 // Pure DOM; main.js owns the match and passes callbacks in.
 
-import { ICON, SILHOUETTE } from './icons.js';
+import { ICON } from './icons.js';
 import { settings } from './settings.js';
 import { career, resetCareer } from './career.js';
 import { hapticsSupported, buzz } from './haptics.js';
+import { badgeSVG } from './badges.js';
+import * as M from './meta.js';
+import { stageList, stageArt, stageIcon } from './stages.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -23,7 +26,7 @@ const ABILITY_FALLBACK = {
   breach: { name: 'Breach Charge', desc: 'Blow apart adjacent cover: the tile opens up and enemies within 1 tile take 4 damage. 3-round cooldown.' },
   patch: { name: 'Patch', desc: 'Heal yourself or an adjacent ally for 5, or revive a downed ally at 4 HP. 1 AP, 2-round cooldown.' },
   scan: { name: 'Scan', desc: 'Reveal every unit within 5 tiles of a point up to 12 tiles away, through walls, until your next turn.' },
-  smoke: { name: 'Smoke Grenade', desc: 'A 3×3 cloud that gives +25 defense to anyone inside until your next turn.' },
+  smoke: { name: 'Smoke Grenade', desc: 'A 3×3 cloud that hides anyone inside from enemies more than a tile away, until your next turn. Shots into or out of smoke take -20 aim. Does not end your turn.' },
   hunker: { name: 'Hunker Down', desc: 'Doubles your cover and blocks grazes until your next turn.' },
 };
 
@@ -68,7 +71,7 @@ export const cleanCallsign = (s) => String(s || '').toUpperCase().replace(/[^A-Z
 
 // ------------------------------------------------------------------ menu
 
-export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnter, qualityNow, onReplayTutorial }) {
+export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnter, qualityNow, onReplayTutorial, onShop, onLocker }) {
   const click = (fn) => (e) => { onClick?.(); fn(e); };
   const classKeys = () => Object.keys(CLASSES);
 
@@ -77,6 +80,10 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
   $('setBtn').innerHTML = ICON.gear;
   document.querySelector('#menu .cs-ic').innerHTML = ICON.user;
   $('csDice').innerHTML = ICON.refresh;
+  document.querySelector('#shopBtn .mb-ic').innerHTML = ICON.shop;
+  document.querySelector('#lockerBtn .mb-ic').innerHTML = ICON.locker;
+  $('shopBtn').onclick = click(() => onShop?.());
+  $('lockerBtn').onclick = click(() => onLocker?.());
 
   // ---- modes
   function renderModes() {
@@ -105,7 +112,8 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
   let lastIdx = classKeys().indexOf(settings.cls);
   const stage = document.querySelector('#classCarousel .car-stage');
   stage.innerHTML = classKeys().map((k) => `<div class="car-slide" data-cls="${k}">
-      <div class="car-sil">${SILHOUETTE[k] || ''}</div>
+      <div class="car-sil"></div>
+      <div class="car-tier"></div>
       <div class="car-name"><b>${esc(CLASSES[k].name)}</b><small>${esc(CLASSES[k].weapon.name)}</small></div>
     </div>`).join('');
   document.querySelector('#classCarousel .prev').innerHTML = ICON.chevL;
@@ -127,6 +135,20 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     if (Math.abs(dx) > 34 && Math.abs(dx) > Math.abs(dy) * 1.2) { step(dx < 0 ? 1 : -1); e.preventDefault(); }
   });
   car.addEventListener('pointercancel', () => { sx = null; });
+
+  let badgeSig = '';
+  function refreshBadges() {
+    const sig = classKeys().map((k) => M.classProgress(k).tier).join('') + settings.cls;
+    if (sig === badgeSig) return;
+    badgeSig = sig;
+    for (const sl of stage.children) {
+      const k = sl.dataset.cls;
+      const p = M.classProgress(k);
+      // Only the selected slide animates (Legend); the rest stay static to save work.
+      sl.querySelector('.car-sil').innerHTML = badgeSVG(k, p.tier, { size: 104, animated: k === settings.cls });
+      sl.querySelector('.car-tier').innerHTML = `<span class="tier-pill t${p.tier}">${p.name}</span>`;
+    }
+  }
 
   function layoutCarousel() {
     const ks = classKeys();
@@ -160,13 +182,15 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
       b.dataset.cls = k;
       b.setAttribute('role', 'tab');
       b.setAttribute('aria-selected', String(k === settings.cls));
-      b.innerHTML = `<span class="ct-sil">${SILHOUETTE[k] || ''}</span><b>${esc(c.name)}</b>`;
+      b.innerHTML = `<span class="ct-sil">${badgeSVG(k, M.classProgress(k).tier, { size: 26, animated: false, title: false })}</span><b>${esc(c.name)}</b>`;
       b.onclick = () => pick(k);
       b.onpointerenter = () => onHover?.();
       cc.appendChild(b);
     }
     $('classCount').textContent = `${idx + 1} / ${ks.length}`;
+    refreshBadges();
     layoutCarousel();
+    const P = M.classProgress(settings.cls);
     const c = CLASSES[settings.cls];
     const info = CLASS_INFO[settings.cls] || { role: c.desc };
     const abText = (key) => ({ ...(ABILITY_FALLBACK[key] || {}), ...((K?.ABILITY_TEXT || {})[key] || {}) });
@@ -181,6 +205,11 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     ].join('');
     const det = $('classDetail');
     det.innerHTML = `
+      <div class="cd-prestige t${P.tier}" title="Class prestige: earn XP by playing this class">
+        <span class="cdp-tier">${P.name}</span>
+        <span class="xpbar"><i style="--w:${Math.round(P.frac * 100)}%"></i></span>
+        <span class="cdp-xp">${P.next === null ? 'Max tier' : `${P.toNext.toLocaleString('en-US')} XP to ${M.TIER_NAMES[P.tier + 1]}`}</span>
+      </div>
       <div class="cd-body">
         <div class="cd-name">${esc(c.name)}<span>${esc(info.role || '')}</span></div>
         <p class="cd-desc">${esc(c.desc || '')}</p>
@@ -192,6 +221,36 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     det.classList.remove('from-l', 'from-r');
     void det.offsetWidth;
     if (dir) det.classList.add(dir > 0 ? 'from-r' : 'from-l');
+  }
+
+  // ---- stages
+  const STAGES = stageList(K);
+  if (settings.stage !== 'random' && !STAGES.some((x) => x.key === settings.stage)) settings.stage = 'random';
+  function renderStages() {
+    const row = $('stageChoices');
+    const opts = [...STAGES, { key: 'random', name: 'Random', tagline: 'Let the tide decide.', twist: 'A different stage every drop.', short: 'Any stage', icon: 'dice' }];
+    row.innerHTML = opts.map((st) => `<button class="stage-card st-${st.key}${settings.stage === st.key ? ' sel' : ''}" data-stage="${st.key}" role="radio" aria-checked="${settings.stage === st.key}" title="${esc(st.tagline)}">
+        ${stageArt(st.key)}<span class="st-meta"><b>${esc(st.name)}</b><small>${stageIcon(st)}${esc(st.short || '')}</small></span></button>`).join('');
+    row.querySelectorAll('.stage-card').forEach((b) => {
+      b.onclick = click(() => { settings.stage = b.dataset.stage; renderStages(); });
+      b.onpointerenter = () => onHover?.();
+    });
+    const cur = opts.find((x) => x.key === settings.stage) || opts[opts.length - 1];
+    $('stageDesc').textContent = cur.name;
+    $('stageDetail').innerHTML = `<span class="sd-ic">${stageIcon(cur)}</span><div><b>${esc(cur.tagline)}</b><p>${esc(cur.twist)}</p></div>`;
+    // Keep the chosen card in view on narrow, scrolling rows.
+    const sel = row.querySelector('.sel');
+    if (sel && row.scrollWidth > row.clientWidth) {
+      const l = sel.offsetLeft - (row.clientWidth - sel.offsetWidth) / 2;
+      row.scrollTo?.({ left: l, behavior: 'smooth' });
+    }
+  }
+
+  // ---- wallet
+  function renderWallet() {
+    $('menuSalvage').innerHTML = `${ICON.coin}<b>${M.salvage().toLocaleString('en-US')}</b><small>Salvage</small>`;
+    const cheapest = Math.min(...M.SLOTS.flatMap((sl) => M.catalog()[sl.key].filter((i) => !i.isDefault && !M.owns(sl.key, i.id)).map((i) => M.priceOf(i))), Infinity);
+    $('shopDot').classList.toggle('hidden', !(M.salvage() >= cheapest));
   }
 
   // ---- callsign
@@ -266,11 +325,15 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     m.classList.remove('hidden');
     m.classList.toggle('intro', fromSplash);
     renderCareer();
+    renderWallet();
+    renderStages();
   }
 
   renderModes();
   renderClasses();
   renderCareer();
+  renderWallet();
+  renderStages();
   buildHowTo();
   initSettingsSheet({ onClick, qualityNow, onReplayTutorial: () => { closeSheet('settingsSheet'); openTutorial(); onReplayTutorial?.(); }, onResetCareer: renderCareer });
   initTutorial(onClick);
@@ -282,7 +345,8 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     sh.addEventListener('keydown', (e) => trapFocus(e, sh));
   }
   return {
-    renderModes, renderClasses, renderCareer, showMenu, enter,
+    renderModes, renderClasses, renderCareer, renderWallet, renderStages, showMenu, enter,
+    refreshMeta: () => { badgeSig = ''; renderClasses(); renderWallet(); },
     splashOpen: () => !splash.classList.contains('hidden'),
     showSplash: () => { splash.classList.remove('hidden', 'leaving'); $('menu').classList.add('hidden'); },
   };
@@ -367,6 +431,7 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
       ${row('Quality', `Auto picks for your device${autoNote}. Low drops shadows and post-FX`, seg('quality', [['auto', 'Auto'], ['high', 'High'], ['low', 'Low']], settings.quality))}
       ${row('Cinematic camera', 'Action cam on shots and kills', seg('cinematic', [[true, 'On'], [false, 'Off']], settings.cinematic))}
       ${row('Camera follow', 'Track whoever is acting', seg('follow', [[true, 'On'], [false, 'Off']], settings.follow))}
+      ${row('Cover fade', 'Fade walls and crates while you pick a move', seg('coverFade', [[true, 'On'], [false, 'Off']], settings.coverFade))}
       <div class="set-group">Gameplay</div>
       ${row('Turn timer', 'How the 20s clock is shown', seg('timer', [['ring', 'Ring'], ['bar', 'Bar']], settings.timer))}
       ${row('Enemy turns', 'Playback speed of bot actions', seg('botSpeed', [['normal', 'Normal'], ['fast', 'Fast']], settings.botSpeed))}
@@ -374,7 +439,7 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
       <div class="set-group">Data</div>
       <div class="set-btns">
         <button id="setTut" class="btn ghost sm">${ICON.book}Replay tutorial</button>
-        <button id="setReset" class="btn ghost sm danger">${ICON.refresh}${Date.now() - confirmReset < 3000 ? 'Tap again to wipe' : 'Reset career'}</button>
+        <button id="setReset" class="btn ghost sm danger">${ICON.refresh}${Date.now() - confirmReset < 3000 ? 'Tap again to wipe' : 'Reset career stats'}</button>
       </div>`;
     body.querySelectorAll('.seg').forEach((s) => {
       s.querySelectorAll('button').forEach((b) => {
@@ -397,7 +462,7 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
     $('setTut').onclick = () => { onClick?.(); onReplayTutorial?.(); };
     $('setReset').onclick = () => {
       onClick?.();
-      if (Date.now() - confirmReset < 3000) { resetCareer(); confirmReset = 0; onResetCareer?.(); toastFn?.('Career stats wiped', 'info'); } else confirmReset = Date.now();
+      if (Date.now() - confirmReset < 3000) { resetCareer(); confirmReset = 0; onResetCareer?.(); toastFn?.('Career stats wiped. Prestige, Salvage and items are kept', 'info'); } else confirmReset = Date.now();
       render();
     };
   };
@@ -411,19 +476,26 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
 // ------------------------------------------------------------------ how to play
 
 function buildHowTo() {
-  const card = (ic, title, text) => `<div class="how"><span class="how-ic">${ICON[ic]}</span><div><b>${title}</b><p>${text}</p></div></div>`;
+  const card = (ic, title, text, cls = '') => `<div class="how ${cls}"><span class="how-ic">${ICON[ic]}</span><div><b>${title}</b><p>${text}</p></div></div>`;
   $('howBody').innerHTML = [
     card('clock', '20-second turns', 'Squads take turns. Your soldier has <b>2 AP</b>. When the clock runs out you go on overwatch automatically.'),
-    card('tap', 'Tap, then tap again', 'Tap a tile to preview the route and the cover you will have there. Tap it again, or press <b>Confirm</b>, to commit. Cyan tiles cost 1 AP; gold is a 2 AP dash.'),
+    card('tap', 'Tap, then tap again', 'Tap a tile to preview the route and the cover you will have there. Tap it again, or press <b>Confirm</b>, to commit. Cyan tiles cost 1 AP; gold is a 2 AP dash. Walls and crates <b>fade</b> while you pick a move, leaving shield outlines on the ground.'),
     card('shield', 'Cover is life', 'Shields show half and full cover at your destination. Shots from an open side <b>flank</b> you for +10 aim.'),
-    card('shoot', 'Shooting', 'Pick <b>Shoot</b> and every target shows its hit chance. Tap one to see graze odds and damage, then fire. Firing ends your turn. Near-misses graze for half damage.'),
+    card('shoot', 'Shooting ends your turn', 'Pick <b>Shoot</b> and every target shows its hit chance. Tap one to see graze odds and damage, then fire. <b>Firing always ends your turn</b>, so move first. Near-misses graze for half damage.'),
     card('grenade', 'Frags, Aimed Shot, Breach', 'Grenades blast a 3×3 area and wreck cover, friendly fire included. Marksmen line up Aimed Shots; Breachers blow cover apart.'),
+    card('smoke', 'Smoke hides you', 'Anyone inside a smoke cloud is <b>invisible</b> to enemies more than a tile away. Shots into or out of smoke take <b>-20 aim</b>. Throwing smoke does not end your turn.'),
     card('patch', 'Medic: Patch', 'Heal yourself or an adjacent squadmate for 5, or pick a downed one straight back up at 4 HP.'),
-    card('scan', 'Recon: Scan and Smoke', 'Scan reveals everyone within 5 tiles of a point, through walls, until your next turn. Smoke gives +25 defense to anyone inside.'),
+    card('scan', 'Recon: Scan', 'Scan reveals everyone within 5 tiles of a point, through walls and smoke, until your next turn.'),
     card('revive', 'Downed, not out', 'In squad modes a soldier at 0 HP goes <b>down</b>. Any adjacent squadmate can revive for 1 AP. Downed soldiers bleed out after 2 of their turns, and any hit finishes them.'),
     card('hunker', 'Hunker and Overwatch', 'Hunker doubles your cover until your next turn. Overwatch fires at the first enemy that moves in your sight.'),
     card('tide', 'The tide rises', 'Every 2 rounds the water closes in. The <span class="c-cyan">cyan ring</span> is the next safe edge. Ending your turn in the water hurts, and it gets worse.'),
+    card('stage', 'Five stages, five twists', '<b>Drowned Harbor</b>: the classic. <b>Kelp Shallows</b>: weed beds hide you. <b>Rig Graveyard</b>: barrels explode. <b>Night Spires</b>: dark, and gunfire lights flares. <b>Surge Point</b>: the safe zone drifts.', 'wide'),
+    card('kelp', 'Kelp', 'Standing in kelp hides you from anyone more than <b>3 tiles</b> away and gives -10 aim against you. It is not cover: a close shooter still sees you in the open.'),
+    card('barrelx', 'Explosive barrels', 'Red-banded barrels deal <b>4 damage</b> in a 3×3 when a frag, breach or blast hits them, and they chain. In Shoot mode you can fire at one: 1 AP, always hits, ends your turn.'),
+    card('flare', 'Night and flares', 'At night you see 6 tiles. Firing lights a <b>flare</b> over the shooter: every squad can see them until their next turn. Shoot, then expect company.'),
+    card('drift', 'Drifting zone', 'On Surge Point the safe circle moves each time it shrinks. Watch the dashed <span class="c-cyan">cyan ring</span> on the minimap and rotate early.'),
     card('crate', 'Crates and supply drops', 'Crates hold medkits, armor, scopes, heavy barrels, frags and smoke. Supply caches land inside the next ring on rounds 4, 8 and 12.'),
+    card('medal', 'Prestige and Salvage', 'Every match earns <b>XP for the class you played</b>: placement, kills, damage and revives. Its badge grows through Recruit, Veteran, Elite, Master and Legend. You also earn <b>Salvage</b> to spend in the Shop on skins, kill effects and drop-ins.'),
     `<div class="how keys"><span class="how-ic">${ICON.gear}</span><div><b>Keyboard</b><p><kbd>1</kbd>–<kbd>9</kbd> actions · <kbd>Space</kbd> end turn · <kbd>Q</kbd>/<kbd>E</kbd> rotate · <kbd>Tab</kbd> next target · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> cancel · <kbd>F</kbd> find me · <kbd>R</kbd> revive</p></div></div>`,
   ].join('');
 }
@@ -431,14 +503,20 @@ function buildHowTo() {
 // ------------------------------------------------------------------ tutorial
 
 const TUT = [
-  { ic: 'tap', title: 'Tap, then tap again', art: 'move', text: 'Tap a tile to <b>preview</b> your route and the cover waiting there. Tap the same tile again to <b>commit</b>. Cyan tiles cost 1 AP, gold tiles are a 2 AP dash.' },
+  { ic: 'tap', title: 'Tap, then tap again', art: 'move', text: 'Tap a tile to <b>preview</b> your route and the cover waiting there. Tap the same tile again to <b>commit</b>. Cover fades while you choose, so every tile stays readable.' },
   { ic: 'shield', title: 'Cover is life', art: 'cover', text: 'Full cover blocks 40 aim, half cover 20. Enemies on an open side <b>flank</b> you: +10 aim and extra damage. Hunker to double your cover.' },
-  { ic: 'shoot', title: 'Make every AP count', art: 'shoot', text: 'You get <b>2 AP</b> and 20 seconds. Moving costs AP; <b>shooting ends your turn</b>. Frags, smoke, Patch and Scan cost 1 AP and let you keep going.' },
+  { ic: 'shoot', title: 'Firing ends your turn', art: 'shoot', text: 'You get <b>2 AP</b> and 20 seconds. Move first: <b>shooting always ends your turn</b>. Frags, smoke, Patch and Scan cost 1 AP and let you keep going.' },
+  { ic: 'smoke', title: 'Smoke hides you', art: 'smoke', text: 'Inside smoke, enemies more than a tile away <b>can\'t see you</b>. Shots into or out of it take <b>-20 aim</b>. Use it to cross open ground.' },
   { ic: 'revive', title: 'Nobody left behind', art: 'revive', text: 'In squad modes, 0 HP means <b>downed</b>, not dead. Stand next to a downed squadmate and press <b>Revive</b>. They bleed out after 2 of their turns.' },
+  { ic: 'stage', title: 'Every stage has a twist', art: 'stages', text: '<b>Kelp</b> hides you beyond 3 tiles. <b>Barrels</b> explode and chain. At <b>night</b>, firing lights a flare over you. On <b>Surge Point</b> the safe zone drifts.' },
   { ic: 'tide', title: 'The tide rises', art: 'tide', text: 'Every 2 rounds the safe ring shrinks. The <span class="c-cyan">cyan ring</span> shows where it goes next. Be the last squad above the water.' },
+  { ic: 'medal', title: 'Badges grow with you', art: 'prestige', text: 'Each class earns its own XP. Its badge climbs from <b>Recruit</b> to an animated <b>Legend</b>. Salvage from every match buys skins, kill effects and drop-ins.' },
 ];
 
 function tutArt(kind) {
+  if (kind === 'prestige') {
+    return `<div class="tut-art tut-badges" aria-hidden="true">${[0, 2, 4].map((t, i) => `<span style="--i:${i}">${badgeSVG(['assault', 'medic', 'recon'][i], t, { size: i === 2 ? 96 : 76, title: false })}<small>${M.TIER_NAMES[t]}</small></span>`).join('')}</div>`;
+  }
   // Small schematic illustrations (SVG), coloured with the reserved palette.
   const grid = Array.from({ length: 5 }, (_, y) => Array.from({ length: 7 }, (_, x) => `<rect x="${x * 30 + 6}" y="${y * 22 + 6}" width="26" height="18" rx="3" class="t-tile"/>`).join('')).join('');
   const you = (x, y) => `<g class="t-you" transform="translate(${x},${y})"><circle r="8"/><circle r="13" class="t-pulse"/></g>`;
@@ -446,13 +524,19 @@ function tutArt(kind) {
   const body = {
     move: `${[[1, 2], [2, 2], [3, 1], [3, 2], [2, 1], [2, 3], [3, 3], [4, 2]].map(([x, y]) => `<rect x="${x * 30 + 6}" y="${y * 22 + 6}" width="26" height="18" rx="3" class="t-reach"/>`).join('')}
       <rect x="${5 * 30 + 6}" y="${1 * 22 + 6}" width="26" height="18" rx="3" class="t-dash"/>
+      <rect x="96" y="50" width="26" height="18" rx="3" class="t-ghost"/><path d="M104 59 l5 -5 l5 5" class="t-ghost-shield"/>
       <path d="M33 59 L63 59 L93 37 L165 37" class="t-path"/>${you(33, 59)}<g class="t-tap" transform="translate(165,37)"><circle r="10"/></g>`,
     cover: `<rect x="96" y="28" width="26" height="40" rx="3" class="t-cover"/><rect x="66" y="72" width="26" height="12" rx="3" class="t-cover half"/>${you(79, 59)}${foe(185, 50)}<path d="M178 50 L130 50" class="t-shot blocked"/><path d="M95 50 l-6 -10 h12 z" class="t-shield"/>`,
-    shoot: `${you(48, 59)}${foe(168, 37)}<path d="M56 56 L160 39" class="t-aim"/><g transform="translate(168,20)"><rect x="-17" y="-9" width="34" height="16" rx="4" class="t-badge"/><text y="3" class="t-txt">72%</text></g><g transform="translate(48,96)" class="t-ap"><rect x="-14" y="-5" width="10" height="10" transform="rotate(45 -9 0)"/><rect x="4" y="-5" width="10" height="10" transform="rotate(45 9 0)"/></g>`,
+    shoot: `${you(48, 59)}${foe(168, 37)}<path d="M56 56 L160 39" class="t-aim"/><g transform="translate(168,20)"><rect x="-17" y="-9" width="34" height="16" rx="4" class="t-badge"/><text y="3" class="t-txt">72%</text></g><g transform="translate(48,96)" class="t-ap"><rect x="-14" y="-5" width="10" height="10" transform="rotate(45 -9 0)"/><rect x="4" y="-5" width="10" height="10" transform="rotate(45 9 0)"/></g><text x="111" y="104" class="t-txt warn">ENDS TURN</text>`,
+    smoke: `<g class="t-smoke"><circle cx="70" cy="60" r="26"/><circle cx="52" cy="52" r="16"/><circle cx="90" cy="70" r="17"/></g>${you(70, 60)}${foe(185, 40)}<path d="M178 42 L100 56" class="t-shot blocked"/><text x="140" y="36" class="t-txt">?</text><text x="70" y="104" class="t-txt">-20 AIM</text>`,
     revive: `${you(78, 59)}<g class="t-down" transform="translate(108,63)"><ellipse rx="11" ry="6"/><circle r="15" class="t-bleed"/></g><path d="M86 52 Q97 36 106 50" class="t-arc"/><text x="108" y="30" class="t-txt cyan">REVIVE</text>`,
+    stages: `<g transform="translate(18,24)" class="t-kelp">${[0, 12, 24].map((x) => `<path d="M${x + 6} 70 C${x} 52 ${x + 12} 40 ${x + 4} 20"/>`).join('')}</g>
+      <g transform="translate(96,52)"><rect x="-9" y="-12" width="18" height="24" rx="3" class="t-barrel"/><rect x="-9" y="-4" width="18" height="5" class="t-band"/><path d="M-20 -22 l6 6 M20 -22 l-6 6 M0 -30 v8" class="t-burst"/></g>
+      <g transform="translate(176,58)"><circle r="7" class="t-foe-c"/><circle cy="-34" r="5" class="t-flare"/><circle cy="-34" r="14" class="t-flare-glow"/><path d="M0 -26 V-10" class="t-flare-line"/></g>
+      <text x="34" y="112" class="t-txt">KELP</text><text x="96" y="112" class="t-txt">BARREL</text><text x="176" y="112" class="t-txt">FLARE</text>`,
     tide: `<circle cx="111" cy="61" r="62" class="t-ring now"/><circle cx="111" cy="61" r="38" class="t-ring next"/>${you(95, 66)}${foe(40, 30)}${foe(175, 90)}`,
   }[kind] || '';
-  return `<svg class="tut-art" viewBox="0 0 222 122" aria-hidden="true">${grid}${body}</svg>`;
+  return `<svg class="tut-art" viewBox="0 0 222 122" aria-hidden="true">${kind === 'stages' ? '' : grid}${body}</svg>`;
 }
 
 let tutIdx = 0;

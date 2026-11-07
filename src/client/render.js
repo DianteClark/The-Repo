@@ -21,9 +21,16 @@
 //  - no setTimeout: all timing runs on the render clock.
 
 import * as THREE from 'three';
-import { canSeeTile, tileCoverDirs } from '../sim/rules.js';
-import { SIGHT } from '../sim/constants.js';
+// Namespace imports: a missing export (sim landing mid-way) must never break module linking.
+import * as Rules from '../sim/rules.js';
+import * as SimC from '../sim/constants.js';
+import { squadColor, squadColorHex } from '../shared/colors.js';
+import { randomLoadout, sanitizeLoadout } from '../shared/cosmetics.js';
 import { TEAM, makeMood, moodAt } from './gfx/palette.js';
+import { stageLook, buildKelp, buildSpill, buildStageScenery } from './gfx/stages.js';
+import { CosmeticFx } from './gfx/cosmeticfx.js';
+import { renderPreview as _renderPreview, stopPreview as _stopPreview, stopAllPreviews } from './gfx/preview.js';
+import { rng as makeRng } from './gfx/util.js';
 import { WorldFields } from './gfx/fields.js';
 import { classifyTiles, buildTerrain, tileTop } from './gfx/terrain.js';
 import { buildWater } from './gfx/water.js';
@@ -46,6 +53,12 @@ const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
 const _ndc = new THREE.Vector2();
 const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _col = new THREE.Color();
+const _lv = new THREE.Vector3(), _lm = new THREE.Matrix4(), _li = new THREE.Matrix4();
+
+/** Shop / locker previews (one shared offscreen WebGL context for every card). */
+export const renderPreview = _renderPreview;
+export const stopPreview = _stopPreview;
+export { stopAllPreviews };
 
 export class Renderer {
   constructor(canvas, hooks = {}) {
@@ -98,10 +111,17 @@ export class Renderer {
     this.storm = 0; this.stormGoal = 0;
     this.lightningT = 8; this._flash = 0; this._flash2 = -1;
     this.reveals = new Map(); // team -> Set(unitIds)
+    this.dsmokes = []; // displayed smoke clouds (sim format), for visibility
+    this.dflares = []; // displayed night flares [{id, team}]
+    this.beacons = new Map(); // unit id -> flare beacon objects
+    this.coverFade = 0; this.coverFadeGoal = 0;
+    this._dropIn = null;
+    this.look = stageLook('harbor');
+    this.cos = [];
     this._hidden = typeof document !== 'undefined' && document.hidden;
 
     this.raycaster = new THREE.Raycaster();
-    this._posOf = (id) => (this.isUnitVisible(id) ? this.views[id].root.position : null);
+    this._posOf = (id) => (this._tileBadges?.has(id) ? this._tileBadges.get(id) : this.isUnitVisible(id) ? this.views[id].root.position : null);
     this._posOfAny = (id) => (this.views[id] && this.views[id].root.visible && this.disp[id]?.alive ? this.views[id].root.position : null);
     this.hoverPx = null; this.hoverTile = -1;
 
@@ -133,17 +153,18 @@ export class Renderer {
     this.gpu = gpu;
     const weakGpu = /SwiftShader|llvmpipe|softpipe|Mali-[4T]|Adreno \(TM\) [2-5]\d\d|PowerVR SGX|Intel\(R\) HD Graphics [2-5]/i.test(gpu);
     const mem = navigator.deviceMemory || 8, cores = navigator.hardwareConcurrency || 8;
-    const auto = weakGpu || mem <= 2 || (this.mobile && cores <= 4) ? 'low' : 'high';
+    // 3.0 (44×44 maps): phones only start on high when they are clearly strong.
+    const auto = weakGpu || mem <= 3 || (this.mobile && (cores <= 6 || mem < 6)) ? 'low' : 'high';
     this.qualityPinned = q === 'low' || q === 'high';
     // prCap: pixel-ratio ceiling. Auto steps: high@2 → high@1.25 → low@1.25 → low@1 → low@0.8
-    this.perf = { frames: 0, time: 0, bad: 0, warm: 0, prCap: 2, lowCap: 1.25 };
+    this.perf = { frames: 0, time: 0, bad: 0, warm: 0, prCap: this.mobile ? 1.5 : 2, lowCap: 1.25 };
     this.autoQuality = auto;
     this.setQuality(this.qualityPinned ? q : auto, true);
   }
 
   /** 'high' | 'low'. Manual calls pin the quality (auto-downgrade stops). */
   setQuality(q, _auto = false) {
-    if (!_auto) { this.qualityPinned = true; this.perf.prCap = 2; this.perf.lowCap = 1.25; }
+    if (!_auto) { this.qualityPinned = true; this.perf.prCap = this.mobile ? 1.5 : 2; this.perf.lowCap = 1.25; }
     q = q === 'low' ? 'low' : 'high';
     this.quality = q;
     const high = q === 'high';
@@ -163,6 +184,7 @@ export class Renderer {
     }
     this.fx?.setScale(high ? 1 : 0.6);
     this.ambient?.setQuality(high);
+    this.sun.shadow.camera.userData.ext = 0; // refit
     if (high) {
       const want = (this._postReq = (this._postReq || 0) + 1);
       loadPostModules().then((M) => {
@@ -180,7 +202,7 @@ export class Renderer {
   /** Return to automatic quality selection (unpins). */
   setAutoQuality() {
     this.qualityPinned = false;
-    this.perf.bad = 0; this.perf.warm = 0; this.perf.prCap = 2; this.perf.lowCap = 1.25;
+    this.perf.bad = 0; this.perf.warm = 0; this.perf.prCap = this.mobile ? 1.5 : 2; this.perf.lowCap = 1.25;
     this.setQuality(this.autoQuality, true);
   }
 
@@ -191,18 +213,19 @@ export class Renderer {
     if (this.qualityPinned || !this.state || this._hidden) return;
     const p = this.perf;
     p.warm += realDt;
-    if (p.warm < 2.5) return;
+    if (p.warm < 2) return;
     p.frames++; p.time += realDt;
-    if (p.time < 2.5) return;
+    if (p.time < 2) return;
     const fps = p.frames / p.time;
     p.frames = 0; p.time = 0;
-    if (fps < 40) p.bad++; else p.bad = 0;
+    // tighter in 3.0: bigger maps, so step down sooner (two 2 s windows under 48 fps)
+    if (fps < 48) p.bad++; else p.bad = 0;
     if (p.bad < 2) return;
     p.bad = 0; p.warm = 0;
     if (this.quality === 'high') {
       if (this.pixelRatio > 1.25) { p.prCap = 1.25; this.setQuality('high', true); } else this.setQuality('low', true);
-    } else if (fps < 30 && p.lowCap > 0.8) {
-      p.lowCap = p.lowCap > 1 ? 1 : 0.8;
+    } else if (fps < 36 && p.lowCap > 0.75) {
+      p.lowCap = p.lowCap > 1 ? 1 : p.lowCap > 0.85 ? 0.85 : 0.75;
       this.setQuality('low', true);
     }
   }
@@ -212,10 +235,15 @@ export class Renderer {
 
   // ---------- setup ----------
 
-  setGame(state, myTeam) {
+  /**
+   * opts.cosmetics: { [unitId]: { skin, killFx, dropIn } } (UI passes the player's
+   * loadout; every other unit gets a random, seed-stable loadout).
+   */
+  setGame(state, myTeam, opts = {}) {
     if (this.world) this._teardown();
     this.gen++;
     this._flushAnims();
+    this._endDropIn(true);
     this.state = state;
     this.myTeam = myTeam;
     this.spectator = myTeam < 0;
@@ -227,33 +255,46 @@ export class Renderer {
     this.hoverTile = -1;
     this._flash = 0; this._flash2 = -1; this.lightningT = 8;
     const S = (this.S = state.map.size);
+    const seed = state.seed || 1;
+    this.look = stageLook(state.stage);
+    this.dzone = { ...state.zone };
     this.r0 = state.zone.r;
     this.world = new THREE.Group();
     this.scene.add(this.world);
     this.fields = new WorldFields(S);
+    this.fields.uniforms.uFogDark.value = this.look.fogDark;
     const wx = (x) => this.wx(x), wz = (y) => this.wz(y);
 
-    this.cls = classifyTiles(state.map, state.seed || 1);
-    this.terrain = buildTerrain(state.map, this.fields, this.cls, wx, wz);
+    this.cls = classifyTiles(state.map, seed, this.look);
+    this.terrain = buildTerrain(state.map, this.fields, this.cls, wx, wz, this.look);
     this.world.add(this.terrain.group);
-    this.water = buildWater(this.fields, S, this.quality === 'high' ? 160 : 90);
+    this.water = buildWater(this.fields, S, this.quality === 'high' ? 160 : 90, this.look);
     this.world.add(this.water.mesh);
-    this.props = new PropField(state.map, this.cls, this.fields, wx, wz, state.seed || 1);
+    this.props = new PropField(state.map, this.cls, this.fields, wx, wz, seed, this.look);
     this.world.add(this.props.group);
-    this.decor = buildDecor(state.map, this.cls, this.fields, wx, wz, state.seed || 1);
+    this.coverFade = this.coverFadeGoal = 0;
+    this.decor = buildDecor(state.map, this.cls, this.fields, wx, wz, seed);
     if (this.decor) this.world.add(this.decor);
-    this.scenery = buildScenery(S, state.seed || 1, this.fields);
+    this.scenery = buildScenery(S, seed, this.fields);
     this.world.add(this.scenery);
-    this.ambient = new Ambient(this.world, S, state.seed || 1, this.quality === 'high');
+    this.kelp = buildKelp(state.map, this.cls, this.fields, wx, wz, (x, y) => this._groundY(x, y), seed);
+    if (this.kelp) this.world.add(this.kelp.mesh);
+    this.spill = buildSpill(this.props.spill);
+    if (this.spill) this.world.add(this.spill);
+    this.stageScenery = buildStageScenery(this.look, S, seed, this.fields);
+    if (this.stageScenery) this.world.add(this.stageScenery.group);
+    this.ambient = new Ambient(this.world, S, seed, this.quality === 'high', this.look);
 
     this.fx = new Fx(this.world, this.overlay, { scale: this.quality === 'high' ? 1 : 0.6 });
     this.fx.floodedAt = (x, z) => this._floodedWorld(x, z);
+    this.cfx = new CosmeticFx(this.fx, this.world, { flash: (k) => { this._flash = Math.max(this._flash, k); } });
     this.ov = new Overlays(this.world, this.overlay, wx, wz, S);
 
     // shadow camera covers the whole map
     const sc = this.sun.shadow.camera;
     const ext = S * 0.76;
     sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext; sc.near = 1; sc.far = 150;
+    sc.userData.ext = 0; // refit to the view every frame (_fitShadow)
     sc.updateProjectionMatrix();
     this.sun.target.position.set(0, 0, 0);
     this._applySun();
@@ -265,8 +306,17 @@ export class Renderer {
 
     // units
     this.disp = state.units.map((u) => ({ x: u.x, y: u.y, alive: u.alive, hp: u.hp, downed: !!u.downed, bleed: u.bleed || 0 }));
+    // cosmetics: given loadouts (the player's), random but seed-stable for everyone else
+    const given = opts.cosmetics || {};
+    const cr = makeRng((seed ^ 0xc05e71c5) >>> 0);
+    this.cos = state.units.map((u) => {
+      const rnd = randomLoadout(cr);
+      return given[u.id] ? sanitizeLoadout(given[u.id]) : u.isPlayer ? sanitizeLoadout(null) : rnd;
+    });
+    this.dsmokes = (state.smokes || []).map((c) => ({ ...c }));
+    this.dflares = (state.flares || []).map((f) => ({ ...f }));
     this.views = state.units.map((u) => {
-      const v = new SoldierView(u, u.team === myTeam);
+      const v = new SoldierView(u, { color: squadColorHex(u.team, myTeam), skin: this.cos[u.id].skin });
       v.root.position.set(this.wx(u.x), this._groundY(u.x, u.y), this.wz(u.y));
       v.root.rotation.y = Math.atan2(this.wx(S / 2) - v.root.position.x, this.wz(S / 2) - v.root.position.z);
       if (u.hunkered) v.hunk = 1;
@@ -287,7 +337,10 @@ export class Renderer {
     this.overlay.add(this.marker);
 
     this.selTarget = null; this.targets = null; this.reviveIds = null;
+    this._vsObj = null;
+    this.beacons = new Map();
     this._syncSmokes();
+    this._syncFlares();
     this._syncReveals();
     this._updateZone(true);
     this.storm = this.stormGoal;
@@ -302,6 +355,7 @@ export class Renderer {
 
   _teardown() {
     this.fx?.clear();
+    this.cfx?.clear();
     this.scene.remove(this.world);
     for (const v of this.views || []) v.dispose();
     const seen = new Set();
@@ -322,12 +376,16 @@ export class Renderer {
     this.props?.dispose();
     this.fields?.dispose?.();
     this.ambient = null;
+    this.kelp = null; this.spill = null; this.stageScenery = null;
+    this.beacons = new Map();
     this.world = null;
   }
 
   wx(x) { return x - this.S / 2 + 0.5; }
   wz(y) { return y - this.S / 2 + 0.5; }
   _groundY(x, y) { return tileTop(this.cls.type[y * this.S + x]); }
+  /** Squad colour (#rrggbb) of a team as this player sees it. */
+  teamColor(team) { return squadColor(team, this.myTeam); }
   _floodedWorld(px, pz) {
     const x = Math.floor(px + this.S / 2), y = Math.floor(pz + this.S / 2);
     if (x < 0 || y < 0 || x >= this.S || y >= this.S) return true;
@@ -363,6 +421,7 @@ export class Renderer {
     if (!l) return;
     const d = this.disp[u.id];
     l.draw(u, u.team === this.myTeam, Math.max(0, d.hp), {
+      col: this.teamColor(u.team),
       ow: !!u.overwatch && !d.downed, hk: !!u.hunkered && !d.downed, lw: !!u.isLoneWolf,
       dn: d.downed ? d.bleed : null, dnMax: 2,
     });
@@ -370,25 +429,63 @@ export class Renderer {
 
   // ---------- fog / highlights / zone ----------
 
+  // Visibility runs the sim's own rules (rules.teamSeesUnit / canSeeTile: sight,
+  // night, smoke, kelp, scans, flares) against a *displayed* view of the state:
+  // unit positions, cover, smoke clouds, reveals and flares as the player has
+  // been shown them so far, so fog never leaks moves that haven't played yet.
+
+  /** Proxy state for the sim's visibility helpers (prototype-chained to the real state). */
+  _vs() {
+    const st = this.state;
+    let o = this._vsObj;
+    if (!o || o.__src !== st) {
+      o = Object.create(st);
+      o.__src = st;
+      o.map = Object.create(st.map);
+      o.units = st.units.map((u) => Object.create(u));
+      this._vsObj = o;
+    }
+    o.map.cover = this.props.cover;
+    o.map.explosive = this.props.explosive;
+    for (let i = 0; i < o.units.length; i++) {
+      const pu = o.units[i], d = this.disp[i];
+      pu.x = d.x; pu.y = d.y; pu.alive = d.alive; pu.downed = d.downed;
+    }
+    o.smokes = this.dsmokes;
+    o.flares = this.dflares;
+    const rv = [];
+    for (const [team, ids] of this.reveals) rv.push({ team, ids: [...ids] });
+    o.reveals = rv;
+    return o;
+  }
+
+  _sight() { return Rules.sightOf ? Rules.sightOf(this.state.map) : SimC.SIGHT; }
+
   visibleToMe(x, y) {
     if (this.spectator) return true;
     if (!this.state) return false;
-    for (const u of this.state.units) {
-      if (u.team !== this.myTeam) continue;
-      const d = this.disp[u.id];
-      if (d.alive && !d.downed && canSeeTile(this.state.map, d.x, d.y, x, y)) return true;
-    }
-    return false;
+    return Rules.teamSeesTile(this._vs(), this.myTeam, x, y);
   }
 
   /** Does `team` see tile (x,y) with displayed positions (for facing logic). */
-  _teamSees(team, x, y) {
-    for (const u of this.state.units) {
-      if (u.team !== team) continue;
-      const d = this.disp[u.id];
-      if (d.alive && !d.downed && canSeeTile(this.state.map, d.x, d.y, x, y)) return true;
-    }
-    return false;
+  _teamSees(team, x, y) { return Rules.teamSeesTile(this._vs(), team, x, y); }
+
+  /** Would my squad see unit `id` right now (displayed state)? */
+  _unitSeen(id, vs = this._vs()) {
+    const u = this.state.units[id];
+    if (this.spectator || u.team === this.myTeam) return true;
+    const d = this.disp[id];
+    if (!d.alive) return this.fogMask?.[d.y * this.S + d.x] === 1;
+    return Rules.teamSeesUnit(vs, this.myTeam, vs.units[id]);
+  }
+
+  /** _unitSeen with the unit standing at (x,y). */
+  _seenAt(id, x, y) {
+    const d = this.disp[id], ox = d.x, oy = d.y;
+    d.x = x; d.y = y;
+    const r = this._unitSeen(id);
+    d.x = ox; d.y = oy;
+    return r;
   }
 
   isUnitVisible(id) {
@@ -402,23 +499,28 @@ export class Renderer {
     const S = this.S, st = this.state;
     if (!this.spectator && !st.units.some((u) => u.team === this.myTeam && this.disp[u.id].alive)) this.spectator = true;
     const fog = (this.fogMask = new Uint8Array(S * S));
+    const vs = this._vs();
     if (this.spectator) fog.fill(1);
     else {
+      const R = Math.ceil(this._sight());
       for (const u of st.units) {
         if (u.team !== this.myTeam) continue;
         const d = this.disp[u.id];
         if (!d.alive || d.downed) continue; // downed units don't spot
-        for (let y = Math.max(0, d.y - SIGHT); y <= Math.min(S - 1, d.y + SIGHT); y++) {
-          for (let x = Math.max(0, d.x - SIGHT); x <= Math.min(S - 1, d.x + SIGHT); x++) {
+        for (let y = Math.max(0, d.y - R); y <= Math.min(S - 1, d.y + R); y++) {
+          for (let x = Math.max(0, d.x - R); x <= Math.min(S - 1, d.x + R); x++) {
             const k = y * S + x;
-            if (!fog[k] && canSeeTile(st.map, d.x, d.y, x, y)) fog[k] = 1;
+            if (!fog[k] && Rules.canSeeTile(vs.map, d.x, d.y, x, y)) fog[k] = 1;
           }
         }
       }
     }
     this.fields.setFog(fog, instant);
-    for (const u of st.units) this._syncUnitVisibility(u);
+    for (const u of st.units) this._syncUnitVisibility(u, vs);
   }
+
+  /** Re-run unit visibility only (smoke / flare / reveal changes don't move the fog). */
+  _refreshUnits() { const vs = this._vs(); for (const u of this.state.units) this._syncUnitVisibility(u, vs); }
 
   _revealedToMe(id) {
     if (this.spectator) return false;
@@ -426,11 +528,12 @@ export class Renderer {
     return !!s && s.has(id);
   }
 
-  _syncUnitVisibility(u) {
+  _syncUnitVisibility(u, vs) {
     const d = this.disp[u.id];
     const v = this.views[u.id];
-    const seen = u.team === this.myTeam || this.fogMask[d.y * this.S + d.x] === 1 || (d.alive && this._revealedToMe(u.id));
-    v.root.visible = d.alive ? seen : !!v.corpse && seen;
+    if (this._dropIn && this._dropIn.pending.has(u.id)) return; // still in the air
+    const seen = this._unitSeen(u.id, vs);
+    v.root.visible = d.alive ? seen : !!v.corpse && seen && !v.derezzed;
     // revealed enemies: magenta X-ray outline
     let rev = false;
     if (d.alive && u.team !== this.myTeam) for (const s of this.reveals.values()) if (s.has(u.id)) { rev = this.spectator || this.reveals.get(this.myTeam) === s; if (rev) break; }
@@ -443,7 +546,7 @@ export class Renderer {
     if (!this.ov) return;
     if (!path || path.length < 2) { this.ov.setPath(null); return; }
     const [ex, ey] = path[path.length - 1];
-    this.ov.setPath(path, cost, tileCoverDirs(this.state.map, ex, ey));
+    this.ov.setPath(path, cost, Rules.tileCoverDirs(this.state.map, ex, ey));
   }
 
   /** {x, y, radius, valid, kind?: 'frag'|'smoke'|'scan'} | null */
@@ -458,8 +561,17 @@ export class Renderer {
     this.ov?.setRevive(this.reviveIds);
   }
 
+  /**
+   * [{id, chance, selected?}] for units. Tile targets (explosive barrels) may be
+   * passed as {id: any non-unit key, x, y, chance}: the badge floats over the tile.
+   */
   setTargetMarkers(list) {
     this.targets = list && list.length ? list : null;
+    this._tileBadges = new Map();
+    if (this.targets && this.state) for (const t of this.targets) {
+      if (this.views[t.id] && typeof t.id === 'number') continue;
+      if (Number.isFinite(t.x) && Number.isFinite(t.y)) this._tileBadges.set(t.id, new THREE.Vector3(this.wx(t.x), this._groundY(t.x, t.y) - 0.7, this.wz(t.y)));
+    }
     this.ov?.setTargets(this.targets && this.targets.map((t) => ({ ...t, sel: t.id === this.selTarget || !!t.selected })));
   }
 
@@ -503,16 +615,21 @@ export class Renderer {
     return null;
   }
 
+  /** Tide from the displayed zone: current ring at (x,y), next ring at (nx,ny) (drifting on Surge Point). */
   _updateZone(instant) {
-    const S = this.S, z = this.state.zone;
-    this.fields.setTide((x, y) => Math.hypot(x - z.x, y - z.y) > z.r, instant);
+    const S = this.S, z = this.dzone || this.state.zone;
+    const T = this.state.map.terrain;
+    // flooded = outside the safe circle, or a shallow-water tile (terrain 2)
+    this.fields.setTide((x, y) => Math.hypot(x - z.x, y - z.y) > z.r || (!!T && T[y * S + x] === 2), instant);
+    const nx = z.nx ?? z.x, ny = z.ny ?? z.y;
     const warn = new Uint8Array(S * S);
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
       const d = Math.hypot(x - z.x, y - z.y);
-      warn[y * S + x] = d <= z.r && d > z.next ? 1 : 0;
+      warn[y * S + x] = d <= z.r && Math.hypot(x - nx, y - ny) > z.next ? 1 : 0;
     }
     this.fields.setWarn(warn);
-    this.stormGoal = clamp((this.r0 - z.r) / Math.max(1, this.r0 * 0.8), 0, 1);
+    const L = this.look;
+    this.stormGoal = L.stormFloor + (1 - L.stormFloor) * clamp((this.r0 - z.r) / Math.max(1, this.r0 * 0.8), 0, 1) * L.stormGain;
     if (!instant) {
       const U = this.fields.uniforms.uTideMix;
       this.fx.timed(1.8, (t) => { U.value = easeInOutCubic(t); });
@@ -521,7 +638,14 @@ export class Renderer {
 
   _syncSmokes() {
     this.fx.clearAllSmoke();
-    for (const c of this.state.smokes || []) this.fx.smokeCloud(c.id, this.wx(c.x), this.wz(c.y), c.radius || 1.5);
+    this.dsmokes = (this.state.smokes || []).map((c) => ({ ...c }));
+    for (const c of this.dsmokes) this.fx.smokeCloud(c.id, this.wx(c.x), this.wz(c.y), c.radius || 1.5);
+  }
+
+  _syncFlares() {
+    this.dflares = (this.state.flares || []).map((f) => ({ ...f }));
+    for (const id of [...this.beacons.keys()]) this._removeBeacon(id);
+    for (const f of this.dflares) this._addBeacon(f.id);
   }
 
   _syncReveals() {
@@ -542,6 +666,9 @@ export class Renderer {
     this.fx.clear();
     this.camStack = [];
     this.timeScale = this.slowGoal = 1; this.hitStop = 0;
+    this._endDropIn(true);
+    this.cfx.clear();
+    this.dzone = { ...st.zone };
     st.units.forEach((u, i) => {
       this.disp[i] = { x: u.x, y: u.y, alive: u.alive, hp: u.hp, downed: !!u.downed, bleed: u.bleed || 0 };
       const v = this.views[i];
@@ -561,7 +688,9 @@ export class Renderer {
     for (const c of st.crates) if (!c.taken) this._addCrate(c);
     const S = this.S;
     for (let k = 0; k < S * S; k++) if (this.props.cover[k] !== st.map.cover[k]) this.props.setCover(k % S, (k / S) | 0, st.map.cover[k]);
+    if (st.map.explosive) for (let k = 0; k < S * S; k++) if (this.props.explosive[k] && !st.map.explosive[k]) this.props.detonate(k % S, (k / S) | 0);
     this._syncSmokes();
+    this._syncFlares();
     this._syncReveals();
     this._updateZone(true);
     this.refreshFog(true);
@@ -694,7 +823,7 @@ export class Renderer {
         const want = this.gen;
         import('../sim/game.js').then((G) => {
           if (!this.showcase || this.state || want !== this.gen) return;
-          const st = G.createGame({ mode: 'quads', noHuman: true });
+          const st = G.createGame({ mode: 'quads', noHuman: true, stage: 'random' });
           this.setGame(st, -1);
         }).catch(() => { /* sim unavailable: ignore */ });
       }
@@ -895,7 +1024,7 @@ export class Renderer {
       // mood / storm grading
       this.storm += (this.stormGoal - this.storm) * damp(0.8, realDt);
       U.uStorm.value = this.storm;
-      moodAt(this.storm, this.mood);
+      moodAt(this.storm, this.mood, this.look.mood);
       if (this.showcase) this._showcaseMood();
       this._lightning(realDt);
       const flash = this._flash;
@@ -923,7 +1052,8 @@ export class Renderer {
         g.uTilt.value += ((this.showcase ? 1 : 0) - g.uTilt.value) * damp(3, realDt);
         this.post.bloom.strength = 0.55 + (this.showcase ? 0.25 : 0) + this.storm * 0.1;
       }
-      if (this.storm > 0.45 && !this._fast) this._rain(realDt);
+      const rainK = Math.max(this.look.rain, this.storm - 0.45);
+      if (rainK > 0 && !this._fast) this._rain(realDt, rainK);
       // units
       updateUnitShared(this.time);
       for (let i = 0; i < this.views.length; i++) {
@@ -932,6 +1062,11 @@ export class Renderer {
       }
       this.fx.update(dt, null);
       this.ambient?.update(dt, this.time, this.storm);
+      this.kelp?.update(this.time, this.storm);
+      this.stageScenery?.update(this.time, this.storm);
+      this._stepCoverFade(realDt);
+      this._stepDropIn(realDt);
+      this._updateBeacons();
       updatePickupShared(this.time);
       for (let i = 0; i < this.crateList.length; i++) {
         const ud = this.crateList[i].userData;
@@ -942,6 +1077,7 @@ export class Renderer {
       if (this.hoverPx && !this.dragging && !this.showcase) { this._setHover(this._tileAt(this.hoverPx[0], this.hoverPx[1])); }
     }
     this._updateCamera(realDt);
+    if (this.state && this.world) this._fitShadow();
     if (this.post) this.post.composer.render(realDt);
     else this.gl.render(this.scene, this.camera);
     this.gl.autoClear = false;
@@ -990,8 +1126,8 @@ export class Renderer {
   _lightning(dt) {
     this._flash = Math.max(0, this._flash - dt * 4);
     if (this._flash2 >= 0) { this._flash2 -= dt; if (this._flash2 < 0) this._flash = 0.75; }
-    if (this.storm < 0.6) return;
-    this.lightningT -= dt;
+    if (this.storm < 0.6 || !this.look.lightning) return;
+    this.lightningT -= dt * this.look.lightning;
     if (this.lightningT <= 0) {
       this.lightningT = 5 + Math.random() * 9 * (1.6 - this.storm);
       this._flash = 1;
@@ -1000,26 +1136,198 @@ export class Renderer {
     }
   }
 
-  _rain(dt) {
-    const n = Math.floor((this.storm - 0.45) * 170 * dt * (this.quality === 'high' ? 1 : 0.5) + Math.random());
+  _rain(dt, k = this.storm - 0.45) {
+    const n = Math.floor(k * 170 * dt * (this.quality === 'high' ? 1 : 0.5) + Math.random());
     const span = this.view * 0.9;
     for (let i = 0; i < n; i++) {
       const x = this.target.x + (Math.random() - 0.5) * span * 2, z = this.target.z + (Math.random() - 0.5) * span * 2;
       this.fx.alpha.spawn(x, 6 + Math.random() * 3, z, -2.5, -22, 0.6, 0.38, 0.025, 0.025, 0.75, 0.85, 0.9, 0.32, 0, 0, 1.6, 1);
     }
     // ground splashes where it lands near the camera target
-    if (this.quality === 'high' && Math.random() < (this.storm - 0.45) * 2) {
+    if (this.quality === 'high' && Math.random() < k * 2) {
       const x = this.target.x + (Math.random() - 0.5) * span * 1.6, z = this.target.z + (Math.random() - 0.5) * span * 1.6;
       this.fx.add.spawn(x, 0.05, z, 0, 0.6, 0, 0.18, 0.04, 0.12, 0.5, 0.6, 0.65, 0.6, 0, 0, 0, 1.4);
     }
   }
+
+  /**
+   * Shadow frustum follows the view instead of covering the whole 44×44 map:
+   * sharper shadows and a cheaper shadow pass. Snapped to shadow texels so
+   * panning doesn't shimmer.
+   */
+  _fitShadow() {
+    if (!this.sun.castShadow) return;
+    const sc = this.sun.shadow.camera;
+    const half = (this.view * this.viewScale * Math.max(1, this.aspect)) * (this.showcase ? 1.3 : 0.8) + 3;
+    const ext = Math.min(this.S * 0.76, Math.ceil(half / 2) * 2);
+    if (sc.userData.ext !== ext) {
+      sc.userData.ext = ext;
+      sc.left = -ext; sc.right = ext; sc.top = ext; sc.bottom = -ext;
+      sc.updateProjectionMatrix();
+    }
+    // light-space snap
+    _lm.lookAt(this.sunDir, _v2.set(0, 0, 0), _v1.set(0, 1, 0));
+    _li.copy(_lm).invert();
+    _lv.copy(this.target).applyMatrix4(_li);
+    const texel = (2 * ext) / this.sun.shadow.mapSize.x;
+    _lv.x = Math.round(_lv.x / texel) * texel; _lv.y = Math.round(_lv.y / texel) * texel;
+    _lv.applyMatrix4(_lm);
+    this.sun.target.position.copy(_lv);
+    this.sun.position.copy(_lv).addScaledVector(this.sunDir, 60);
+    this.sun.target.updateMatrixWorld();
+  }
+
+  // ---------- 3.0: cover fade ----------
+
+  /**
+   * Fade every cover prop to ~6% (150 ms) and show crisp ground footprints
+   * with half / full shield glyphs, so movable tiles read clearly. Units,
+   * crates and overlays stay solid. UI turns it on in Move mode.
+   */
+  setCoverFade(on) { this.coverFadeGoal = on ? 1 : 0; }
+
+  _stepCoverFade(dt) {
+    if (this.coverFade === this.coverFadeGoal) return;
+    const step = dt / 0.15;
+    this.coverFade = this.coverFadeGoal > this.coverFade ? Math.min(this.coverFadeGoal, this.coverFade + step) : Math.max(this.coverFadeGoal, this.coverFade - step);
+    if (this._hidden) this.coverFade = this.coverFadeGoal;
+    this.props.setFade(easeInOutCubic(this.coverFade));
+  }
+
+  // ---------- 3.0: night flares ----------
+
+  _addBeacon(id) {
+    if (this.beacons.has(id) || !this.views[id]) return;
+    const B = this._beaconAssets || (this._beaconAssets = (() => {
+      const c = document.createElement('canvas'); c.width = c.height = 64;
+      const g = c.getContext('2d');
+      const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,170,150,0.9)'); gr.addColorStop(1, 'rgba(255,60,70,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+      const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+      const beamGeo = new THREE.CylinderGeometry(0.05, 0.16, 1, 10, 1, true); beamGeo.translate(0, 0.5, 0);
+      const ringGeo = new THREE.RingGeometry(0.42, 0.52, 36); ringGeo.rotateX(-Math.PI / 2);
+      const o = { tex, beamGeo, ringGeo };
+      for (const k of ['tex', 'beamGeo', 'ringGeo']) o[k].userData.shared = true;
+      return o;
+    })());
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: B.tex, color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+    glow.renderOrder = 22;
+    const beam = new THREE.Mesh(B.beamGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff4a4a).multiplyScalar(1.6), transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+    beam.renderOrder = 7;
+    const ring = new THREE.Mesh(B.ringGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff4a4a).multiplyScalar(1.6), transparent: true, depthWrite: false, toneMapped: false }));
+    ring.renderOrder = 6;
+    this.world.add(beam, ring); this.overlay.add(glow);
+    this.beacons.set(id, { glow, beam, ring, t0: this.realTime });
+  }
+
+  _removeBeacon(id) {
+    const b = this.beacons.get(id);
+    if (!b) return;
+    for (const o of [b.glow, b.beam, b.ring]) { o.parent?.remove(o); o.material.dispose(); }
+    this.beacons.delete(id);
+  }
+
+  _updateBeacons() {
+    for (const [id, b] of this.beacons) {
+      const v = this.views[id];
+      const show = v.root.visible && this.disp[id].alive && !this.showcase;
+      b.glow.visible = b.beam.visible = b.ring.visible = show;
+      if (!show) continue;
+      const p = v.root.position, t = this.realTime - b.t0;
+      const pulse = 0.75 + 0.25 * Math.sin(t * 7);
+      const top = p.y + 1.25 - v.down * 0.42;
+      const s = (0.9 + 0.2 * pulse) * clamp(this.view / 14, 0.85, 1.6) * (t < 0.3 ? easeOutCubic(t / 0.3) * 1.5 : 1);
+      b.glow.position.set(p.x, top + 0.95 + Math.sin(t * 2.2) * 0.05, p.z);
+      b.glow.scale.set(s, s, 1);
+      b.beam.position.set(p.x, top, p.z); b.beam.scale.set(1, 6, 1);
+      b.beam.material.opacity = 0.25 + 0.15 * pulse;
+      b.ring.position.set(p.x, p.y + 0.04, p.z); b.ring.scale.setScalar(1 + ((t * 1.2) % 1) * 0.8);
+      b.ring.material.opacity = 1 - ((t * 1.2) % 1);
+    }
+  }
+
+  // ---------- 3.0: drop-ins ----------
+
+  /**
+   * Every unit arrives with its drop-in cosmetic (about 3 s in all; only units
+   * the player can see are animated). Resolves when everyone has landed or on skipDropIn().
+   */
+  playDropIn() {
+    if (!this.state || this._hidden) return Promise.resolve();
+    this._endDropIn(true);
+    const st = this.state, items = [], pending = new Set();
+    const mineFirst = [...st.units].sort((a, b) => (b.team === this.myTeam) - (a.team === this.myTeam));
+    let n = 0;
+    for (const u of mineFirst) {
+      const d = this.disp[u.id], v = this.views[u.id];
+      if (!d.alive || !v.root.visible) continue;
+      const goal = new THREE.Vector3(this.wx(d.x), this._groundY(d.x, d.y), this.wz(d.y));
+      const L = Math.hypot(goal.x, goal.z);
+      const from = L > 1 ? { x: goal.x / L, z: goal.z / L } : { x: 0, z: -1 };
+      const id = this.cos[u.id]?.dropIn || 'default';
+      const mine = u.team === this.myTeam;
+      const t0 = mine ? Math.min(0.3, n++ * 0.12) : 0.25 + Math.random() * 0.45;
+      v.root.visible = false;
+      pending.add(u.id);
+      items.push({ u, v, id, goal, from, t0, ctl: null, done: false });
+    }
+    if (!items.length) return Promise.resolve();
+    const me = this._playerUnit();
+    if (me) this.focus(this.disp[me.id].x, this.disp[me.id].y);
+    return new Promise((resolve) => { this._dropIn = { t: 0, items, pending, resolve }; });
+  }
+
+  /** Finish the drop-in now (everyone snaps to the ground). */
+  skipDropIn() { this._endDropIn(false); }
+
+  _stepDropIn(dt) {
+    const D = this._dropIn;
+    if (!D) return;
+    D.t += dt;
+    let left = 0;
+    for (const it of D.items) {
+      if (it.done) continue;
+      const lt = D.t - it.t0;
+      if (lt < 0) { left++; continue; }
+      if (!it.ctl) {
+        it.v.root.visible = true;
+        it.ctl = this.cfx.dropIn(it.id, it.v, it.goal, { from: it.from });
+        if (it.u.team === this.myTeam) this.hooks.sfx?.step?.();
+      }
+      it.ctl.update(Math.min(lt, it.ctl.dur));
+      if (lt >= it.ctl.dur) { this._finishDropItem(it, D); } else left++;
+    }
+    if (!left) this._endDropIn(false);
+  }
+
+  _finishDropItem(it, D) {
+    if (it.done) return;
+    it.done = true;
+    if (!it.ctl) it.ctl = this.cfx.dropIn(it.id, it.v, it.goal, { from: it.from });
+    it.ctl.end();
+    D.pending.delete(it.u.id);
+  }
+
+  _endDropIn(silent) {
+    const D = this._dropIn;
+    if (!D) return;
+    this._dropIn = null;
+    for (const it of D.items) this._finishDropItem(it, D);
+    if (!silent && this.state) this._refreshUnits();
+    D.resolve();
+  }
+
+  /** Shop / locker preview into a 2D canvas (shared offscreen renderer). */
+  renderPreview(canvas, opts) { return _renderPreview(canvas, opts); }
+  stopPreview(canvas) { _stopPreview(canvas); }
 
   _updateOverlays() {
     const lscale = clamp(this.view / 14, 0.85, 1.7) * (this.aspect < 1 ? 1.25 : 1);
     const hideAll = this.showcase;
     for (let i = 0; i < this.views.length; i++) {
       const v = this.views[i], l = this.labels[i];
-      const show = !hideAll && v.root.visible && this.disp[i].alive && !v.dead;
+      const show = !hideAll && v.root.visible && this.disp[i].alive && !v.dead && !(this._dropIn && this._dropIn.pending.has(i));
       l.s.visible = show;
       if (show) {
         const p = v.root.position;
@@ -1177,11 +1485,36 @@ export class Renderer {
       case 'scan': return this._evScan(ev);
       case 'reveal_end': {
         this.reveals.delete(ev.team);
-        for (const u of st.units) this._syncUnitVisibility(u);
+        this._refreshUnits();
         return;
       }
       case 'smoke_clear':
         this.fx.clearSmoke(ev.smokeId);
+        this.dsmokes = this.dsmokes.filter((c) => c.id !== ev.smokeId);
+        this._refreshUnits();
+        return;
+      case 'barrel_shot': return this._evBarrelShot(ev);
+      case 'barrel': return this._evBarrel(ev);
+      case 'flare': {
+        const u = st.units[ev.id];
+        if (!u) return;
+        if (!this.dflares.some((f) => f.id === ev.id)) this.dflares.push({ id: ev.id, team: u.team });
+        this._addBeacon(ev.id);
+        this._refreshUnits();
+        const v = this.views[ev.id];
+        if (v.root.visible && u.team !== this.myTeam) {
+          const p = v.root.position;
+          this.fx.flashLight(p.x, p.y + 2, p.z, 0xff6a5a, 14, 0.5, 6);
+          this.fx.ring(p.x, p.y + 0.06, p.z, 0.2, 1.4, 0xff4a4a, 0.5, 1.2);
+          this._textAt(ev.id, 'FLARED', '#ff8a7a', 0.8, 0.35);
+          await this._wait(260);
+        }
+        return;
+      }
+      case 'flare_end':
+        this.dflares = this.dflares.filter((f) => f.id !== ev.id);
+        this._removeBeacon(ev.id);
+        this._refreshUnits();
         return;
       case 'overwatch': {
         const u = st.units[ev.id], v = this.views[ev.id];
@@ -1263,12 +1596,17 @@ export class Renderer {
         }
         return;
       }
-      case 'zone_shrink':
+      case 'zone_shrink': {
         sfx?.tide();
+        const z = st.zone, dz = this.dzone || (this.dzone = { ...z });
+        dz.r = ev.r ?? z.r; dz.next = ev.next ?? z.next;
+        dz.x = ev.x ?? z.x; dz.y = ev.y ?? z.y;
+        dz.nx = ev.nx ?? z.nx ?? dz.x; dz.ny = ev.ny ?? z.ny ?? dz.y;
         this._updateZone(false);
         this.fx.shake = Math.max(this.fx.shake, 0.3);
         await this._wait(900);
         return;
+      }
       case 'turn_start':
         for (const id of st.teams[ev.team].members) {
           const u = st.units[id];
@@ -1299,7 +1637,7 @@ export class Renderer {
     const mine = u.team === this.myTeam;
     const v = this.views[ev.id];
     if (!ev.path || ev.path.length < 2) return;
-    const anyVisible = mine || ev.path.some(([x, y]) => this.visibleToMe(x, y));
+    const anyVisible = mine || ev.path.some(([x, y]) => this._seenAt(ev.id, x, y));
     v.setHunker(false);
     v.aimGoal = 0;
     if (!anyVisible || this.speed > 3) {
@@ -1315,7 +1653,7 @@ export class Renderer {
     for (let i = 1; i < ev.path.length; i++) {
       const [ax, ay] = ev.path[i - 1], [bx, by] = ev.path[i];
       this._face(ev.id, bx, by);
-      const vis = mine || this.visibleToMe(ax, ay) || this.visibleToMe(bx, by) || this._revealedToMe(ev.id);
+      const vis = mine || this._seenAt(ev.id, ax, ay) || this._seenAt(ev.id, bx, by);
       v.root.visible = vis;
       const diag = ax !== bx && ay !== by;
       const ya = this._groundY(ax, ay), yb = this._groundY(bx, by);
@@ -1356,8 +1694,8 @@ export class Renderer {
     if (!s || !t) return;
     const ds = this.disp[ev.from], dt = this.disp[ev.to];
     const vs = this.views[ev.from], vt = this.views[ev.to];
-    const sVis = s.team === this.myTeam || this.visibleToMe(ds.x, ds.y) || this._revealedToMe(ev.from);
-    const tVis = t.team === this.myTeam || this.visibleToMe(dt.x, dt.y) || this._revealedToMe(ev.to);
+    const sVis = this._unitSeen(ev.from);
+    const tVis = this._unitSeen(ev.to);
     const hitting = ev.result !== 'miss';
     const wasDowned = dt.downed;
     if (hitting) dt.hp -= ev.dmg;
@@ -1404,7 +1742,7 @@ export class Renderer {
     const dirx = ix - mx, dirz = iz - mz, dl = Math.hypot(dirx, dirz) || 1;
     const nx = dirx / dl, nz = dirz / dl;
     const bursts = smg ? 3 : 1;
-    const col = new THREE.Color(s.team === this.myTeam ? TEAM.amber : TEAM.magenta);
+    const col = new THREE.Color(this.teamColor(s.team));
     let missKind = null;
     if (!hitting) {
       const ct = ev.cover > 0 ? this._coverTileBetween(dt.x, dt.y, ds.x, ds.y) : null;
@@ -1492,17 +1830,25 @@ export class Renderer {
       v.corpse = true;
       if (this.camStack.some((s) => s.tag === 'kill')) this.slowGoal = 0.45;
       const p = v.root.position;
+      // the killer's kill-effect cosmetic plays on the victim
+      const by = ev.by !== null && ev.by !== undefined && ev.by !== ev.id ? ev.by : null;
+      const kfx = by !== null ? this.cos[by]?.killFx : null;
+      let fxLen = 0;
+      if (kfx && kfx !== 'default') { await this._wait(120); if (g !== this.gen) return; fxLen = this.cfx.killEffect(kfx, v); }
       await this._wait(wasDowned ? 250 : 380);
       if (g !== this.gen) return;
+      if (fxLen > 0.6 && !this._fast) { await this._wait(Math.min(700, (fxLen - 0.6) * 1000)); if (g !== this.gen) return; }
       this.fx.slump(p.x, p.z, this._flooded(d.x, d.y));
       this.fx.ring(p.x, 0.06, p.z, 0.2, 1.2, 0xe8e0cc, 0.5, 0.6);
       await this._wait(this.camStack.some((s) => s.tag === 'kill') ? 520 : 320);
       if (g !== this.gen) return;
       // the corpse lingers, then sinks away
       const gen = this.gen;
+      const y0 = v.root.position.y;
+      if (v.derezzed) { v.corpse = false; v.root.visible = false; }
       this.fx.timed(5, (t) => {
         if (gen !== this.gen) return;
-        if (t > 0.75) v.root.position.y = -((t - 0.75) / 0.25) * 0.5;
+        if (t > 0.75) v.root.position.y = y0 - ((t - 0.75) / 0.25) * 0.5;
         if (t >= 1) { v.corpse = false; v.root.visible = false; v.setReveal(false); }
       });
     }
@@ -1534,7 +1880,7 @@ export class Renderer {
       if (g !== this.gen) return;
       this.fx.slump(p.x, p.z, this._flooded(d.x, d.y));
       this._textAt(ev.id, 'DOWNED', TEXT.down, 1.0, -0.1);
-      this.fx.ring(p.x, 0.07, p.z, 0.3, 1.0, u.team === this.myTeam ? TEAM.amber : TEAM.magenta, 0.6, 1.1);
+      this.fx.ring(p.x, 0.07, p.z, 0.3, 1.0, squadColorHex(u.team, this.myTeam), 0.6, 1.1);
       await this._wait(420);
       if (g !== this.gen) return;
     }
@@ -1653,12 +1999,16 @@ export class Renderer {
     const v = this.views[ev.id];
     const d = this.disp[ev.id];
     const smoke = kind === 'smoke';
-    const sVis = u.team === this.myTeam || this.visibleToMe(d.x, d.y);
+    const sVis = this._unitSeen(ev.id);
     const tVis = this.visibleToMe(ev.x, ev.y);
+    if (smoke) {
+      this.dsmokes = this.dsmokes.filter((c) => c.id !== ev.smokeId);
+      this.dsmokes.push({ id: ev.smokeId, x: ev.x, y: ev.y, radius: ev.radius || 1.5, team: u.team });
+    }
     const tx = this.wx(ev.x), tz = this.wz(ev.y);
     this._blast = smoke ? null : { x: tx, z: tz };
     if (!sVis && !tVis) {
-      if (smoke) { this.fx.smokeCloud(ev.smokeId, tx, tz, ev.radius || 1.5); return; }
+      if (smoke) { this.fx.smokeCloud(ev.smokeId, tx, tz, ev.radius || 1.5); this._refreshUnits(); return; }
       sfx?.explosion(1);
       this._ping(ev.x, ev.y);
       this.hooks.onFeed?.(`Explosion to the ${compass(this.myRef(), ev.x, ev.y)}`);
@@ -1692,6 +2042,8 @@ export class Renderer {
       this._text(ev.x, ev.y, 'SMOKE', TEXT.info, 0.85, 1.6);
       await this._wait(520);
       if (g !== this.gen) return;
+      this._refreshUnits(); // the cloud now hides whoever is inside
+      if (g !== this.gen) return;
       if (cam) this._camRelease('blast');
       return;
     }
@@ -1716,7 +2068,7 @@ export class Renderer {
     if (v.root.visible) {
       const p = v.root.position;
       let nx = 0, nz = 0;
-      if (this._blast && ev.source === 'explosion') {
+      if (this._blast && (ev.source === 'explosion' || ev.source === 'barrel')) {
         const bx = p.x - this._blast.x, bz = p.z - this._blast.z, L = Math.hypot(bx, bz);
         if (L > 0.05) { nx = bx / L; nz = bz / L; }
       } else if (ev.by !== undefined && ev.by !== null && this.views[ev.by]) {
@@ -1755,7 +2107,8 @@ export class Renderer {
   async _evBreach(ev) {
     const st = this.state, sfx = this.hooks.sfx, g = this.gen;
     const u = st.units[ev.id], v = this.views[ev.id], d = this.disp[ev.id];
-    const vis = u.team === this.myTeam || this.visibleToMe(d.x, d.y) || this.visibleToMe(ev.x, ev.y);
+    const vis = this._unitSeen(ev.id) || this.visibleToMe(ev.x, ev.y);
+    void d;
     this._blast = { x: this.wx(ev.x), z: this.wz(ev.y) };
     if (!vis) { sfx?.breach?.(); this._ping(ev.x, ev.y); this.hooks.onFeed?.(`Breach charge to the ${compass(this.myRef(), ev.x, ev.y)}`); return; }
     this._face(ev.id, ev.x, ev.y);
@@ -1778,6 +2131,67 @@ export class Renderer {
     this.hitStop = 0.06;
     await this._anim(260, (t) => { p.x = ox + dx * 0.32 * (1 - easeOutCubic(t)); p.z = oz + dz * 0.32 * (1 - easeOutCubic(t)); });
     p.x = ox; p.z = oz;
+  }
+
+  /** Someone shoots an explosive barrel: tracer into the drum, then the barrel event blows it. */
+  async _evBarrelShot(ev) {
+    const st = this.state, sfx = this.hooks.sfx, g = this.gen;
+    const s = st.units[ev.id];
+    if (!s) return;
+    const vs = this.views[ev.id], ds = this.disp[ev.id];
+    const sVis = this._unitSeen(ev.id), tVis = this.visibleToMe(ev.x, ev.y);
+    if (!sVis && !tVis) { sfx?.shot(1, this._weaponOf(s)); return; }
+    const tx = this.wx(ev.x), tz = this.wz(ev.y);
+    if (sVis) {
+      vs.setHunker(false); this._face(ev.id, ev.x, ev.y); vs.aimGoal = 1;
+      await this._wait(260);
+      if (g !== this.gen) return;
+      vs.settle();
+      vs.muzzleWorld(_v1);
+      const dx = tx - _v1.x, dz = tz - _v1.z, L = Math.hypot(dx, dz) || 1;
+      sfx?.shot(this._far(ds.x, ds.y), this._weaponOf(s));
+      this.fx.muzzle(_v1.x, _v1.y, _v1.z, dx / L, dz / L, 1);
+      this.fx.tracer(_v1.x, _v1.y, _v1.z, tx, 0.3, tz, new THREE.Color(this.teamColor(s.team)), 0.04);
+      vs.doRecoil(1);
+      await this._wait(Math.min(160, 30 + L * 9));
+      if (g !== this.gen) return;
+      vs.aimGoal = 0;
+    }
+    this.fx.sparks(tx, 0.35, tz, 10, 5, 3, 1.5, 3);
+  }
+
+  /** An explosive barrel detonates (chains arrive as further barrel events). */
+  async _evBarrel(ev) {
+    const sfx = this.hooks.sfx, g = this.gen;
+    const tx = this.wx(ev.x), tz = this.wz(ev.y);
+    this._blast = { x: tx, z: tz };
+    this.props.detonate(ev.x, ev.y);
+    const vis = this.visibleToMe(ev.x, ev.y);
+    if (!vis || this.speed > 3) {
+      sfx?.explosion(1);
+      if (!vis) { this._ping(ev.x, ev.y); this.hooks.onFeed?.(`Barrel blast to the ${compass(this.myRef(), ev.x, ev.y)}`); }
+      return;
+    }
+    const held = this.camStack.length && this.camStack[this.camStack.length - 1].tag === 'blast';
+    const cam = held ? false : this._pointCam('blast', tx, tz, 10);
+    sfx?.explosion(this._far(ev.x, ev.y));
+    const wet = this._flooded(ev.x, ev.y);
+    this.fx.explosion(tx, tz, 1.5, wet);
+    // fuel fireball column + flying drum parts
+    const A = this.fx.add;
+    for (let i = 0; i < this.fx._n(30); i++) {
+      const a = Math.random() * Math.PI * 2, s = Math.random() * 1.2;
+      A.spawn(tx + Math.cos(a) * 0.2, 0.4, tz + Math.sin(a) * 0.2, Math.cos(a) * s, 2.5 + Math.random() * 3.5, Math.sin(a) * s, 0.6 + Math.random() * 0.6, 0.4, 1.1, 5, 1.6 + Math.random(), 0.25, 1, 2.5, -1.2, 0, 1.5);
+    }
+    this.fx.debrisBurst(tx, 0.4, tz, [0xc8261c, 0x3a3d40, 0x2a2c2e], 14, 1.3);
+    this.fx.flashLight(tx, 1.2, tz, 0xff7a3a, 34, 0.5, 8);
+    this.fx.shake = Math.min(1, this.fx.shake + 0.4);
+    this.hitStop = 0.06;
+    this._text(ev.x, ev.y, 'BOOM', '#ff8a5a', 1.1, 1.5);
+    await this._wait(300);
+    if (g !== this.gen) return;
+    this._extendBlastHold();
+    if (cam) { const s = this.camStack[this.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, performance.now() / 1000 + 1.4); }
   }
 
   async _evSupply(ev) {

@@ -239,8 +239,9 @@ test('downed units do not spot for their team', () => {
   assert.ok(b.alive);
 });
 
-test('smoke: 1 AP, frag reach rules, +25 defense inside, clears at thrower\'s next-round turn start', () => {
-  const { s, a, b, es } = arena({ me: [5, 5, 'recon'], mate: [7, 9], foes: [[7, 16], [30, 30]] });
+test('smoke: 1 AP, frag reach rules, -20 aim into it, clears at thrower\'s next-round turn start', () => {
+  // The enemy stands next to the cloud, so it can still see (and shoot) into it.
+  const { s, a, b, es } = arena({ me: [5, 5, 'recon'], mate: [7, 9], foes: [[7, 11], [30, 30]] });
   assert.equal(act(s, a.id, { type: 'smoke', x: 13, y: 5 }).ok, false, 'out of reach (8)');
   assert.ok(smokeTargets(s, a).has(9 * S + 7));
   const before = hitChance(s, es[0], b).chance;
@@ -252,8 +253,8 @@ test('smoke: 1 AP, frag reach rules, +25 defense inside, clears at thrower\'s ne
   assert.equal(a.ap, 1, 'smoke does not end the turn');
   assert.deepEqual(s.smokes, [{ id: ev.smokeId, x: 7, y: 9, radius: 1.5, team: a.team, expiresRound: s.round + 1, expiresTeam: a.team }]);
   const after = hitChance(s, es[0], b);
-  assert.equal(before - after.chance, SMOKE.defense);
-  assert.ok(after.notes.some((n) => n.startsWith('Smoke')));
+  assert.equal(before - after.chance, SMOKE.aimIn);
+  assert.ok(after.notes.some((n) => n.startsWith('Target in smoke')));
   assert.equal(act(s, a.id, { type: 'smoke', x: 7, y: 9 }).ok, false, 'no smoke left');
   // Still there through the enemy turns of this round...
   const round = s.round;

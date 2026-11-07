@@ -117,28 +117,43 @@ export class WorldFields {
       w[ty * T + tx] = f;
       if (inside) this.flooded[y * S + x] = f;
     }
-    // Boundary cells (have a 4-neighbour of the other kind).
-    const bx = [], by = [], bt = [];
-    for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) {
-      const v = w[ty * T + tx];
-      if ((tx > 0 && w[ty * T + tx - 1] !== v) || (tx < T - 1 && w[ty * T + tx + 1] !== v)
-        || (ty > 0 && w[(ty - 1) * T + tx] !== v) || (ty < T - 1 && w[(ty + 1) * T + tx] !== v)) {
-        bx.push(tx); by.push(ty); bt.push(v);
+    // Signed distance to the waterline via an 8-neighbour two-pass vector
+    // distance transform (O(T²) instead of O(T² × boundary cells): 44×44 maps
+    // shrink the tide on phones without a hitch).
+    const n = T * T;
+    const vx = this._dtx || (this._dtx = new Int16Array(n)), vy = this._dty || (this._dty = new Int16Array(n));
+    const BIG = 2000;
+    for (let i = 0; i < n; i++) {
+      const ty = (i / T) | 0, tx = i - ty * T, v = w[i];
+      const edge = (tx > 0 && w[i - 1] !== v) || (tx < T - 1 && w[i + 1] !== v) || (ty > 0 && w[i - T] !== v) || (ty < T - 1 && w[i + T] !== v);
+      vx[i] = edge ? 0 : BIG; vy[i] = edge ? 0 : BIG;
+    }
+    const relax = (i, j, dx, dy) => {
+      const ax = vx[j] + dx, ay = vy[j] + dy;
+      if (ax * ax + ay * ay < vx[i] * vx[i] + vy[i] * vy[i]) { vx[i] = ax; vy[i] = ay; }
+    };
+    for (let ty = 0; ty < T; ty++) {
+      for (let tx = 0; tx < T; tx++) {
+        const i = ty * T + tx;
+        if (tx > 0) relax(i, i - 1, 1, 0);
+        if (ty > 0) { relax(i, i - T, 0, 1); if (tx > 0) relax(i, i - T - 1, 1, 1); if (tx < T - 1) relax(i, i - T + 1, 1, 1); }
       }
+      for (let tx = T - 2; tx >= 0; tx--) relax(ty * T + tx, ty * T + tx + 1, 1, 0);
+    }
+    for (let ty = T - 1; ty >= 0; ty--) {
+      for (let tx = T - 1; tx >= 0; tx--) {
+        const i = ty * T + tx;
+        if (tx < T - 1) relax(i, i + 1, 1, 0);
+        if (ty < T - 1) { relax(i, i + T, 0, 1); if (tx < T - 1) relax(i, i + T + 1, 1, 1); if (tx > 0) relax(i, i + T - 1, 1, 1); }
+      }
+      for (let tx = 1; tx < T; tx++) relax(ty * T + tx, ty * T + tx - 1, 1, 0);
     }
     const d = this.tideData;
-    const nb = bx.length;
-    for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) {
-      const i = ty * T + tx, v = w[i];
-      let best = 1e9;
-      for (let j = 0; j < nb; j++) {
-        if (bt[j] === v) continue;
-        const dx = bx[j] - tx, dy = by[j] - ty;
-        const dd = dx * dx + dy * dy;
-        if (dd < best) best = dd;
-      }
-      let sd = nb ? Math.sqrt(best) - 0.5 : 20;
-      if (!v) sd = -sd;
+    for (let i = 0; i < n; i++) {
+      // distance from this cell to the nearest boundary cell of the other kind ≈ |v| + 1 for non-edge cells
+      const L = vx[i] >= BIG ? 20 : Math.hypot(vx[i], vy[i]);
+      let sd = L + 0.5;
+      if (!w[i]) sd = -sd;
       const enc = Math.max(0, Math.min(255, Math.round(((sd - SD_MIN) / (SD_MAX - SD_MIN)) * 255)));
       d[i * 4] = instant ? enc : d[i * 4 + 1];
       d[i * 4 + 1] = enc;

@@ -434,12 +434,12 @@ export class Label {
     this.key = '';
   }
   draw(u, mine, hp, status) {
-    const key = [u.name, mine, hp, u.maxHp, u.armor, status.ow, status.hk, status.lw, u.team, status.dn ?? -1, status.rv ? 1 : 0].join('|');
+    const key = [u.name, mine, hp, u.maxHp, u.armor, status.ow, status.hk, status.lw, u.team, status.dn ?? -1, status.rv ? 1 : 0, status.col].join('|');
     if (key === this.key) return;
     this.key = key;
     const g = this.c.getContext('2d');
     g.clearRect(0, 0, 256, 84);
-    const team = mine ? '#ffb000' : '#ff3fa4';
+    const team = status.col || (mine ? '#ffb000' : '#ff3fa4');
     const tag = mine ? u.name : `${u.name}`;
     g.font = '800 25px system-ui, -apple-system, "Segoe UI", sans-serif';
     const icons = (status.ow ? 1 : 0) + (status.hk ? 1 : 0);

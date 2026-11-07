@@ -1,6 +1,19 @@
 // Canvas minimap. Rotated to match the isometric camera, so "up" on the
 // minimap is "up" on screen. Shows terrain, the tide, the current and next
-// safe ring, crates, your squad and every enemy you can currently see.
+// safe ring, crates, your squad and every enemy you can currently see,
+// each enemy squad in its own colour. Stage layers: kelp, shallows, barrels.
+
+import { squadColor } from './squads.js';
+
+/** Centre of the next safe ring (the zone may drift on some stages). */
+export function nextZone(z) {
+  if (!z) return { x: 0, y: 0, r: 0 };
+  const n = z.next;
+  const r = typeof n === 'number' ? n : (n?.r ?? z.r);
+  const x = n && typeof n === 'object' && Number.isFinite(n.x) ? n.x : Number.isFinite(z.nx) ? z.nx : Number.isFinite(z.nextX) ? z.nextX : z.x;
+  const y = n && typeof n === 'object' && Number.isFinite(n.y) ? n.y : Number.isFinite(z.ny) ? z.ny : Number.isFinite(z.nextY) ? z.nextY : z.y;
+  return { x, y, r };
+}
 
 const COL = {
   bg: '#0a1519',
@@ -9,6 +22,9 @@ const COL = {
   half: '#6b4a35',
   full: '#9a937f',
   water: '#1d5f70',
+  kelp: '#2f6b47',
+  shallow: '#2c5a5f',
+  barrel: '#ff5a3c',
   ring: 'rgba(240,248,245,0.9)',
   next: '#7fe9ff',
   crate: '#7fe9ff',
@@ -73,13 +89,16 @@ export class Minimap {
     const z = state.zone;
     const img = g.createImageData(S, S);
     const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
-    const P = { land: hex(COL.land), fog: hex(COL.landFog), half: hex(COL.half), full: hex(COL.full), water: hex(COL.water) };
+    const P = { land: hex(COL.land), fog: hex(COL.landFog), half: hex(COL.half), full: hex(COL.full), water: hex(COL.water), kelp: hex(COL.kelp), shallow: hex(COL.shallow) };
+    const ter = state.map.terrain && state.map.terrain.length === S * S ? state.map.terrain : null;
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
       const k = y * S + x;
       let c;
       if (Math.hypot(x - z.x, y - z.y) > z.r) c = P.water;
       else if (state.map.cover[k] === 2) c = P.full;
       else if (state.map.cover[k] === 1) c = P.half;
+      else if (ter && ter[k] === 1) c = P.kelp;
+      else if (ter && ter[k] === 2) c = P.shallow;
       else c = fog && !fog[k] ? P.fog : P.land;
       const i = k * 4;
       img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = 255;
@@ -101,7 +120,7 @@ export class Minimap {
     if (fog) for (let i = 0; i < fog.length; i += 7) fogSig = (fogSig * 31 + fog[i]) | 0;
     let coverSig = 0;
     for (let i = 0; i < state.map.cover.length; i += 3) coverSig = (coverSig * 33 + state.map.cover[i]) | 0;
-    const sig = `${state.seed}|${state.zone.r}|${coverSig}|${fogSig}`;
+    const sig = `${state.seed}|${state.stage}|${state.zone.r}|${state.zone.x}|${state.zone.y}|${coverSig}|${fogSig}`;
     if (sig !== this.terrainSig) { this._buildTerrain(state, fog); this.terrainSig = sig; }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -122,10 +141,31 @@ export class Minimap {
     ctx.lineWidth = lw * 1.6 * this.dpr;
     ctx.strokeStyle = COL.ring;
     ctx.beginPath(); ctx.arc(z.x + 0.5, z.y + 0.5, Math.max(0.01, z.r), 0, Math.PI * 2); ctx.stroke();
+    const nz = nextZone(z);
     ctx.strokeStyle = COL.next;
     ctx.setLineDash([lw * 4 * this.dpr, lw * 3 * this.dpr]);
-    ctx.beginPath(); ctx.arc(z.x + 0.5, z.y + 0.5, Math.max(0.01, z.next), 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(nz.x + 0.5, nz.y + 0.5, Math.max(0.01, nz.r), 0, Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]);
+    if (Math.hypot(nz.x - z.x, nz.y - z.y) > 0.6) {
+      // Drifting zone: an arrow from the current centre to the next one.
+      ctx.strokeStyle = COL.next; ctx.fillStyle = COL.next;
+      ctx.lineWidth = lw * 1.4 * this.dpr;
+      const ax = z.x + 0.5, ay = z.y + 0.5, bx = nz.x + 0.5, by = nz.y + 0.5;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      const a = Math.atan2(by - ay, bx - ax), hl = 2.2;
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx - Math.cos(a - 0.5) * hl, by - Math.sin(a - 0.5) * hl); ctx.lineTo(bx - Math.cos(a + 0.5) * hl, by - Math.sin(a + 0.5) * hl); ctx.closePath(); ctx.fill();
+    }
+
+    // explosive barrels (still standing)
+    const ex = state.map.explosive;
+    if (ex && ex.length === S * S) {
+      ctx.fillStyle = COL.barrel;
+      for (let k = 0; k < ex.length; k++) {
+        if (!ex[k] || !state.map.cover[k]) continue;
+        const x = k % S, y = (k / S) | 0;
+        ctx.beginPath(); ctx.arc(x + 0.5, y + 0.5, 0.55, 0, Math.PI * 2); ctx.fill();
+      }
+    }
 
     // crates
     for (const c of state.crates) {
@@ -148,10 +188,11 @@ export class Minimap {
       if (!u.alive || !visible(u)) continue;
       const d = R?.disp?.[u.id] || u;
       const mine = u.team === myTeam;
-      ctx.fillStyle = mine ? COL.me : COL.enemy;
+      ctx.fillStyle = mine ? COL.me : squadColor(u.team, myTeam);
       ctx.beginPath();
       ctx.arc(d.x + 0.5, d.y + 0.5, u.isPlayer ? 1.25 : 0.95, 0, Math.PI * 2);
       ctx.fill();
+      if (!mine) { ctx.strokeStyle = 'rgba(0,0,0,.7)'; ctx.lineWidth = lw * 0.8 * this.dpr; ctx.stroke(); }
       if (u.isPlayer) {
         ctx.strokeStyle = '#1a1406'; ctx.lineWidth = lw * this.dpr; ctx.stroke();
       }

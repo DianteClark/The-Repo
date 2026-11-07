@@ -7,11 +7,12 @@ import { P } from './palette.js';
 import { patchWorld, WATER_Y } from './fields.js';
 import { hash, rng } from './util.js';
 
-export const T_SAND = 0, T_CONCRETE = 1, T_BOARD = 2, T_FLOOR = 3;
-const TOP = [0, 0.025, 0.06, 0.035];
+export const T_SAND = 0, T_CONCRETE = 1, T_BOARD = 2, T_FLOOR = 3, T_DECK = 4, T_SHALLOW = 5;
+// shallow-water tiles (map.terrain == 2) sit below the waterline so the water plane covers them
+const TOP = [0, 0.025, 0.06, 0.035, 0.03, -0.13];
 
-/** Classify each tile into a surface type, deterministic per map. */
-export function classifyTiles(map, seed) {
+/** Classify each tile into a surface type, deterministic per map. look: stage look (deck plating on the rig). */
+export function classifyTiles(map, seed, look = null) {
   const S = map.size, cover = map.cover;
   const type = new Uint8Array(S * S);
   const dir = new Uint8Array(S * S);
@@ -41,8 +42,10 @@ export function classifyTiles(map, seed) {
     let t = n > 0.5 ? T_CONCRETE : T_SAND;
     if (edge < 2) t = T_SAND;
     if (hitWall(x, y, 1, 0) && hitWall(x, y, -1, 0) && hitWall(x, y, 0, 1) && hitWall(x, y, 0, -1)) t = T_FLOOR;
+    if (look && look.deck && t === T_CONCRETE) t = T_DECK;
     type[k] = t;
   }
+  const terr = map.terrain;
   // Boardwalk lanes: a few straight runs across sand.
   const lanes = 3 + Math.floor(r() * 2);
   for (let i = 0; i < lanes; i++) {
@@ -54,17 +57,18 @@ export function classifyTiles(map, seed) {
       const x = horiz ? s : c + o, y = horiz ? c + o : s;
       if (x >= S || y >= S) continue;
       const k = y * S + x;
-      if (type[k] === T_FLOOR) continue;
+      if (type[k] === T_FLOOR || (terr && terr[k] === 2)) continue;
       type[k] = T_BOARD;
       dir[k] = horiz ? 0 : 1;
     }
   }
+  if (terr) for (let k = 0; k < S * S; k++) if (terr[k] === 2 && !cover[k]) type[k] = T_SHALLOW;
   return { type, dir };
 }
 
 export function tileTop(type) { return TOP[type]; }
 
-export function buildTerrain(map, fields, cls, wx, wz) {
+export function buildTerrain(map, fields, cls, wx, wz, look = null) {
   const S = map.size, n = S * S;
   const group = new THREE.Group();
   const geo = new THREE.BoxGeometry(1, 0.6, 1);
@@ -78,12 +82,19 @@ export function buildTerrain(map, fields, cls, wx, wz) {
   });
   const mesh = new THREE.InstancedMesh(geo, mat, n);
   const m4 = new THREE.Matrix4(), col = new THREE.Color();
-  const base = { [T_SAND]: P.sand, [T_CONCRETE]: P.concrete, [T_BOARD]: P.board, [T_FLOOR]: P.tileFloor };
+  const G = look?.ground || {};
+  const base = {
+    [T_SAND]: G.sand ?? P.sand, [T_CONCRETE]: G.concrete ?? P.concrete, [T_BOARD]: G.board ?? P.board,
+    [T_FLOOR]: G.floor ?? P.tileFloor, [T_DECK]: G.deck ?? 0x6f6d66, [T_SHALLOW]: G.seabed ?? 0xa89a74,
+  };
+  const kelpCol = new THREE.Color(G.kelp ?? 0x6f7f4e);
+  const terr = map.terrain;
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
     const k = y * S + x, t = cls.type[k];
     m4.makeTranslation(wx(x), TOP[t], wz(y));
     mesh.setMatrixAt(k, m4);
     col.set(base[t]);
+    if (terr && terr[k] === 1) col.lerp(kelpCol, 0.6); // kelp bed: dark mossy ground under the fronds
     const j = (hash(k * 3 + 1) - 0.5);
     col.offsetHSL(j * 0.012, j * 0.04, j * 0.05);
     mesh.setColorAt(k, col);
@@ -152,6 +163,21 @@ const GROUND_FRAG = /* glsl */`
     float pj = hash21(vec2(id, floor(across * 0.7 + hash21(vec2(id, 3.0)))));
     c *= (0.82 + pj * 0.3) * (1.0 - gap * 0.6);
     c *= 0.95 + sin(across * 40.0 + pj * 20.0) * 0.03 * top;
+  } else if (ty > 4.5) {
+    // shallow-water seabed: soft ripples, pebbles
+    float rip = sin(p.x * 5.0 - p.y * 4.0 + n1 * 6.0 + uTime * 0.6) * 0.5 + 0.5;
+    c *= 0.86 + rip * 0.1 + (hash21(floor(p * 14.0)) - 0.5) * 0.1;
+  } else if (ty > 3.5) {
+    // rig deck plating: 1-tile plates, diamond tread, rivets, rust bleed
+    vec2 sl = fract(p + uGridOff + 0.5);
+    float seam = 1.0 - smoothstep(0.0, 0.03, min(min(sl.x, 1.0 - sl.x), min(sl.y, 1.0 - sl.y)));
+    vec2 dq = fract(vec2(p.x + p.y, p.x - p.y) * 4.0);
+    float tread = smoothstep(0.35, 0.5, min(abs(dq.x - 0.5), abs(dq.y - 0.5)) * 2.0);
+    vec2 rv = fract(sl * 4.0);
+    float rivet = (1.0 - smoothstep(0.05, 0.1, length(rv - 0.5))) * step(0.85, max(abs(sl.x - 0.5), abs(sl.y - 0.5)) * 2.0);
+    float rust = smoothstep(0.55, 0.8, vnoise(p * 1.3 + 11.0)) * 0.6 + smoothstep(0.7, 0.9, n2) * 0.3;
+    c *= (0.92 + tread * 0.08 + (n1 - 0.5) * 0.08) * (1.0 - seam * 0.35) * (1.0 + rivet * 0.25);
+    c = mix(c, vec3(0.42, 0.2, 0.1), rust * 0.55);
   } else {
     // tiled floor
     vec2 tf = fract(p * 3.0 + uGridOff * 3.0);

@@ -14,25 +14,56 @@ import { tileTop } from './terrain.js';
 const CH = 9; // chunk size in tiles
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
+const NEON = [0xff4fa0, 0xa05bff, 0x9cff4a, 0xff4a5a, 0xe8d8ff];
+
 export class PropField {
-  constructor(map, cls, fields, wx, wz, seed) {
+  constructor(map, cls, fields, wx, wz, seed, look = null) {
     this.map = map;
     this.S = map.size;
     this.cls = cls;
     this.wx = wx; this.wz = wz;
     this.seed = seed;
+    this.look = look || { mix: null, wallScale: 1, neon: false };
     const n = this.S * this.S;
     this.cover = Uint8Array.from(map.cover); // displayed cover (lags sim until events play)
+    this.explosive = map.explosive ? Uint8Array.from(map.explosive) : new Uint8Array(n); // displayed live barrels
     this.damaged = new Uint8Array(n);
     this.wasCover = new Uint8Array(n);
     this.group = new THREE.Group();
-    this.mat = patchWorld(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 }), fields, 'props');
-    this.glowMat = patchWorld(new THREE.MeshBasicMaterial({ vertexColors: true }), fields, 'glow');
+    // Always in the transparent pass (opacity 1 normally): toggling `transparent` would
+    // recompile the program (three bakes OPAQUE in), a visible hitch on the first fade.
+    this.mat = patchWorld(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04, transparent: true }), fields, 'props');
+    this.glowMat = patchWorld(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), fields, 'glow');
+    this.spill = []; // neon light pools [{x, z, color, r}] (spire)
     this._classify();
     this.nc = Math.ceil(this.S / CH);
     this.chunks = [];
     for (let cy = 0; cy < this.nc; cy++) for (let cx = 0; cx < this.nc; cx++) this.chunks.push({ cx, cy, mesh: null, glow: null });
+    this._collectSpill = true;
     for (const c of this.chunks) this._buildChunk(c);
+    this._collectSpill = false;
+    // cover fade (move mode): props go near-invisible, footprints take over
+    this.fade = 0;
+    this.foot = buildFootprints(this.S);
+    this.foot.mesh.visible = false;
+    this.group.add(this.foot.mesh);
+    this._footDirty = true;
+  }
+
+  /** k in [0,1]: 0 = props solid, 1 = props at ~6% with ground footprints showing. */
+  setFade(k) {
+    if (k === this.fade) return;
+    this.fade = k;
+    const on = k > 0.001;
+    const op = 1 - 0.94 * k;
+    for (const m of [this.mat, this.glowMat]) { m.opacity = op; m.depthWrite = k < 0.5; }
+    for (const c of this.chunks) {
+      if (c.mesh) { c.mesh.castShadow = k < 0.5; c.mesh.renderOrder = on ? 3 : 0; }
+      if (c.glow) c.glow.renderOrder = on ? 3 : 0;
+    }
+    if (on && this._footDirty) { this._footDirty = false; this.foot.rebuild(this.cover, this.wx, this.wz, this.cls); }
+    this.foot.mesh.visible = on;
+    this.foot.mat.uniforms.uA.value = k;
   }
 
   _classify() {
@@ -91,14 +122,17 @@ export class PropField {
         this._prop(b, gb, x, y, k, cv);
       }
     }
+    const faded = this.fade > 0.001;
     if (!b.empty) {
       c.mesh = new THREE.Mesh(b.build({ stain: true }), this.mat);
-      c.mesh.castShadow = true;
+      c.mesh.castShadow = !(this.fade >= 0.5);
       c.mesh.receiveShadow = true;
+      c.mesh.renderOrder = faded ? 3 : 0;
       this.group.add(c.mesh);
     }
     if (!gb.empty) {
       c.glow = new THREE.Mesh(gb.build({ ao: false }), this.glowMat);
+      c.glow.renderOrder = faded ? 3 : 0;
       this.group.add(c.glow);
     }
   }
@@ -117,7 +151,10 @@ export class PropField {
     const from = this.cover[k];
     if (from === to) return false;
     this.cover[k] = to;
+    this._footDirty = true;
+    if (this.fade > 0.001) { this._footDirty = false; this.foot.rebuild(this.cover, this.wx, this.wz, this.cls); }
     if (to < from) this.damaged[k] = 1;
+    if (to === 0) this.explosive[k] = 0;
     if (from > 0) this.wasCover[k] = 1;
     const dirty = new Set();
     for (const [dx, dy] of [[0, 0], ...DIRS]) {
@@ -129,8 +166,19 @@ export class PropField {
     return true;
   }
 
+  /** A barrel went off: the tile shows scorched wreckage until its cover_change lands. */
+  detonate(x, y) {
+    const k = y * this.S + x;
+    if (!this.explosive[k]) return false;
+    this.explosive[k] = 0;
+    this.damaged[k] = 1;
+    this._buildChunk(this.chunks[Math.floor(y / CH) * this.nc + Math.floor(x / CH)]);
+    return true;
+  }
+
   /** Approximate dominant colour of the prop on a tile (for debris). */
   debrisColors(k, cv) {
+    if (this.explosive[k]) return [0xc8261c, 0x3a3d40, 0xe0d4b6];
     if (cv === 2) return this.style[k] === 2 ? [P.containerCols[this.lineId[k] % P.containerCols.length], P.rust2, P.steel] : [P.plaster, P.wallConcrete, P.wallDark];
     return [P.wood, P.wallConcrete, P.rust, P.sandbag];
   }
@@ -138,6 +186,7 @@ export class PropField {
   dispose() {
     for (const c of this.chunks) { c.mesh?.geometry.dispose(); c.glow?.geometry.dispose(); }
     this.mat.dispose(); this.glowMat.dispose();
+    this.foot.dispose();
   }
 
   // ---------- prop recipes ----------
@@ -147,13 +196,15 @@ export class PropField {
     const nb = this._nb(x, y);
     if (cv === 0) return debrisScatter(b, r);
     if (cv === 2) {
-      const h = 1.02 + (this.map.wallHeight[k] - 0.95) * 1.0;
+      const wh = this.map.wallHeight ? this.map.wallHeight[k] : 1.1;
+      const h = (1.02 + (wh - 0.95) * 1.0) * (this.look.wallScale || 1);
       const st = this.style[k];
       if (st === 2) return container(b, r, this.axis[k], this.lineEnd[k], P.containerCols[hash(this.lineId[k]) * P.containerCols.length | 0], 1.12);
-      if (st === 3) { const v = hash(k * 13 + 5); return v < 0.5 ? pillar(b, r, h) : v < 0.78 ? kiosk(b, gb, r, h) : palletStack(b, r, h); }
+      if (st === 3) { const v = hash(k * 13 + 5); return v < 0.5 ? pillar(b, r, h) : v < 0.78 ? kiosk(b, gb, r, h, this.look.neon) : palletStack(b, r, h); }
       return wall(b, gb, r, nb, h, x, y, this);
     }
     // half cover
+    if (this.explosive[k]) return explosiveBarrels(b, gb, r);
     if (this.damaged[k]) return rubble(b, r, true);
     const wallNb = nb.some((v, i) => {
       if (!v) return false;
@@ -162,17 +213,30 @@ export class PropField {
       return v === 2 ? this.style[nk] === 1 : this._isStub(x + dx, y + dy);
     });
     if (wallNb) return stub(b, r, nb, x, y, this);
-    const pick = hash(k * 31 + 7);
-    if (pick < 0.14) return crates(b, r);
-    if (pick < 0.26) return barrels(b, r);
-    if (pick < 0.39) return sandbags(b, r, nb);
-    if (pick < 0.51) return car(b, r);
-    if (pick < 0.61) return jersey(b, r, nb);
-    if (pick < 0.71) return boat(b, r);
-    if (pick < 0.78) return tires(b, r);
-    if (pick < 0.86) return nettedCrates(b, r);
-    if (pick < 0.92) return buoyPile(b, r);
-    return rubble(b, r, false);
+    const mix = this.look.mix || MIX;
+    let pick = hash(k * 31 + 7) * this._mixTotal(mix);
+    let i = 0;
+    for (; i < mix.length - 1; i++) { if ((pick -= mix[i]) < 0) break; }
+    switch (i) {
+      case 0: return crates(b, r);
+      case 1: return barrels(b, r);
+      case 2: return sandbags(b, r, nb);
+      case 3: return car(b, r);
+      case 4: return jersey(b, r, nb);
+      case 5: return boat(b, r);
+      case 6: return tires(b, r);
+      case 7: return nettedCrates(b, r);
+      case 8: return buoyPile(b, r);
+      case 10: return pipes(b, r, nb);
+      default: return rubble(b, r, false);
+    }
+  }
+
+  _mixTotal(mix) {
+    if (this._mixT && this._mixT[0] === mix) return this._mixT[1];
+    const t = mix.reduce((a, v) => a + v, 0);
+    this._mixT = [mix, t];
+    return t;
   }
 
   _isStub(x, y) {
@@ -262,7 +326,39 @@ function wall(b, gb, r, nb, H, x, y, F) {
   if (arms <= 1 || r() < 0.2) rebar(b, r, 0, hc, 0, 2 + (r() * 2 | 0));
   // kelp/rubble at the foot
   if (r() < 0.5) kelpTuft(b, r, (r() - 0.5) * 0.8, (r() < 0.5 ? 1 : -1) * 0.36);
+  if (F.look.neon) neonSign(b, gb, r, nb, hc, x, y, F);
   void x; void y; void F;
+}
+
+/** Night Spires: neon tubes and signs on wall faces that look onto open ground, plus a light pool below. */
+function neonSign(b, gb, r, nb, H, x, y, F) {
+  if (hash(y * F.S + x + 4242) > 0.3) return;
+  const S = F.S;
+  const open = (dx, dy) => { const nx = x + dx, ny = y + dy; return nx >= 0 && ny >= 0 && nx < S && ny < S && !F.map.cover[ny * S + nx]; };
+  const faces = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dy], i) => !nb[i] && open(dx, dy));
+  if (!faces.length) return;
+  const [dx, dy] = faces[(r() * faces.length) | 0];
+  const col = NEON[(hash(F.lineId[y * S + x] * 3 + 17) * NEON.length) | 0];
+  const T = 0.3 + 0.012;
+  const ox = dx * T, oz = dy * T;
+  const kind = r();
+  if (kind < 0.45) {
+    // vertical tube
+    const hh = 0.5 + r() * (H - 0.7);
+    gb.box(dx ? 0.03 : 0.05, hh, dy ? 0.03 : 0.05, ox + (dy ? (r() - 0.5) * 0.3 : 0), 0.35 + hh / 2, oz + (dx ? (r() - 0.5) * 0.3 : 0), col);
+  } else {
+    // sign: dark backing box + glowing frame + bar "text"
+    const sw = 0.42, sh = 0.24, sy = H - 0.3 - r() * 0.3;
+    const bx = dx ? 0.04 : sw, bz = dy ? 0.04 : sw;
+    b.box(bx, sh, bz, ox + dx * 0.02, sy, oz + dy * 0.02, 0x15161c);
+    gb.box(dx ? 0.05 : sw + 0.03, 0.025, dy ? 0.05 : sw + 0.03, ox + dx * 0.03, sy + sh / 2, oz + dy * 0.03, col);
+    gb.box(dx ? 0.05 : sw + 0.03, 0.025, dy ? 0.05 : sw + 0.03, ox + dx * 0.03, sy - sh / 2, oz + dy * 0.03, col);
+    for (let i = 0; i < 3; i++) {
+      const w = 0.06 + r() * 0.06, off = -0.12 + i * 0.12;
+      gb.box(dx ? 0.05 : w, 0.07, dy ? 0.05 : w, ox + dx * 0.04 + (dy ? off : 0), sy, oz + dy * 0.04 + (dx ? off : 0), col);
+    }
+  }
+  if (F._collectSpill) F.spill.push({ x: F.wx(x) + dx * 0.95, z: F.wz(y) + dy * 0.95, color: col, r: 1.1 + r() * 0.5 });
 }
 
 const WALL_PAINT = [P.plaster, P.plaster, 0x9fbcae, 0xc79a7d, 0xa9a69a, 0xd8cdb0, 0x7fa3a3];
@@ -525,7 +621,7 @@ function buoyPile(b, r) {
 }
 
 /** Single full-cover tile: a rusted harbour kiosk with a lit sign. */
-function kiosk(b, gb, r, H) {
+function kiosk(b, gb, r, H, neon = false) {
   const body = jit(r, [0x8d9d95, P.plaster2, 0x7fa3a3][r() * 3 | 0]);
   b.box(0.7, 0.18, 0.7, 0, 0.09, 0, P.wallConcrete);
   b.box(0.62, H - 0.3, 0.62, 0, 0.18 + (H - 0.3) / 2, 0, body);
@@ -534,7 +630,7 @@ function kiosk(b, gb, r, H) {
   b.box(0.64, 0.36, 0.46, 0, 0.62, 0, P.window);
   for (let i = 0; i < 4; i++) b.box(0.66, 0.025, 0.66, 0, 0.47 + i * 0.1, 0, P.steel);
   b.box(0.3, 0.14, 0.02, 0, H - 0.2, 0.322, P.bone); // sign
-  if (r() < 0.6) gb.box(0.24, 0.08, 0.025, 0, H - 0.2, 0.325, P.windowGlow);
+  if (neon || r() < 0.6) gb.box(0.24, 0.08, 0.025, 0, H - 0.2, 0.325, neon ? NEON[(r() * NEON.length) | 0] : P.windowGlow);
   b.box(0.12, 0.3, 0.012, 0.2, 0.75, 0.315, P.rust2); // rust streak
   rebar(b, r, 0.2, H, 0.1, 2);
 }
@@ -548,6 +644,151 @@ function palletStack(b, r, H) {
   }
   b.box(0.8, H * 0.55, 0.04, 0, H * 0.62, 0.36, 0x46574f, 0, 0.06); // tarp hanging off one side
   b.box(0.82, 0.05, 0.78, 0, n * 0.16 + 0.02, 0, 0x46574f, 0.1);
+}
+
+// ---------- 3.0 recipes ----------
+
+/** Rig Graveyard explosive drums: dark steel, bright red bands, hazard diamond. */
+function explosiveBarrels(b, gb, r) {
+  const spots = [[-0.17, -0.12], [0.18, -0.08], [0.0, 0.2]];
+  const n = r() < 0.5 ? 3 : 2;
+  for (let i = 0; i < n; i++) {
+    const [x, z] = spots[i];
+    const red = 0xc8261c, steel = 0x3a3d40;
+    b.cyl(0.165, 0.52, 10, x, 0.26, z, steel);
+    b.cyl(0.172, 0.07, 10, x, 0.13, z, red);
+    b.cyl(0.172, 0.07, 10, x, 0.39, z, red);
+    b.cyl(0.14, 0.02, 10, x, 0.525, z, 0x2a2c2e);
+    b.cyl(0.03, 0.03, 6, x + 0.06, 0.54, z + 0.04, 0x8a8f90); // bung
+    // hazard diamond facing outward
+    const a = Math.atan2(x, z) || 0.4;
+    const fx = x + Math.sin(a) * 0.168, fz = z + Math.cos(a) * 0.168;
+    b.box(0.11, 0.11, 0.012, fx, 0.26, fz, P.bone, a, 0, Math.PI / 4);
+    b.box(0.06, 0.06, 0.016, fx + Math.sin(a) * 0.004, 0.26, fz + Math.cos(a) * 0.004, red, a, 0, Math.PI / 4);
+    gb.cyl(0.174, 0.018, 10, x, 0.39, z, 0xff3a24); // glowing band so they read at night / in fog
+  }
+  b.box(0.7, 0.04, 0.6, 0.0, 0.02, 0.03, 0x2d2a26, r() * 0.4); // oil-soaked pallet
+}
+
+/** Rig pipe bundle: stacked rusty pipes on chocks. */
+function pipes(b, r, nb) {
+  const alongX = nb[0] || nb[1] ? true : nb[2] || nb[3] ? false : r() < 0.5;
+  const rz = alongX ? Math.PI / 2 : 0, rx = alongX ? 0 : Math.PI / 2;
+  const rows = [[-0.2, 0.12], [0.0, 0.12], [0.2, 0.12], [-0.1, 0.32], [0.1, 0.32]];
+  for (const [o, y] of rows) {
+    if (y > 0.3 && r() < 0.3) continue;
+    const c = jit(r, r() < 0.6 ? P.rust : P.steel, 0.1);
+    b.cyl(0.1, 0.96, 8, alongX ? 0 : o, y, alongX ? o : 0, c, 0, rx, rz);
+    b.cyl(0.06, 0.97, 6, alongX ? 0 : o, y, alongX ? o : 0, 0x1d1f20, 0, rx, rz);
+  }
+  for (const s of [-0.35, 0.35]) b.box(alongX ? 0.08 : 0.62, 0.06, alongX ? 0.62 : 0.08, alongX ? s : 0, 0.03, alongX ? 0 : s, P.wood2);
+}
+
+const MIX = [14, 12, 13, 12, 10, 10, 7, 8, 6, 8, 0];
+
+// ---------- cover footprints (shown while cover is faded in move mode) ----------
+
+const FOOT_VERT = /* glsl */`
+attribute float aEdge;
+attribute float aKind;
+varying vec2 vUv;
+varying float vEdge;
+varying float vKind;
+void main() {
+  vUv = uv; vEdge = aEdge; vKind = aKind;
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+}`;
+const FOOT_FRAG = /* glsl */`
+uniform float uA;
+uniform sampler2D uGlyph;
+varying vec2 vUv;
+varying float vEdge;
+varying float vKind;
+float bit(float m, float b) { return mod(floor(m / b), 2.0); }
+void main() {
+  vec2 u = vUv;
+  float e = 1e3;
+  float ins = 0.06;
+  if (bit(vEdge, 1.0) < 0.5) e = min(e, 1.0 - ins - u.x);
+  if (bit(vEdge, 2.0) < 0.5) e = min(e, u.x - ins);
+  if (bit(vEdge, 4.0) < 0.5) e = min(e, 1.0 - ins - u.y);
+  if (bit(vEdge, 8.0) < 0.5) e = min(e, u.y - ins);
+  float full = step(1.5, vKind);
+  float w = mix(0.022, 0.034, full);
+  float aa = fwidth(e) * 1.2;
+  float line = 1.0 - smoothstep(w - aa, w + aa, abs(e));
+  float inside = step(0.0, e);
+  // glyph in the middle of each tile: half shield / full shield
+  vec2 g = (u - 0.5) / 0.46 + 0.5;
+  vec4 gl = vec4(0.0);
+  if (g.x > 0.0 && g.y > 0.0 && g.x < 1.0 && g.y < 1.0) gl = texture2D(uGlyph, vec2((g.x + full) * 0.5, 1.0 - g.y));
+  vec3 bone = vec3(0.95, 0.93, 0.86);
+  vec3 col = mix(vec3(0.04, 0.07, 0.08), bone, max(line, gl.r));
+  float a = max(max(line * 0.95, inside * mix(0.3, 0.42, full)), gl.a * 0.92);
+  gl_FragColor = vec4(col, a * uA);
+}`;
+
+function glyphAtlas() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 2; i++) {
+    g.save(); g.translate(i * 128, 0);
+    const path = () => {
+      g.beginPath(); g.moveTo(64, 14); g.lineTo(104, 28); g.lineTo(100, 66); g.quadraticCurveTo(90, 96, 64, 114);
+      g.quadraticCurveTo(38, 96, 28, 66); g.lineTo(24, 28); g.closePath();
+    };
+    g.lineJoin = 'round';
+    // r = bone amount, a = coverage
+    path(); g.fillStyle = 'rgba(0,0,0,0.85)'; g.fill();
+    g.save(); path(); g.clip(); g.fillStyle = '#fff';
+    if (i === 1) g.fillRect(0, 0, 128, 128); else g.fillRect(0, 66, 128, 62);
+    g.restore();
+    path(); g.lineWidth = 9; g.strokeStyle = '#fff'; g.stroke();
+    g.restore();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.anisotropy = 4;
+  return t;
+}
+
+function buildFootprints(S) {
+  const cap = S * S;
+  const geo = new THREE.PlaneGeometry(1, 1);
+  geo.rotateX(-Math.PI / 2);
+  const uv = geo.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i));
+  const edge = new Float32Array(cap), kind = new Float32Array(cap);
+  geo.setAttribute('aEdge', new THREE.InstancedBufferAttribute(edge, 1));
+  geo.setAttribute('aKind', new THREE.InstancedBufferAttribute(kind, 1));
+  const tex = glyphAtlas();
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uA: { value: 0 }, uGlyph: { value: tex } },
+    vertexShader: FOOT_VERT, fragmentShader: FOOT_FRAG, transparent: true, depthWrite: false,
+  });
+  mat.extensions = { derivatives: true };
+  const mesh = new THREE.InstancedMesh(geo, mat, cap);
+  mesh.count = 0; mesh.renderOrder = 4; mesh.frustumCulled = false;
+  const m4 = new THREE.Matrix4();
+  return {
+    mesh, mat,
+    rebuild(cover, wx, wz, cls) {
+      let i = 0;
+      const same = (x, y, v) => x >= 0 && y >= 0 && x < S && y < S && cover[y * S + x] === v ? 1 : 0;
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+        const v = cover[y * S + x];
+        if (!v) continue;
+        m4.makeTranslation(wx(x), tileTop(cls.type[y * S + x]) + 0.135, wz(y));
+        mesh.setMatrixAt(i, m4);
+        edge[i] = same(x + 1, y, v) + same(x - 1, y, v) * 2 + same(x, y + 1, v) * 4 + same(x, y - 1, v) * 8;
+        kind[i] = v;
+        i++;
+      }
+      mesh.count = i;
+      mesh.instanceMatrix.needsUpdate = true;
+      geo.attributes.aEdge.needsUpdate = true; geo.attributes.aKind.needsUpdate = true;
+    },
+    dispose() { geo.dispose(); mat.dispose(); tex.dispose(); },
+  };
 }
 
 // ---------- open-ground decor (never taller than ~0.12: must not read as cover) ----------
@@ -590,6 +831,16 @@ export function buildDecor(map, cls, fields, wx, wz, seed) {
     } else if (type === 2) {
       if (pick < 0.5) b.box(0.5, 0.025, 0.1, ox, 0.012, oz, P.wood2, cls.dir[k] ? 0 : Math.PI / 2); // loose plank
       else { b.cyl(0.12, 0.05, 10, ox, 0.025, oz, 0xb59d6d); }
+    } else if (type === 5) {
+      // shallow water: a few stones and shells on the seabed
+      if (pick < 0.6) for (let i = 0; i < 3; i++) b.ico(0.04 + r() * 0.04, ox + (r() - 0.5) * 0.4, 0.01, oz + (r() - 0.5) * 0.4, r() < 0.5 ? 0x8a8070 : 0xc9bea2, 1, 0.5, 1, r() * 6);
+    } else if (type === 4) {
+      // rig deck: oil stains, hatch plates, coiled hose, chain
+      if (pick < 0.3) b.cyl(0.25 + r() * 0.15, 0.004, 10, ox, 0.002, oz, 0x2a2826, 0, 0, 0, 0.2 + r() * 0.12);
+      else if (pick < 0.5) { b.box(0.42, 0.012, 0.42, ox, 0.006, oz, 0x56534d); b.box(0.12, 0.02, 0.03, ox + 0.12, 0.016, oz, 0x8a8f90); }
+      else if (pick < 0.7) { b.cyl(0.14, 0.05, 10, ox, 0.025, oz, 0x2b2f30); b.cyl(0.08, 0.052, 8, ox, 0.026, oz, 0x141616); }
+      else if (pick < 0.85) for (let i = 0; i < 5; i++) b.box(0.07, 0.03, 0.045, ox + i * 0.07 - 0.14, 0.015, oz + Math.sin(i) * 0.04, 0x6a5040, (i % 2) * 1.57);
+      else b.box(0.08, 0.006, 0.7, ox * 0.4, 0.003, 0, 0xc9b240, (x + y) % 2 ? 0 : Math.PI / 2); // faded deck paint
     } else {
       // tiled floor (indoors): broken tiles, paper, a chair on its side
       if (pick < 0.4) for (let i = 0; i < 3; i++) b.box(0.12, 0.012, 0.12, ox + (r() - 0.5) * 0.3, 0.006, oz + (r() - 0.5) * 0.3, 0xcfc6ae, r() * 6);

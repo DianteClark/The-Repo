@@ -85,12 +85,12 @@ export const MOOD = [
   },
 ];
 
-/** Blend mood keyframes into `out` for storm in [0,1]. */
-export function moodAt(storm, out) {
-  const f = Math.max(0, Math.min(1, storm)) * (MOOD.length - 1);
-  const i = Math.min(MOOD.length - 2, Math.floor(f));
+/** Blend mood keyframes (default: the harbor arc) into `out` for storm in [0,1]. */
+export function moodAt(storm, out, frames = MOOD) {
+  const f = Math.max(0, Math.min(1, storm)) * (frames.length - 1);
+  const i = Math.min(frames.length - 2, Math.floor(f));
   const t = f - i;
-  const A = MOOD[i], B = MOOD[i + 1];
+  const A = frames[i], B = frames[i + 1];
   out.sun.copy(A.sun).lerp(B.sun, t); out.sky.copy(A.sky).lerp(B.sky, t); out.ground.copy(A.ground).lerp(B.ground, t);
   out.fog.copy(A.fog).lerp(B.fog, t); out.bg.copy(A.bg).lerp(B.bg, t);
   out.sunI = A.sunI + (B.sunI - A.sunI) * t;

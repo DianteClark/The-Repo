@@ -6,11 +6,13 @@ import {
   MISS_STREAK_CAP, MEDKIT_HEAL, ZONE, CRATE_COUNT, CRATE_TABLE, MOD_CAP, CALLSIGNS,
   FRAG, FRAG_CAP, AIMED, BREACH, START_FRAGS, SUPPLY_DROP_ROUNDS, ABILITY_TEXT, FLANK_DMG,
   START_SMOKES, SMOKE, SMOKE_CAP, PATCH, SCAN, REVIVE_HP, BLEED_TURNS,
+  STAGES, STAGE_KEYS, BARREL,
 } from './constants.js';
 import { generateMap } from './map.js';
 import { makeRng, roll } from './rng.js';
 import {
   reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, teamSeesTile, dist, los, inBounds, DIRS8, standing,
+  weaponRange, isBarrel,
 } from './rules.js';
 
 const CLASS_KEYS = Object.keys(CLASSES);
@@ -21,7 +23,12 @@ export function createGame(opts = {}) {
   const playerClass = CLASSES[opts.playerClass] ? opts.playerClass : 'assault';
   const humanCount = opts.noHuman ? 0 : 1;
   const rng = makeRng(seed ^ 0x51ed270b);
-  const map = generateMap(seed, MAP_SIZE);
+  // Stage: a key, 'random' (picked from the seed), or harbor by default.
+  const stage = STAGES[opts.stage] ? opts.stage
+    : opts.stage === 'random' ? STAGE_KEYS[Math.floor(roll(seed, 0x57a6e) * STAGE_KEYS.length)]
+      : 'harbor';
+  const stageDef = STAGES[stage];
+  const map = generateMap(seed, stageDef.size || MAP_SIZE, stage);
   const S = map.size;
 
   // Team layout
@@ -61,7 +68,7 @@ export function createGame(opts = {}) {
       if (map.cover[y * S + x]) continue;
       const gap = anchors.length ? Math.min(...anchors.map((a) => dist(a[0], a[1], x, y))) : 99;
       if (!best || gap > best.gap) best = { x, y, gap };
-      if (gap >= 14) break;
+      if (gap >= S * 0.4) break;
     }
     anchors.push([best.x, best.y]);
   }
@@ -100,11 +107,35 @@ export function createGame(opts = {}) {
     occupied.add(k);
   }
 
-  // Zone (the Surge): fixed final center, radius starts covering the whole map.
-  const zx = Math.round(c + (rng() - 0.5) * 8);
-  const zy = Math.round(c + (rng() - 0.5) * 8);
+  // Zone (the Surge). The whole shrink schedule is planned up front: radius r0
+  // covering the whole map, down by ZONE.step to the final ring, then 0.
+  // Normally the centre is fixed; on drift stages it walks to a point near one side.
+  let zx = Math.round(c + (rng() - 0.5) * 8);
+  let zy = Math.round(c + (rng() - 0.5) * 8);
+  let fx = zx, fy = zy;
+  if (stageDef.drift) {
+    const side = Math.floor(rng() * 4);
+    const along = 10 + Math.floor(rng() * (S - 20));
+    const edge = 8;
+    [fx, fy] = [[along, edge], [S - 1 - edge, along], [along, S - 1 - edge], [edge, along]][side];
+    // Start on the far side of the map from where it ends up.
+    zx = Math.round(Math.min(S - 6, Math.max(5, c + (c - fx) * 0.35)));
+    zy = Math.round(Math.min(S - 6, Math.max(5, c + (c - fy) * 0.35)));
+  }
   const r0 = Math.ceil(Math.max(dist(zx, zy, 0, 0), dist(zx, zy, S, 0), dist(zx, zy, 0, S), dist(zx, zy, S, S))) + 1;
-  const zone = { x: zx, y: zy, r: r0, next: r0 - ZONE.step, stage: 0 };
+  const zonePlan = [{ r: r0, x: zx, y: zy }];
+  while (zonePlan[zonePlan.length - 1].r > ZONE.finalRadius) {
+    zonePlan.push({ r: Math.max(ZONE.finalRadius, zonePlan[zonePlan.length - 1].r - ZONE.step) });
+  }
+  zonePlan.push({ r: ZONE.minRadius });
+  for (const p of zonePlan) {
+    if (p.x !== undefined) continue;
+    // Drift in proportion to how much the ring shrank, so each ring stays inside the last.
+    const t = Math.min(1, (r0 - p.r) / Math.max(1, r0 - ZONE.finalRadius));
+    p.x = Math.round(zx + (fx - zx) * t);
+    p.y = Math.round(zy + (fy - zy) * t);
+  }
+  const zone = { x: zx, y: zy, r: r0, next: zonePlan[1].r, nx: zonePlan[1].x, ny: zonePlan[1].y, stage: 0 };
 
   const order = teams.map((t) => t.id);
   // Rotate the start so the human isn't always first.
@@ -118,7 +149,7 @@ export function createGame(opts = {}) {
   for (let i = 0; i < startShift; i++) order.push(order.shift());
 
   const state = {
-    seed, mode, map, units, teams, crates, zone, order,
+    seed, mode, stage, map, units, teams, crates, zone, zonePlan, order,
     playerTeam, loneWolfTeam,
     round: 1, turnPos: 0, rollCounter: 0,
     eliminated: [], // team ids in elimination order
@@ -127,6 +158,7 @@ export function createGame(opts = {}) {
     reveals: [], // active scans: [{team, x, y, radius, ids}]
     nextSmokeId: 0,
     turnSerial: 0, // increments every team turn
+    flares: [], // night: units that fired, visible to all: [{id, team}]
   };
   state.startEvents = startTeamTurn(state);
   return state;
@@ -182,7 +214,19 @@ export const currentTeamId = (state) => state.order[state.turnPos];
 /** A team is in the match while at least one member is standing (downed members don't count). */
 export const teamAlive = (state, t) => state.teams[t].members.some((id) => standing(state.units[id]));
 export const aliveTeams = (state) => state.teams.filter((t) => teamAlive(state, t.id)).map((t) => t.id);
-export const insideZone = (state, x, y, r = state.zone.r) => dist(x, y, state.zone.x, state.zone.y) <= r;
+/**
+ * Is (x,y) inside the safe zone? Pass `r = state.zone.next` to ask about the next
+ * ring: on drifting stages that is measured from the next ring's own centre.
+ */
+export const insideZone = (state, x, y, r = state.zone.r) => {
+  const z = state.zone;
+  const next = r === z.next && r !== z.r && z.nx !== undefined;
+  return dist(x, y, next ? z.nx : z.x, next ? z.ny : z.y) <= r;
+};
+/** Inside the next ring (after the coming shrink), using its own centre. */
+export const insideNextZone = (state, x, y) => dist(x, y, state.zone.nx ?? state.zone.x, state.zone.ny ?? state.zone.y) <= state.zone.next;
+/** The stage definition for this match. */
+export const stageOf = (state) => STAGES[state.stage] || STAGES.harbor;
 export const zoneDamage = (state) => ZONE.damage + Math.floor(state.round / 5);
 export const roundsUntilShrink = (state) => {
   return ZONE.shrinkEvery - ((state.round - 1) % ZONE.shrinkEvery);
@@ -254,28 +298,134 @@ export function grenadeTargets(state, u) {
 }
 
 /**
- * What a grenade at (x,y) would do. Only lists units the thrower's team can see.
- * { valid, x, y, radius, units:[{id, dmg, lethal, ally}], cover:[{x,y,from,to}] }
+ * Plan an explosion and everything it sets off, without touching state.
+ * first = {kind:'frag'|'breach'|'barrel', x, y}. Returns the steps in order:
+ * [{kind, x, y, victims:[unitId], dmg, cover:[{x,y,from,to}], barrel?:true}]
+ * Frags and barrels hit everyone within 1.5 and knock cover down a level;
+ * breaches only open their own tile and hit enemies of `attacker` within 1.
+ * Any barrel within 1.5 of a blast detonates too (each one once), and chains.
+ */
+function planExplosions(state, attacker, first) {
+  const { map } = state;
+  const S = map.size;
+  const cover = Uint8Array.from(map.cover);
+  const boomed = new Set();
+  const steps = [];
+  const queue = [first];
+  if (first.kind === 'barrel') boomed.add(first.y * S + first.x);
+  while (queue.length) {
+    const b = queue.shift();
+    const step = { kind: b.kind, x: b.x, y: b.y, victims: [], dmg: 0, cover: [] };
+    const change = (x, y, to) => {
+      const k = y * S + x;
+      if (cover[k] === to) return;
+      step.cover.push({ x, y, from: cover[k], to });
+      cover[k] = to;
+    };
+    if (b.kind === 'breach') {
+      step.dmg = BREACH.dmg;
+      step.victims = state.units.filter((o) => o.alive && o.team !== attacker.team
+        && Math.max(Math.abs(o.x - b.x), Math.abs(o.y - b.y)) <= BREACH.radius).map((o) => o.id);
+      const k0 = b.y * S + b.x;
+      if (map.explosive && map.explosive[k0] && cover[k0] > 0 && !boomed.has(k0)) {
+        boomed.add(k0);
+        queue.push({ kind: 'barrel', x: b.x, y: b.y }); // blowing open a fuel drum
+      }
+      change(b.x, b.y, 0);
+    } else {
+      const r = b.kind === 'barrel' ? BARREL.radius : FRAG.radius;
+      step.dmg = b.kind === 'barrel' ? BARREL.dmg : FRAG.dmg;
+      step.victims = state.units.filter((o) => o.alive && dist(o.x, o.y, b.x, b.y) <= r).map((o) => o.id);
+      if (b.kind === 'barrel') change(b.x, b.y, 0);
+    }
+    const r = b.kind === 'barrel' ? BARREL.radius : FRAG.radius;
+    for (const [tx, ty] of blastTiles(map, b.x, b.y, r)) {
+      const k = ty * S + tx;
+      if (tx === b.x && ty === b.y && b.kind !== 'frag') continue; // handled above
+      if (map.explosive && map.explosive[k] && cover[k] > 0 && !boomed.has(k)) {
+        boomed.add(k);
+        queue.push({ kind: 'barrel', x: tx, y: ty });
+      } else if (b.kind !== 'breach' && cover[k] > 0 && !boomed.has(k)) {
+        change(tx, ty, cover[k] - 1);
+      }
+    }
+    steps.push(step);
+  }
+  return steps;
+}
+
+/** Sum a plan into a preview: visible units only. */
+function summarisePlan(state, u, steps) {
+  const dmg = new Map();
+  for (const st of steps) {
+    for (const id of st.victims) {
+      const o = state.units[id];
+      dmg.set(id, (dmg.get(id) || 0) + Math.max(1, st.dmg - o.armor));
+    }
+  }
+  const units = [];
+  for (const [id, d] of dmg) {
+    const o = state.units[id];
+    if (!teamSeesUnit(state, u.team, o)) continue;
+    units.push({ id, dmg: d, lethal: o.downed || d >= o.hp, ally: o.team === u.team, downed: !!o.downed });
+  }
+  const cover = steps.flatMap((st) => st.cover);
+  const barrels = steps.filter((st) => st.kind === 'barrel').map((st) => ({ x: st.x, y: st.y }));
+  return { units, cover, barrels };
+}
+
+/** Run a planned chain: emits barrel / damage / cover_change events in order. */
+function detonate(state, attacker, first, events) {
+  const S = state.map.size;
+  const source = { frag: 'explosion', breach: 'breach', barrel: 'barrel' };
+  for (const st of planExplosions(state, attacker, first)) {
+    if (st.kind === 'barrel') {
+      events.push({ type: 'barrel', x: st.x, y: st.y });
+      state.map.explosive[st.y * S + st.x] = 0;
+    }
+    const victims = st.victims.map((id) => state.units[id]);
+    const applyCover = () => { for (const c of st.cover) setCover(state, c.x, c.y, c.to, events); };
+    if (st.kind === 'breach') { applyCover(); blastDamage(state, attacker, victims, st.dmg, source[st.kind], events); }
+    else { blastDamage(state, attacker, victims, st.dmg, source[st.kind], events); applyCover(); }
+  }
+}
+
+/**
+ * What a grenade at (x,y) would do, barrel chains included. Only lists units the
+ * thrower's team can see; dmg is the total across the chain.
+ * { valid, x, y, radius, units:[{id, dmg, lethal, ally, downed}], cover:[{x,y,from,to}], barrels:[{x,y}] }
  */
 export function grenadePreview(state, u, x, y) {
   const valid = canGrenade(u) && grenadeTileOk(state, u, x, y);
-  const { map } = state;
-  const S = map.size;
-  const units = [];
-  const cover = [];
-  if (inBounds(map, x, y)) {
-    for (const o of state.units) {
-      if (!o.alive || dist(o.x, o.y, x, y) > FRAG.radius) continue;
-      if (!teamSeesUnit(state, u.team, o)) continue;
-      const dmg = Math.max(1, FRAG.dmg - o.armor);
-      units.push({ id: o.id, dmg, lethal: o.downed || dmg >= o.hp, ally: o.team === u.team, downed: !!o.downed });
-    }
-    for (const [tx, ty] of blastTiles(map, x, y, FRAG.radius)) {
-      const from = map.cover[ty * S + tx];
-      if (from > 0) cover.push({ x: tx, y: ty, from, to: from - 1 });
-    }
+  const res = inBounds(state.map, x, y)
+    ? summarisePlan(state, u, planExplosions(state, u, { kind: 'frag', x, y }))
+    : { units: [], cover: [], barrels: [] };
+  return { valid, x, y, radius: FRAG.radius, ...res };
+}
+
+const canShootBarrel = (u) => standing(u) && u.ap >= 1;
+const barrelShotOk = (state, u, x, y) => Number.isInteger(x) && Number.isInteger(y) && isBarrel(state.map, x, y)
+  && dist(u.x, u.y, x, y) <= weaponRange(u) && los(state.map, u.x, u.y, x, y);
+
+/** Barrels this unit can shoot now (in weapon range and line of sight). */
+export function barrelTargets(state, u) {
+  const out = new Set();
+  if (!canShootBarrel(u) || !state.map.explosive) return out;
+  const S = state.map.size;
+  for (let k = 0; k < S * S; k++) {
+    if (!state.map.explosive[k]) continue;
+    if (barrelShotOk(state, u, k % S, (k / S) | 0)) out.add(k);
   }
-  return { valid, x, y, radius: FRAG.radius, units, cover };
+  return out;
+}
+
+/** Shooting the barrel at (x,y): { valid, x, y, radius, units, cover, barrels } (chain included). */
+export function barrelPreview(state, u, x, y) {
+  const valid = canShootBarrel(u) && barrelShotOk(state, u, x, y);
+  const res = isBarrel(state.map, x, y)
+    ? summarisePlan(state, u, planExplosions(state, u, { kind: 'barrel', x, y }))
+    : { units: [], cover: [], barrels: [] };
+  return { valid, x, y, radius: BARREL.radius, ...res };
 }
 
 const canBreach = (u) => standing(u) && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0;
@@ -292,19 +442,13 @@ export function breachTargets(state, u) {
   return out;
 }
 
-/** Breach preview: enemies the team can see that would be hit. { valid, units:[{id,dmg,lethal}], cover:[{x,y,from,to}] } */
+/** Breach preview (barrel chains included): { valid, units:[{id,dmg,lethal}], cover:[{x,y,from,to}], barrels } */
 export function breachPreview(state, u, x, y) {
   const S = state.map.size;
   const valid = breachTargets(state, u).has(y * S + x);
-  const units = [];
-  for (const o of state.units) {
-    if (!o.alive || o.team === u.team || Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) > BREACH.radius) continue;
-    if (!teamSeesUnit(state, u.team, o)) continue;
-    const dmg = Math.max(1, BREACH.dmg - o.armor);
-    units.push({ id: o.id, dmg, lethal: o.downed || dmg >= o.hp });
-  }
-  const from = inBounds(state.map, x, y) ? state.map.cover[y * S + x] : 0;
-  return { valid, units, cover: from ? [{ x, y, from, to: 0 }] : [] };
+  if (!inBounds(state.map, x, y)) return { valid, units: [], cover: [], barrels: [] };
+  const res = summarisePlan(state, u, planExplosions(state, u, { kind: 'breach', x, y }));
+  return { valid, ...res };
 }
 
 // ---------- 2.0 helpers: smoke, patch, scan, revive ----------
@@ -447,6 +591,9 @@ function startTeamTurn(state) {
     events.push({ type: 'reveal_end', team: t });
   }
   clearSmokes(state, events, (c) => c.expiresTeam === t && c.expiresRound <= state.round);
+  // Night: muzzle flares fade as the shooter's squad starts its next turn.
+  for (const f of state.flares.filter((f) => f.team === t)) events.push({ type: 'flare_end', id: f.id });
+  state.flares = state.flares.filter((f) => f.team !== t);
   for (const id of state.teams[t].members) {
     const u = state.units[id];
     if (!u.alive) continue;
@@ -510,12 +657,14 @@ export function endTeamTurn(state) {
     // Smoke from a squad that has since been wiped never gets its expiry turn.
     clearSmokes(state, events, (c) => c.expiresRound < state.round);
     if ((state.round - 1) % ZONE.shrinkEvery === 0) {
+      // Step through the planned schedule: down to the final ring, hold it once, then flood.
       const z = state.zone;
-      z.r = Math.max(ZONE.minRadius, z.next);
-      // Shrink in steps down to the final ring, hold it once, then flood everything.
-      z.next = z.r > ZONE.finalRadius ? Math.max(ZONE.finalRadius, z.r - ZONE.step) : ZONE.minRadius;
-      z.stage++;
-      events.push({ type: 'zone_shrink', r: z.r, next: z.next });
+      const plan = state.zonePlan;
+      z.stage = Math.min(plan.length - 1, z.stage + 1);
+      const cur = plan[z.stage], nxt = plan[Math.min(plan.length - 1, z.stage + 1)];
+      z.r = cur.r; z.x = cur.x; z.y = cur.y;
+      z.next = nxt.r; z.nx = nxt.x; z.ny = nxt.y;
+      events.push({ type: 'zone_shrink', r: z.r, next: z.next, x: z.x, y: z.y, nx: z.nx, ny: z.ny });
     }
     if (SUPPLY_DROP_ROUNDS.includes(state.round)) supplyDrop(state, events);
   }
@@ -532,11 +681,12 @@ function supplyDrop(state, events) {
   for (const o of state.units) if (o.alive) busy.add(o.y * S + o.x);
   for (const c of state.crates) if (!c.taken) busy.add(c.y * S + c.x);
   let spots = [];
-  for (const r of [zone.next, zone.r, Infinity]) {
+  const rings = [[zone.next, zone.nx ?? zone.x, zone.ny ?? zone.y], [zone.r, zone.x, zone.y], [Infinity, zone.x, zone.y]];
+  for (const [r, cx, cy] of rings) {
     spots = [];
     for (let k = 0; k < S * S; k++) {
       if (map.cover[k] || busy.has(k)) continue;
-      if (dist(k % S, (k / S) | 0, zone.x, zone.y) <= r) spots.push(k);
+      if (dist(k % S, (k / S) | 0, cx, cy) <= r) spots.push(k);
     }
     if (spots.length) break;
   }
@@ -580,6 +730,10 @@ function markDead(state, u, killer, events) {
   u.hunkered = false;
   if (killer && killer.team !== u.team) killer.kills++;
   events.push({ type: 'death', id: u.id, by: killer ? killer.id : null });
+  if (state.flares.some((f) => f.id === u.id)) {
+    state.flares = state.flares.filter((f) => f.id !== u.id);
+    events.push({ type: 'flare_end', id: u.id });
+  }
   // Leftover medkits (or failing that, grenades / smoke) drop as a crate.
   const drop = u.items.medkit > 0 ? 'medkit' : u.items.frag > 0 ? 'frag' : u.items.smoke > 0 ? 'smoke' : null;
   if (drop && !state.crates.some((c) => !c.taken && c.x === u.x && c.y === u.y)) {
@@ -633,8 +787,17 @@ function resolveShot(state, s, t, { reaction = false, ability } = {}) {
   s.missStreak = result === 'hit' ? 0 : Math.min(MISS_STREAK_CAP, s.missStreak + 1);
   const ev = { type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction, ability, cover, flank, downed: false };
   events.push(ev);
+  flare(state, s, events);
   if (result !== 'miss' && (t.hp <= 0 || t.downed)) ev.downed = dropUnit(state, t, s, events) === 'downed';
   return events;
+}
+
+/** Night stages: firing lights the shooter up for every squad until its team's next turn. */
+function flare(state, u, events) {
+  if (!stageOf(state).night || !u.alive) return;
+  if (state.flares.some((f) => f.id === u.id)) return;
+  state.flares.push({ id: u.id, team: u.team });
+  events.push({ type: 'flare', id: u.id });
 }
 
 /** Explosive damage (ignores cover). Emits damage (+downed/death) events. Stops once the match is decided. */
@@ -781,13 +944,7 @@ export function act(state, unitId, action) {
       u.ap--;
       u.items.frag--;
       events.push({ type: 'grenade', id: u.id, x, y, radius: FRAG.radius });
-      const victims = state.units.filter((o) => o.alive && dist(o.x, o.y, x, y) <= FRAG.radius);
-      blastDamage(state, u, victims, FRAG.dmg, 'explosion', events);
-      const S = state.map.size;
-      for (const [tx, ty] of blastTiles(state.map, x, y, FRAG.radius)) {
-        const c = state.map.cover[ty * S + tx];
-        if (c > 0) setCover(state, tx, ty, c - 1, events);
-      }
+      detonate(state, u, { kind: 'frag', x, y }, events);
       if (!standing(u)) u.ap = 0;
       return { ok: true, events };
     }
@@ -815,10 +972,18 @@ export function act(state, unitId, action) {
       u.ap--;
       u.cooldowns.breach = BREACH.cooldown;
       events.push({ type: 'breach', id: u.id, x, y });
-      setCover(state, x, y, 0, events);
-      const victims = state.units.filter((o) => o.alive && o.team !== u.team
-        && Math.max(Math.abs(o.x - x), Math.abs(o.y - y)) <= BREACH.radius);
-      blastDamage(state, u, victims, BREACH.dmg, 'breach', events);
+      detonate(state, u, { kind: 'breach', x, y }, events);
+      if (!standing(u)) u.ap = 0;
+      return { ok: true, events };
+    }
+    case 'shoot_barrel': {
+      if (u.ap < 1) return fail('No AP');
+      const { x, y } = action;
+      if (!barrelShotOk(state, u, x, y)) return fail('No shot');
+      u.ap = 0; // a shot is a shot: ends the turn
+      events.push({ type: 'barrel_shot', id: u.id, x, y });
+      flare(state, u, events);
+      detonate(state, u, { kind: 'barrel', x, y }, events);
       return { ok: true, events };
     }
     case 'patch': {

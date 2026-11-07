@@ -11,8 +11,13 @@ import * as K from '../sim/constants.js';
 import * as RU from '../sim/rules.js';
 import { keepAwake, allowSleep } from './wakelock.js';
 import { settings, onSettingChange } from './ui/settings.js';
-import { ICON, SILHOUETTE } from './ui/icons.js';
-import { Minimap } from './ui/minimap.js';
+import { ICON } from './ui/icons.js';
+import { Minimap, nextZone } from './ui/minimap.js';
+import { badgeSVG, badgeCached, botTier } from './ui/badges.js';
+import * as M from './ui/meta.js';
+import { initShop } from './ui/shop.js';
+import { squadColor } from './ui/squads.js';
+import { stageInfo } from './ui/stages.js';
 import { Ambient } from './ui/ambient.js';
 import { career, recordMatch } from './ui/career.js';
 import { buzz } from './ui/haptics.js';
@@ -36,6 +41,11 @@ const SCAN_RADIUS = K.SCAN?.radius ?? 5;
 const SMOKE_RADIUS = K.SMOKE?.radius ?? 1.5;
 const FRAG_RADIUS = K.FRAG?.radius ?? 1.5;
 const standing = (u) => !!u && u.alive && !u.downed;
+const BARREL_RADIUS = K.BARREL?.radius ?? 1.5;
+const BARREL_DMG = K.BARREL?.dmg ?? 4;
+const SMOKE_AIM = K.SMOKE?.aimIn ?? K.SMOKE?.defense ?? 20;
+const KELP_AIM = K.KELP?.aim ?? 10;
+const KELP_REVEAL = K.KELP?.reveal ?? 3;
 
 // Three is only needed for screen-space damage indicators; the renderer loads it anyway.
 let THREE = null;
@@ -132,6 +142,11 @@ let introCtx = null;       // drop-in sequence
 let introHideT = 0;
 let endTimer = 0;
 let armTimer = 0;
+let lastBlast = null;      // 'grenade' | 'breach' | 'barrel': source of the next damage events
+let zoneCenter = null;     // previous safe-zone centre (drift detection)
+let myLoadout = null;      // the player's cosmetics for this match
+let coverFadeOn = false;
+let tierUpT = 0;
 const timeouts = new Set(); // match-scoped timers, cleared on leave
 function later(fn, ms) {
   const t = setTimeout(() => { timeouts.delete(t); fn(); }, ms);
@@ -171,6 +186,39 @@ const tileVisible = (x, y) => {
   return RU.teamSeesTile ? RU.teamSeesTile(state, myTeam(), x, y) : true;
 };
 const unitName = (u) => (u.isPlayer ? 'You' : u.name);
+const teamColor = (t) => squadColor(t, myTeam());
+const curStage = () => (state ? stageInfo(K, state.stage || (settings.stage !== 'random' ? settings.stage : 'harbor')) : null);
+const isNight = () => !!state && (state.night || K.STAGES?.[state.stage]?.night || state.stage === 'spire');
+const hasBarrels = () => !!state?.map?.explosive && state.map.explosive.some((v, k) => v && state.map.cover[k] > 0);
+function isFlared(u) {
+  if (!u || !state) return false;
+  if (typeof RU.isFlared === 'function') { try { return !!RU.isFlared(state, u); } catch { /* fall through */ } }
+  return Array.isArray(state.flares) && state.flares.some((f) => f === u.id || f?.id === u.id);
+}
+/** Why a tile hides whoever stands on it: 'smoke' | 'kelp' | null. */
+function concealBy(x, y) {
+  if (typeof RU.concealment === 'function') { try { return RU.concealment(state, x, y)?.by || null; } catch { /* fall through */ } }
+  if (RU.smokeAt && RU.smokeAt(state, x, y)) return 'smoke';
+  const S = state.map.size;
+  return state.map.terrain?.[y * S + x] === 1 ? 'kelp' : null;
+}
+const terrainAt = (x, y) => state?.map?.terrain?.[y * state.map.size + x] || 0;
+const insideNext = (x, y) => {
+  if (typeof G.insideNextZone === 'function') { try { return G.insideNextZone(state, x, y); } catch { /* fall through */ } }
+  const n = nextZone(state.zone);
+  return RU.dist(x, y, n.x, n.y) <= n.r;
+};
+const myTier = () => (me() ? M.classProgress(me().cls).tier : 0);
+const unitTier = (u) => (u.isPlayer ? myTier() : botTier(u));
+
+/** Cover fade: on in Move mode while the move range / path preview shows (Graphics fades props). */
+function syncCoverFade(force = false) {
+  const reach = ui.reach && [...ui.reach.values()].some((n) => n.d > 0);
+  const want = !force && !!settings.coverFade && !attract && !introCtx && !!turnCtx && !turnCtx.busy && ui.mode === 'move' && !!reach && !!state && state.winner === null;
+  if (want === coverFadeOn && !force) return;
+  coverFadeOn = want;
+  Rcall('setCoverFade', want);
+}
 
 // ---------------------------------------------------------------- menu + settings
 
@@ -181,9 +229,29 @@ const menu = initMenu({
   onDeploy: () => startGame(),
   onClick: () => { firstGesture(); sfx.uiClick(); },
   onHover: () => sfx.uiHover(),
-  onEnter: () => { firstGesture(); sfx.startMenuMusic(); ambient.pulse(); },
+  onEnter: () => { firstGesture(); sfx.startMenuMusic(); ambient.pulse(); setTimeout(showMetaNotice, 900); },
   qualityNow: () => R?.quality,
+  onShop: () => shop.open('shop'),
+  onLocker: () => shop.open('locker'),
 });
+const shop = initShop({
+  CLASSES,
+  getR: () => R,
+  onClick: (k) => { if (k === 'error') sfx.uiError(); else sfx.uiClick(); },
+  onBuy: () => { sfx.pickup(); buzz('kill'); },
+  onChange: () => { menu.refreshMeta(); if (!$('endScreen').classList.contains('hidden')) $('endShopSalv').innerHTML = `${ICON.coin}${M.salvage().toLocaleString('en-US')}`; },
+  toast: (m, k, ic) => H.toast(m, k, ic),
+});
+let noticeShown = false;
+function showMetaNotice() {
+  if (noticeShown) return;
+  const n = M.takeNotice();
+  if (!n) return;
+  noticeShown = true;
+  if (n.kind === 'migrated') H.toast(`Welcome to 3.0, veteran: +${n.salvage.toLocaleString('en-US')} Salvage and prestige XP from your career`, 'loot', 'medal');
+  else H.toast(`Welcome bonus: +${n.salvage} Salvage. Spend it in the Shop`, 'loot', 'coin');
+  menu.refreshMeta();
+}
 
 let gestured = false;
 function firstGesture() {
@@ -221,6 +289,7 @@ onSettingChange((k) => {
   if (k === 'quality') applyQuality(true);
   if (k === 'cinematic' || k === 'timer') applyVisualSettings();
   if (k === 'botSpeed') applySpeed();
+  if (k === 'coverFade') syncCoverFade();
 });
 applyAudio();
 applyQuality(false);
@@ -255,6 +324,9 @@ $('speedBtn').onclick = () => {
 };
 $('againBtn').onclick = () => { sfx.uiClick(); startGame(); };
 $('loadoutBtn').onclick = () => { sfx.uiClick(); toMenu(); };
+$('endShopBtn').querySelector('.mb-ic').innerHTML = ICON.shop;
+$('endShopBtn').onclick = () => { sfx.uiClick(); shop.open('shop'); };
+$('tuOk').onclick = () => { sfx.uiClick(); closeTierUp(); };
 $('pSettings').onclick = () => { sfx.uiClick(); openSheet('settingsSheet'); };
 $('pHow').onclick = () => { sfx.uiClick(); openSheet('howSheet'); };
 $('pQuit').onclick = () => { sfx.uiClick(); closeAllSheets(); toMenu(); };
@@ -377,6 +449,9 @@ function resetMatchUi() {
   $('skipBtn').disabled = false;
   reviveSig = '';
   Rcall('setReviveMarkers', null);
+  coverFadeOn = true; syncCoverFade(true); // force the fade off
+  closeTierUp(true);
+  $('endPrestige').innerHTML = '';
 }
 
 function toMenu() {
@@ -397,7 +472,8 @@ function toMenu() {
   sfx.setIntensity(0.1);
   setAmbience(0.1, 0);
   menu.renderModes();
-  menu.renderClasses();
+  menu.refreshMeta();
+  menu.renderStages();
   ambient.start();
   runAttract();
 }
@@ -430,10 +506,15 @@ async function startGame() {
   state = G.createGame({
     mode: settings.mode, playerClass: settings.cls, callsign: callsign(),
     volunteerLoneWolf: settings.mode === 'trios' && !!settings.loneWolf,
+    stage: settings.stage || 'random',
   });
-  stats = { dmg: 0, shots: 0, hits: 0, kills: 0, squadKills: 0, roundOut: null, taken: 0, revives: 0, patched: 0, scans: 0, downs: 0, recorded: false };
+  stats = { dmg: 0, shots: 0, hits: 0, kills: 0, squadKills: 0, roundOut: null, taken: 0, revives: 0, patched: 0, scans: 0, downs: 0, barrels: 0, recorded: false, award: null };
+  lastBlast = null;
+  zoneCenter = { x: state.zone.x, y: state.zone.y };
   Rcall('setMenuShowcase', false);
-  Rcall('setGame', state, state.playerTeam);
+  // The player's equipped cosmetics; bots get random ones from the renderer.
+  myLoadout = M.loadoutFor(me().cls);
+  Rcall('setGame', state, state.playerTeam, { cosmetics: { [me().id]: { ...myLoadout } } });
   Rcall('setSpectator', false);
   Rcall('setFollow', null);
   applyVisualSettings();
@@ -480,48 +561,58 @@ function dropIn(token) {
   const mode = MODES[state.mode];
   const squad = state.teams[mt].members.map((id) => state.units[id]);
   const nTeams = state.teams.length;
+  const st = curStage();
   $('diKicker').innerHTML = `<span>${esc(mode.name)}</span><span>${nTeams} squads</span><span>Round 1</span>`;
+  $('diStage').innerHTML = st ? `<span class="ds-ic">${ICON[st.icon] || ICON.stage}</span><b>${esc(st.name)}</b><small>${esc(st.short || st.tagline || '')}</small>` : '';
   $('diSquad').innerHTML = squad.map((m, i) => {
     const c = CLASSES[m.cls];
+    const tier = m.isPlayer ? M.classProgress(m.cls).tier : botTier(m);
     return `<div class="di-card-u${m.isPlayer ? ' you' : ''}" style="--i:${i}">
-      <div class="di-sil">${SILHOUETTE[m.cls] || ''}</div>
-      <div class="di-meta"><b>${esc(m.isPlayer ? callsign() : m.name)}</b><small>${esc(c?.name || m.cls)}${m.isLoneWolf ? ' · Lone Wolf' : ''}</small>
+      <div class="di-sil">${badgeSVG(m.cls, tier, { size: 48, title: false })}</div>
+      <div class="di-meta"><b>${esc(m.isPlayer ? callsign() : m.name)}</b><small>${esc(c?.name || m.cls)} · ${M.TIER_NAMES[tier]}${m.isLoneWolf ? ' · Lone Wolf' : ''}</small>
       <span class="di-hp"><i style="--w:${Math.round((m.maxHp / 15) * 100)}%"></i><em>${m.maxHp} HP</em></span></div>
       ${m.isPlayer ? '<span class="di-you">You</span>' : ''}</div>`;
   }).join('') + (squad.length === 1 ? `<div class="di-vs"><b>${TOTAL_RIVALS()}</b><small>rivals</small></div>` : '');
-  $('diTip').textContent = CLASS_TIP[u.cls] || 'Stay inside the ring. The tide is coming.';
+  $('diTip').textContent = (st && STAGE_TIP[st.key]) || CLASS_TIP[u.cls] || 'Stay inside the ring. The tide is coming.';
   clearTimeout(introHideT);
+  const cine = hasR('playDropIn');
   el.classList.remove('hidden', 'go', 'show');
-  // A zoom-in "drop" while the countdown runs.
-  if (typeof R?.view === 'number' && typeof R?.viewGoal === 'number') { const g = R.viewGoal; R.view = g * 1.9; R.viewGoal = g; }
+  el.classList.toggle('cine', cine);
+  // Without a renderer drop-in, a zoom-in "drop" while the countdown runs.
+  if (!cine && typeof R?.view === 'number' && typeof R?.viewGoal === 'number') { const g = R.viewGoal; R.view = g * 1.9; R.viewGoal = g; }
   return new Promise((resolve) => {
     let done = false;
+    let counted = false;
+    let landed = !cine;
     const timers = [];
-    const finish = () => {
+    const finish = (skipped = false) => {
       if (done) return;
       done = true;
       timers.forEach(clearTimeout);
       el.removeEventListener('pointerdown', skip);
+      if (!landed) Rcall('skipDropIn'); // skipped, cancelled or too slow: snap everyone into place
       el.classList.add('go');
       clearTimeout(introHideT);
-      introHideT = setTimeout(() => { el.classList.add('hidden'); el.classList.remove('show', 'go'); }, 420);
+      introHideT = setTimeout(() => { el.classList.add('hidden'); el.classList.remove('show', 'go', 'cine'); }, 420);
       introCtx = null;
-      resolve();
+      resolve(skipped);
     };
-    const skip = () => { sfx.uiClick(); finish(); };
-    introCtx = { cancel: finish, skip };
+    const maybeDone = () => { if (counted && landed) finish(); };
+    const skip = () => { sfx.uiClick(); finish(true); };
+    introCtx = { cancel: () => finish(true), skip };
     el.addEventListener('pointerdown', skip);
     const num = $('diNum');
     num.textContent = '';
-    const step = DEBUG && PARAMS.has('fast') ? 60 : 750;
+    const fast = DEBUG && PARAMS.has('fast');
+    const step = fast ? 60 : 750;
     const seq = ['3', '2', '1', 'GO'];
     // Chain each beat off the previous one, starting once the overlay has actually
     // painted: a long frame (world build, shader compile) delays the count instead
     // of collapsing it.
     const beat = (i) => {
       if (done) return;
-      if (token !== gameToken) { finish(); return; }
-      if (i >= seq.length) { finish(); return; }
+      if (token !== gameToken) { finish(true); return; }
+      if (i >= seq.length) { counted = true; maybeDone(); return; }
       const n = seq[i];
       num.textContent = n;
       num.classList.remove('pop'); void num.offsetWidth; num.classList.add('pop');
@@ -531,16 +622,29 @@ function dropIn(token) {
     };
     requestAnimationFrame(() => {
       el.classList.add('show');
+      if (cine) {
+        // Every unit arrives with its drop-in; the countdown runs alongside.
+        let p;
+        try { p = R.playDropIn(); } catch (e) { warnOnce('playDropIn', e); }
+        if (fast) Rcall('skipDropIn');
+        Promise.race([Promise.resolve(p), sleep(fast ? 50 : 5000)]).catch(() => {}).then(() => { landed = true; maybeDone(); });
+      }
       requestAnimationFrame(() => requestAnimationFrame(() => timers.push(setTimeout(() => beat(0), 450))));
     });
   });
 }
+const STAGE_TIP = {
+  kelp: 'Kelp hides you beyond 3 tiles. Weed-hop to close the distance.',
+  rig: 'Red-banded barrels explode and chain. Shoot one next to a squad.',
+  spire: 'Night: firing lights a flare over you. Shoot, then move next turn.',
+  surge: 'The safe zone drifts. Watch the cyan ring and rotate early.',
+};
 const TOTAL_RIVALS = () => (K.TOTAL_PLAYERS || 16) - 1;
 
 function actorOf(ev) {
   switch (ev.type) {
     case 'move': case 'grenade': case 'breach': case 'overwatch': case 'heal': case 'hunker': case 'crate':
-    case 'smoke': case 'scan': case 'patch':
+    case 'smoke': case 'scan': case 'patch': case 'barrel_shot':
       return ev.id;
     case 'revive': return ev.by ?? ev.id;
     case 'shot': return ev.from;
@@ -586,7 +690,9 @@ function isEventVisible(ev) {
     }
     case 'shot': return st.units[ev.from].team === mt || st.units[ev.to].team === mt
       || unitVisible(st.units[ev.from]) || unitVisible(st.units[ev.to]);
-    case 'grenade': case 'breach': case 'smoke': return st.units[ev.id]?.team === mt || tileVisible(ev.x, ev.y);
+    case 'grenade': case 'breach': case 'smoke': case 'barrel_shot': return st.units[ev.id]?.team === mt || tileVisible(ev.x, ev.y);
+    case 'barrel': return tileVisible(ev.x, ev.y);
+    case 'flare': case 'flare_end': return true;
     case 'scan': return st.units[ev.id]?.team === mt || (ev.revealed || []).some((id) => st.units[id]?.team === mt);
     case 'overwatch': case 'heal': case 'hunker': case 'patch': return unitVisible(st.units[ev.id]);
     case 'death': case 'downed': case 'bleed_out': case 'revive': return unitVisible(st.units[ev.id]);
@@ -605,7 +711,7 @@ function followFor(ev, a) {
     const t = state.units[ev.to];
     const d = R?.disp?.[a] || u;
     Rcall('focus', (d.x + t.x) / 2, (d.y + t.y) / 2);
-  } else if (ev.type === 'grenade' || ev.type === 'breach' || ev.type === 'smoke' || ev.type === 'scan') {
+  } else if (ev.type === 'grenade' || ev.type === 'breach' || ev.type === 'smoke' || ev.type === 'scan' || ev.type === 'barrel_shot') {
     Rcall('focus', ev.x, ev.y);
   } else {
     const d = R?.disp?.[a] || u;
@@ -728,6 +834,8 @@ function updateTimer(left) {
 function openPause() {
   if (!state) return;
   $('pauseNote').textContent = turnCtx ? 'Your turn timer is paused.' : 'The match continues in the background.';
+  const st = curStage();
+  $('pauseStage').innerHTML = st ? `<span class="sd-ic">${ICON[st.icon] || ICON.stage}</span><div><b>${esc(st.name)}</b><p>${esc(st.twist)}</p></div>` : '';
   if (turnCtx && !turnCtx.paused) turnCtx.paused = performance.now();
   openSheet('pauseSheet');
 }
@@ -746,6 +854,7 @@ function finishTurn() {
   clearTimeout(armTimer);
   $('endBtn').classList.remove('armed');
   H.hideContext();
+  syncCoverFade();
   applySpeed();
   updateHud();
   c?.resolve();
@@ -756,6 +865,7 @@ async function doAction(a) {
   if (!c || c.busy) return false;
   c.busy = true;
   clearPreviews();
+  syncCoverFade();
   H.hideContext();
   ui.pending = null;
   let r;
@@ -800,6 +910,57 @@ function validTargets(u, kind = 'shoot') {
   // Standing threats first, then by hit chance; downed enemies go last.
   out.sort((a, b) => (state.units[a.id].downed ? 1 : 0) - (state.units[b.id].downed ? 1 : 0) || b.p.chance - a.p.chance);
   return out;
+}
+
+/** Explosive barrels the unit can shoot: [{id:'b<key>', barrel:true, k, x, y, pv}]. */
+function barrelTargetList(u, withPreview = true) {
+  if (!hasBarrels()) return [];
+  const S = state.map.size;
+  let keys = keySet('barrelTargets', u);
+  if (!keys) {
+    keys = new Set();
+    const range = RU.weaponRange ? RU.weaponRange(u) : u.weapon.range;
+    state.map.explosive.forEach((v, k) => {
+      if (!v || !state.map.cover[k]) return;
+      const x = k % S, y = (k / S) | 0;
+      if (RU.dist(u.x, u.y, x, y) <= range && RU.los(state.map, u.x, u.y, x, y)) keys.add(k);
+    });
+  }
+  const out = [];
+  for (const k of keys) {
+    const x = k % S, y = (k / S) | 0;
+    if (!tileVisible(x, y)) continue;
+    out.push({ id: 'b' + k, barrel: true, k, x, y, pv: withPreview ? barrelPreviewAt(u, x, y) : null });
+  }
+  if (!withPreview) return out;
+  // Best blasts first: visible enemies hit, minus friendly fire.
+  const score = (t) => t.pv.units.reduce((a, h) => a + (state.units[h.id].team === u.team ? -2 : unitVisible(state.units[h.id]) ? 1 + (h.lethal ? 1 : 0) : 0), 0);
+  out.sort((a, b) => score(b) - score(a) || RU.dist(u.x, u.y, a.x, a.y) - RU.dist(u.x, u.y, b.x, b.y));
+  return out;
+}
+function barrelPreviewAt(u, x, y) {
+  if (typeof G.barrelPreview === 'function') {
+    try { const p = G.barrelPreview(state, u, x, y); if (p) return { units: p.units || [], barrels: p.barrels || [], cover: p.cover || [], radius: p.radius ?? BARREL_RADIUS, valid: p.valid !== false }; } catch (e) { warnOnce('barrelPreview', e); }
+  }
+  // Local estimate with chains.
+  const S = state.map.size;
+  const done = new Set([y * S + x]);
+  const queue = [[x, y]];
+  const hits = new Map();
+  while (queue.length) {
+    const [bx, by] = queue.shift();
+    for (const e of state.units) {
+      if (!e.alive || RU.dist(e.x, e.y, bx, by) > BARREL_RADIUS) continue;
+      hits.set(e.id, (hits.get(e.id) || 0) + Math.max(1, BARREL_DMG - e.armor));
+    }
+    state.map.explosive.forEach((v, k) => {
+      if (!v || done.has(k) || !state.map.cover[k]) return;
+      const cx = k % S, cy = (k / S) | 0;
+      if (RU.dist(cx, cy, bx, by) <= BARREL_RADIUS) { done.add(k); queue.push([cx, cy]); }
+    });
+  }
+  const units = [...hits].map(([id, dmg]) => ({ id, dmg, lethal: state.units[id].downed || dmg >= state.units[id].hp }));
+  return { units, barrels: [...done].slice(1).map((k) => ({ x: k % S, y: (k / S) | 0 })), cover: [], radius: BARREL_RADIUS, valid: true };
 }
 
 /** Call a sim helper that returns a Set<key>; null if the helper is missing. */
@@ -857,7 +1018,8 @@ function availability(u) {
 
   set('move', base || (ui.reach && [...ui.reach.values()].every((n) => n.d === 0) ? 'Nowhere to move' : null));
   const shots = !base ? validTargets(u) : [];
-  set('shoot', base || (shots.length ? null : 'No enemy in range and sight'), { count: shots.length });
+  const barrels = !base ? barrelTargetList(u, false).length : 0;
+  set('shoot', base || (shots.length || barrels ? null : hasBarrels() ? 'No enemy or barrel in range and sight' : 'No enemy in range and sight'), { count: shots.length, barrels });
 
   const frags = u.items?.frag ?? 0;
   const ga = ab.grenade;
@@ -928,18 +1090,18 @@ function actionList(u) {
   const st = (k) => (!av[k].ok ? 'off' : ui.mode === k ? 'active' : 'on');
   const list = [
     { key: 'move', icon: 'move', label: 'Move' },
-    { key: 'shoot', icon: 'shoot', label: 'Shoot', badge: av.shoot.ok && av.shoot.count ? av.shoot.count : null, badgeKind: 'tg' },
+    { key: 'shoot', icon: 'shoot', label: 'Shoot', badge: av.shoot.ok && (av.shoot.count || av.shoot.barrels) ? (av.shoot.count || 'B') : null, badgeKind: av.shoot.count ? 'tg' : 'br', endsTurn: true },
   ];
   const ca = CLASS_ACTION[u.cls];
-  if (ca && av[ca.key]) list.push({ ...ca, badge: av[ca.key].cooldown > 0 ? av[ca.key].cooldown : null, badgeKind: 'cd', cls: 'ability' });
+  if (ca && av[ca.key]) list.push({ ...ca, badge: av[ca.key].cooldown > 0 ? av[ca.key].cooldown : null, badgeKind: 'cd', cls: 'ability', endsTurn: ca.key === 'aimed' });
   const frags = av.grenade.charges ?? 0;
   if (frags > 0 || u.cls === 'assault') list.push({ key: 'grenade', icon: 'grenade', label: 'Frag', badge: frags, badgeKind: frags > 0 ? 'ch' : 'zero' });
   const smokes = av.smoke.charges ?? 0;
   if (smokes > 0 || u.cls === 'recon') list.push({ key: 'smoke', icon: 'smoke', label: 'Smoke', badge: smokes, badgeKind: smokes > 0 ? 'ch' : 'zero' });
   if (av.revive && av.revive.count > 0) list.push({ key: 'revive', icon: 'revive', label: 'Revive', badge: av.revive.count, badgeKind: av.revive.ok ? 'rv' : 'zero', cls: av.revive.ok ? 'urgent' : '' });
   list.push(
-    { key: 'hunker', icon: 'hunker', label: 'Hunker' },
-    { key: 'overwatch', icon: 'overwatch', label: 'Watch' },
+    { key: 'hunker', icon: 'hunker', label: 'Hunker', endsTurn: true },
+    { key: 'overwatch', icon: 'overwatch', label: 'Watch', endsTurn: true },
     { key: 'medkit', icon: 'medkit', label: 'Medkit', badge: u.items.medkit, badgeKind: u.items.medkit ? 'ch' : 'zero' },
   );
   for (const a of list) { a.state = st(a.key); a.reason = av[a.key].reason; a.hotkey = HOTKEYS[a.key]; }
@@ -1022,8 +1184,18 @@ function setMode(mode, preselect = null) {
     Rcall('setHighlights', hl);
   } else if (mode === 'shoot' || mode === 'aimed') {
     ui.targets = validTargets(u, mode);
+    if (mode === 'shoot') {
+      const bt = barrelTargetList(u);
+      ui.targets.push(...bt);
+      if (bt.length) {
+        // Show which barrels can be shot.
+        const hl = new Map();
+        for (const b of bt) hl.set(b.k, 2);
+        Rcall('setHighlights', hl);
+      }
+    }
     if (!ui.targets.length) { H.toast('No enemy in range and sight', 'error'); sfx.uiError(); return setMode('move'); }
-    Rcall('setTargetMarkers', ui.targets.map((t) => ({ id: t.id, chance: t.p.chance })));
+    Rcall('setTargetMarkers', unitMarkers());
     const pick = ui.targets.find((t) => t.id === preselect) || ui.targets[0];
     selectTarget(pick.id);
   } else if (AREA_MODES.has(mode)) {
@@ -1053,6 +1225,7 @@ function setMode(mode, preselect = null) {
     if (pick) previewSupport(pick, 'tap');
   }
   document.body.dataset.mode = ui.mode;
+  syncCoverFade();
   updateHud();
 }
 
@@ -1100,12 +1273,17 @@ function showMoveContext(p, via) {
   const z = state.zone;
   const crate = state.crates.find((c) => !c.taken && c.x === p.x && c.y === p.y);
   const outNow = !G.insideZone(state, p.x, p.y);
-  const outNext = !G.insideZone(state, p.x, p.y, z.next);
-  const smoke = RU.smokeAt ? RU.smokeAt(state, p.x, p.y) : null;
+  const outNext = !insideNext(p.x, p.y);
+  const hid = concealBy(p.x, p.y);
+  const S = state.map.size;
+  const nearBarrel = hasBarrels() && state.map.explosive.some((v, k) => v && state.map.cover[k] && RU.dist(k % S, (k / S) | 0, p.x, p.y) <= BARREL_RADIUS);
   const coverTxt = ['Exposed', 'Half cover', 'Full cover'][ci.best];
   const notes = [];
   if (ci.flankers) notes.push(`<span class="n bad">${ICON.warn}Flanked by ${ci.flankers}</span>`);
-  if (smoke) notes.push(`<span class="n good">${ICON.smoke}In smoke +${K.SMOKE?.defense ?? 25} def</span>`);
+  if (hid === 'smoke') notes.push(`<span class="n good">${ICON.hidden}Smoke: hidden · -${SMOKE_AIM} aim in and out</span>`);
+  else if (hid === 'kelp') notes.push(`<span class="n good">${ICON.kelp}Kelp: hidden beyond ${KELP_REVEAL} tiles</span>`);
+  if (nearBarrel) notes.push(`<span class="n bad">${ICON.barrelx}Next to a barrel</span>`);
+  if (terrainAt(p.x, p.y) === 2) notes.push(`<span class="n">${ICON.water}Shallows</span>`);
   if (crate) notes.push(`<span class="n loot">${ICON.crate}${crate.type === 'cache' ? 'Supply cache' : 'Crate'}</span>`);
   const downedNear = downedMates().filter((m) => Math.max(Math.abs(m.x - p.x), Math.abs(m.y - p.y)) <= 1);
   if (downedNear.length) notes.push(`<span class="n rv">${ICON.revive}Next to ${esc(downedNear[0].name)}</span>`);
@@ -1127,14 +1305,27 @@ function showMoveContext(p, via) {
 
 // ----- shoot / aimed
 
+const unitMarkers = (sel = null) => ui.targets.filter((x) => !x.barrel).map((x) => ({ id: x.id, chance: x.p.chance, selected: x.id === sel }));
+
 function selectTarget(id) {
   const t = ui.targets.find((x) => x.id === id);
   if (!t) return false;
   ui.target = id;
+  if (t.barrel) {
+    ui.pending = { kind: 'barrel', id, k: t.k, x: t.x, y: t.y };
+    Rcall('setSelectedTarget', null);
+    Rcall('setTargetMarkers', unitMarkers());
+    Rcall('setAoePreview', { x: t.x, y: t.y, radius: t.pv.radius ?? BARREL_RADIUS, valid: true, kind: 'frag' });
+    const u = turnCtx.u;
+    Rcall('focus', (t.x + u.x) / 2, (t.y + u.y) / 2);
+    showBarrelContext(t);
+    return true;
+  }
+  Rcall('setAoePreview', null);
   ui.pending = { kind: ui.mode, id };
   Rcall('setSelectedTarget', id);
   if (!hasR('setSelectedTarget')) { const tu = state.units[id], u = turnCtx.u; Rcall('focus', (tu.x + u.x) / 2, (tu.y + u.y) / 2); }
-  Rcall('setTargetMarkers', ui.targets.map((x) => ({ id: x.id, chance: x.p.chance, selected: x.id === id })));
+  Rcall('setTargetMarkers', unitMarkers(id));
   showTargetContext(t);
   return true;
 }
@@ -1155,22 +1346,61 @@ function showTargetContext({ id, p }) {
     const good = /\+/.test(n) && !/-/.test(n);
     return `<span class="n ${good ? 'good' : 'bad'}">${esc(n)}</span>`;
   }).join('');
-  const smoke = RU.smokeAt ? RU.smokeAt(state, t.x, t.y) : null;
+  const hid = concealBy(t.x, t.y);
+  const flared = isFlared(t);
   const idx = ui.targets.findIndex((x) => x.id === id);
   const html = `
-    <div class="ctx-h enemy"><span class="sil-sm">${SILHOUETTE[t.cls] || ''}</span>
-      <div class="tgt-name"><b>${esc(t.name)}</b><small>Squad ${t.team + 1} · ${esc(c?.name || t.cls)}${t.isLoneWolf ? ' · Lone Wolf' : ''}</small></div>
+    <div class="ctx-h enemy" style="--sq:${teamColor(t.team)}"><span class="sil-sm tgt-badge">${badgeCached(t.cls, unitTier(t), { size: 40 })}</span>
+      <div class="tgt-name"><b>${esc(t.name)}</b><small><i class="sq-dot"></i>Squad ${t.team + 1} · ${esc(c?.name || t.cls)}${t.isLoneWolf ? ' · Lone Wolf' : ''}</small></div>
       ${ui.targets.length > 1 ? `<button class="btn ghost sm cycle" id="cycleBtn" title="Next target [Tab]">${idx + 1}/${ui.targets.length}<span class="kbd-hint">Tab</span></button>` : ''}</div>
-    <div class="tgt-hp">${t.downed ? `<span class="tag bleed">${ICON.downed}Downed · ${t.bleed} turn${t.bleed === 1 ? '' : 's'} left</span>` : `<span class="hp-pips enemy${t.maxHp > 14 ? ' dense' : ''}">${hpPips}</span><span>${t.hp}/${t.maxHp}</span>`}${t.armor ? `<span class="armor">${ICON.shield}<b>${t.armor}</b></span>` : ''}${t.hunkered ? `<span class="tag hk">${ICON.hunker}Hunkered</span>` : ''}${smoke ? `<span class="tag sm">${ICON.smoke}In smoke</span>` : ''}</div>
+    <div class="tgt-hp">${t.downed ? `<span class="tag bleed">${ICON.downed}Downed · ${t.bleed} turn${t.bleed === 1 ? '' : 's'} left</span>` : `<span class="hp-pips enemy${t.maxHp > 14 ? ' dense' : ''}">${hpPips}</span><span>${t.hp}/${t.maxHp}</span>`}${t.armor ? `<span class="armor">${ICON.shield}<b>${t.armor}</b></span>` : ''}${t.hunkered ? `<span class="tag hk">${ICON.hunker}Hunkered</span>` : ''}${hid ? `<span class="tag sm">${ICON[hid === 'kelp' ? 'kelp' : 'smoke']}In ${hid}</span>` : ''}${flared ? `<span class="tag flare">${ICON.flare}Flared</span>` : ''}</div>
     <div class="odds">
       <div class="odd big"><b>${p.chance}<small>%</small></b><span>Hit</span></div>
       <div class="odd"><b>${p.graze || 0}<small>%</small></b><span>Graze</span></div>
       <div class="odd"><b>${p.dmg[0]}–${p.dmg[1]}</b><span>Damage</span></div>
       <div class="odd ${sure ? 'kill' : lethal ? 'maybe' : ''}"><b>${t.downed ? 'FINISH' : sure ? 'KILL' : lethal ? 'CAN KILL' : coverWord}</b><span>${sure || lethal ? coverWord : 'Target'}</span></div>
     </div>
-    <div class="ctx-row notes">${aimed && !(p.notes || []).some((n) => /aimed/i.test(n)) ? `<span class="n good">${ICON.aimed}Aimed +15 aim, +2 dmg</span>` : ''}${notes}</div>`;
+    <div class="ctx-row notes">${aimed && !(p.notes || []).some((n) => /aimed/i.test(n)) ? `<span class="n good">${ICON.aimed}Aimed +15 aim, +2 dmg</span>` : ''}${notes}</div>
+    ${endsTurnStrip()}`;
   H.showContext(html, 'shoot');
   $('fireBtn').innerHTML = `${aimed ? ICON.aimed : ICON.shoot}<span>${aimed ? 'Aimed shot' : 'Fire'}</span><small>ends turn</small>`;
+  $('fireBtn').disabled = false;
+  const cb = $('cycleBtn');
+  if (cb) cb.onclick = (e) => { e.stopPropagation(); sfx.uiClick(); cycleTarget(1); };
+}
+
+/** The XCOM rule, spelled out: firing ends the turn (and lights a flare at night). */
+function endsTurnStrip() {
+  const u = turnCtx?.u;
+  const spare = u ? u.ap - 1 : 0;
+  return `<div class="ends-turn">${ICON.endturn}<b>Ends your turn</b><span>${spare > 0 ? `Your other ${spare} AP ${spare === 1 ? 'is' : 'are'} lost. Move first to reposition.` : 'Uses your last AP.'}</span></div>
+    ${isNight() ? `<div class="ends-turn flare">${ICON.flare}<b>Flare</b><span>Firing lights you up for every squad until your next turn.</span></div>` : ''}`;
+}
+
+function showBarrelContext(t) {
+  const u = turnCtx.u;
+  const seen = (t.pv.units || []).filter((h) => unitVisible(state.units[h.id]));
+  const rows = seen.map((h) => {
+    const e = state.units[h.id];
+    const mine = e.team === u.team;
+    return `<span class="hit ${mine ? 'ff' : 'en'}${h.lethal ? ' lethal' : ''}"${mine ? '' : ` style="--sq:${teamColor(e.team)}"`}>${esc(unitName(e))}<b>-${h.dmg}</b>${h.lethal ? `<em>${ICON.skull}</em>` : ''}</span>`;
+  }).join('') || '<span class="dim">No visible units in the blast</span>';
+  const chain = (t.pv.barrels || []).length;
+  const ff = seen.some((h) => state.units[h.id].team === u.team);
+  const idx = ui.targets.findIndex((x) => x.id === t.id);
+  const html = `
+    <div class="ctx-h"><span class="ctx-ic barrel">${ICON.barrelx}</span><b>Explosive barrel</b><span class="cost">1 AP</span><span class="spacer"></span>
+      ${ui.targets.length > 1 ? `<button class="btn ghost sm cycle" id="cycleBtn" title="Next target [Tab]">${idx + 1}/${ui.targets.length}<span class="kbd-hint">Tab</span></button>` : ''}</div>
+    <div class="odds three">
+      <div class="odd big"><b>100<small>%</small></b><span>Hit</span></div>
+      <div class="odd"><b>${BARREL_DMG}</b><span>Blast dmg</span></div>
+      <div class="odd"><b>${chain ? `+${chain}` : '3×3'}</b><span>${chain ? `Chain${chain === 1 ? '' : 's'}` : 'Radius'}</span></div>
+    </div>
+    <div class="ctx-row hits">${rows}</div>
+    ${ff ? `<div class="ctx-row"><span class="n bad">${ICON.warn}Friendly fire</span></div>` : ''}
+    ${endsTurnStrip()}`;
+  H.showContext(html, 'shoot barrel');
+  $('fireBtn').innerHTML = `${ICON.barrelx}<span>Shoot barrel</span><small>ends turn</small>`;
   $('fireBtn').disabled = false;
   const cb = $('cycleBtn');
   if (cb) cb.onclick = (e) => { e.stopPropagation(); sfx.uiClick(); cycleTarget(1); };
@@ -1234,6 +1464,7 @@ function previewArea(x, y, via) {
   let rows = '';
   let foot = '';
   if (kind === 'grenade' || kind === 'breach') {
+    foot = '';
     rows = seen.map((h) => {
       const t = state.units[h.id];
       const mine = t.team === u.team;
@@ -1241,15 +1472,17 @@ function previewArea(x, y, via) {
     }).join('') || '<span class="dim">No visible units in the blast</span>';
     const ff = seen.some((h) => state.units[h.id].team === u.team);
     const covers = (pv.cover || []).length;
-    foot = `${covers ? `<span class="n warn">${ICON.burst}${covers} cover tile${covers === 1 ? '' : 's'} wrecked</span>` : kind === 'grenade' ? `<span class="n">${ICON.burst}3×3 blast · ignores cover</span>` : `<span class="n">${ICON.burst}Opens this tile · 4 dmg nearby</span>`}
+    const chain = (pv.barrels || []).length;
+    if (chain) foot = `<span class="n bad">${ICON.barrelx}${chain} barrel${chain === 1 ? '' : 's'} will blow</span>`;
+    foot += `${covers ? `<span class="n warn">${ICON.burst}${covers} cover tile${covers === 1 ? '' : 's'} wrecked</span>` : kind === 'grenade' ? `<span class="n">${ICON.burst}3×3 blast · ignores cover</span>` : `<span class="n">${ICON.burst}Opens this tile · 4 dmg nearby</span>`}
       ${ff ? `<span class="n bad">${ICON.warn}Friendly fire</span>` : ''}`;
   } else if (kind === 'smoke') {
     const allies = seen.filter((h) => state.units[h.id].team === u.team);
     const foes = seen.filter((h) => state.units[h.id].team !== u.team);
-    rows = allies.map((h) => `<span class="hit sm">${esc(unitName(state.units[h.id]))}<b>+${K.SMOKE?.defense ?? 25}</b></span>`).join('')
-      + foes.map((h) => `<span class="hit en">${esc(state.units[h.id].name)}<b>+${K.SMOKE?.defense ?? 25}</b></span>`).join('')
+    rows = allies.map((h) => `<span class="hit sm">${esc(unitName(state.units[h.id]))}<b>hidden</b></span>`).join('')
+      + foes.map((h) => `<span class="hit en">${esc(state.units[h.id].name)}<b>hidden</b></span>`).join('')
       || '<span class="dim">Nobody inside yet. Smoke lasts until your next turn</span>';
-    foot = `<span class="n">${ICON.smoke}+${K.SMOKE?.defense ?? 25} defense inside · lasts a round</span>${foes.length ? `<span class="n warn">${ICON.warn}Shields enemies too</span>` : ''}`;
+    foot = `<span class="n">${ICON.hidden}Hides anyone inside · -${SMOKE_AIM} aim in and out · lasts a round</span>${foes.length ? `<span class="n warn">${ICON.warn}Hides enemies too</span>` : ''}`;
   } else if (kind === 'scan') {
     rows = `<span class="n scan">${ICON.scan}${seen.length ? `${seen.length} known contact${seen.length === 1 ? '' : 's'} in the area` : 'No known contacts in the area'}</span>`;
     foot = `<span class="n">${ICON.eye}Reveals everyone within ${pv.radius ?? SCAN_RADIUS} tiles until your next turn</span>`;
@@ -1288,7 +1521,7 @@ function previewSupport(t, via) {
   const html = `
     <div class="ctx-h"><span class="ctx-ic heal">${ICON[kind === 'patch' ? 'patch' : 'revive']}</span><b>${title}</b><span class="cost">1 AP</span>${kind === 'patch' ? `<span class="dim">Cooldown ${K.PATCH?.cooldown ?? 2}</span>` : ''}<span class="spacer"></span>
       ${ui.valid.size > 1 ? `<span class="dim">${ui.valid.size} targets</span>` : ''}</div>
-    ${ok ? `<div class="sup-row"><span class="sil-sm mine">${SILHOUETTE[t.cls] || ''}</span>
+    ${ok ? `<div class="sup-row"><span class="sil-sm mine tgt-badge">${badgeCached(t.cls, unitTier(t), { size: 40 })}</span>
       <div class="tgt-name"><b class="mine">${esc(who)}</b><small>${t.downed ? `Downed · ${t.bleed} turn${t.bleed === 1 ? '' : 's'} to bleed out` : `${t.hp}/${t.maxHp} HP`}</small></div>
       <div class="sup-res"><span class="hp-pips heal${t.maxHp > 14 ? ' dense' : ''}">${pips}</span><b>${t.downed ? `Up at ${healTo} HP` : `${t.hp} → ${healTo} HP`}</b></div></div>`
     : `<div class="ctx-hint big bad">${kind === 'patch' ? 'Pick yourself or a hurt squadmate next to you' : 'Pick a downed squadmate next to you'}</div>`}
@@ -1309,6 +1542,7 @@ function confirmPending() {
     case 'move': doAction({ type: 'move', x: p.x, y: p.y }); break;
     case 'shoot': doAction({ type: 'shoot', targetId: p.id }); break;
     case 'aimed': doAction({ type: 'aimed', targetId: p.id }); break;
+    case 'barrel': doAction({ type: 'shoot_barrel', x: p.x, y: p.y }); break;
     case 'grenade': doAction({ type: 'grenade', x: p.x, y: p.y }); break;
     case 'smoke': doAction({ type: 'smoke', x: p.x, y: p.y }); break;
     case 'scan': doAction({ type: 'scan', x: p.x, y: p.y }); break;
@@ -1382,11 +1616,17 @@ function handleTile(x, y) {
       previewSupport(t, 'tap');
       return;
     }
-    case 'shoot': case 'aimed':
+    case 'shoot': case 'aimed': {
+      const b = ui.targets.find((t) => t.barrel && t.k === k);
+      if (b) {
+        if (ui.target === b.id) { confirmPending(); return; }
+        sfx.uiClick(); selectTarget(b.id); return;
+      }
       // Tapping the ground drops back to move mode and treats it as a move tap.
       setMode('move');
       handleTile(x, y);
       return;
+    }
     default:
   }
 }
@@ -1447,6 +1687,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.key;
   if (k === 'Escape') {
     if (closeTopSheet()) return;
+    if (!$('tierUp').classList.contains('hidden')) { closeTierUp(); return; }
     if (introCtx) { introCtx.skip(); return; }
     if (state && !$('hud').classList.contains('hidden') && $('endScreen').classList.contains('hidden')) {
       if (ui.mode !== 'move' || ui.pending) cancelMode();
@@ -1455,6 +1696,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (sheetOpen()) return;
+  if (!$('tierUp').classList.contains('hidden')) { if (k === 'Enter' || k === ' ') { e.preventDefault(); closeTierUp(); } return; }
   if (!$('splash').classList.contains('hidden')) {
     if (!e.metaKey && !e.ctrlKey && !e.altKey && k !== 'Tab' && k !== 'Shift') { e.preventDefault(); menu.enter(); }
     return;
@@ -1540,7 +1782,7 @@ function updateHud() {
     tideIn: G.roundsUntilShrink ? G.roundsUntilShrink(state) : 0,
     tideDmg: G.zoneDamage ? G.zoneDamage(state) : 0,
     outside: u?.alive && !G.insideZone(state, u.x, u.y),
-    nextOutside: u?.alive && !G.insideZone(state, u.x, u.y, z.next),
+    nextOutside: u?.alive && !insideNext(u.x, u.y),
   });
 
   // unit card + actions
@@ -1554,9 +1796,13 @@ function updateHud() {
   H.renderUnitCard(u, {
     CLASSES, myTurn: !!turnCtx, weaponStats: ws, callsign: callsign(),
     outside: u?.alive && !G.insideZone(state, u.x, u.y),
-    nextOutside: u?.alive && !G.insideZone(state, u.x, u.y, z.next),
+    nextOutside: u?.alive && !insideNext(u.x, u.y),
     spectating: !u?.alive, aliveMates: mates,
-    inSmoke: !!(u?.alive && RU.smokeAt && RU.smokeAt(state, u.x, u.y)),
+    inSmoke: !!u?.alive && concealBy(u.x, u.y) === 'smoke',
+    inKelp: !!u?.alive && concealBy(u.x, u.y) === 'kelp',
+    inShallows: !!u?.alive && terrainAt(u.x, u.y) === 2,
+    flared: !!u?.alive && isFlared(u),
+    tier: u ? M.classProgress(u.cls).tier : 0,
     spotted,
   });
   if (standing(u)) {
@@ -1708,9 +1954,43 @@ function meta(ev) {
       if (t.isPlayer && ev.dmg) stats.taken += ev.dmg;
       break;
     }
-    case 'grenade': case 'breach': lastAoe = { id: ev.id, x: ev.x, y: ev.y }; break;
+    case 'grenade': case 'breach': lastAoe = { id: ev.id, x: ev.x, y: ev.y }; lastBlast = ev.type; break;
+    case 'barrel_shot': {
+      lastAoe = { id: ev.id, x: ev.x, y: ev.y };
+      lastBlast = 'barrel';
+      if (st.units[ev.id]?.isPlayer) { stats.barrels++; stats.shots++; }
+      break;
+    }
+    case 'barrel': {
+      // Chains keep the original culprit; a barrel set off by a frag credits the thrower.
+      lastAoe = { id: lastAoe?.id ?? null, x: ev.x, y: ev.y };
+      lastBlast = 'barrel';
+      if (!ff && tileVisible(ev.x, ev.y)) {
+        const by = lastAoe.id !== null && lastAoe.id !== undefined ? st.units[lastAoe.id] : null;
+        H.feedLine({ a: by ? unitName(by) : null, aMine: by?.team === mt, aColor: by ? teamColor(by.team) : null, icon: 'barrelx', note: 'barrel exploded', kind: 'barrel' });
+      }
+      break;
+    }
+    case 'flare': {
+      const u = st.units[ev.id];
+      if (ff || !u) { queueHud(); break; }
+      if (u.isPlayer) {
+        H.banner('YOU\'RE LIT UP', 'bad', 'Your flare shows you to every squad until your next turn', 1800);
+        H.edgeGlow('flare', 1200);
+        buzz('hit');
+      } else if (u.team === mt) H.toast(`${u.name} is flared: visible to everyone`, 'warn', 'flare');
+      else H.feedLine({ a: unitName(u), aColor: teamColor(u.team), icon: 'flare', note: 'flared · visible', kind: 'flare' });
+      queueHud();
+      break;
+    }
+    case 'flare_end': {
+      const u = st.units[ev.id];
+      if (!ff && u?.isPlayer && u.alive) H.toast('Your flare burned out. Back in the dark', 'info', 'flare');
+      queueHud();
+      break;
+    }
     case 'damage': {
-      lastCause[ev.id] = ev.source === 'breach' ? 'breach' : 'grenade';
+      lastCause[ev.id] = ev.source === 'breach' ? 'breach' : ev.source === 'barrel' ? 'barrel' : 'grenade';
       const src = ev.by ?? ev.from ?? lastAoe?.id;
       if (src !== null && src !== undefined && st.units[src]?.isPlayer && st.units[ev.id]?.team !== mt) stats.dmg += ev.dmg || 0;
       if (st.units[ev.id]?.isPlayer) stats.taken += ev.dmg || 0;
@@ -1722,7 +2002,7 @@ function meta(ev) {
       const k = ev.by !== null && ev.by !== undefined ? st.units[ev.by] : null;
       if (k?.isPlayer) stats.downs++;
       if (ff) break;
-      H.feedLine({ a: k ? unitName(k) : null, aMine: k?.team === mt, icon: 'downed', b: unitName(u), bMine: u.team === mt, note: k ? 'downed' : 'went down', kind: 'down' });
+      H.feedLine({ a: k ? unitName(k) : null, aMine: k?.team === mt, aColor: k ? teamColor(k.team) : null, icon: 'downed', b: unitName(u), bMine: u.team === mt, bColor: teamColor(u.team), note: k ? 'downed' : 'went down', kind: 'down' });
       if (u.isPlayer) {
         // The 'downed' stinger + sfx come from render.js (_evDowned) with the animation.
         H.banner('YOU\'RE DOWN', 'bad', `Bleed out in ${u.bleed ?? 2} turns · a squadmate can revive you`, 2200);
@@ -1742,7 +2022,7 @@ function meta(ev) {
       const by = ev.by !== undefined && ev.by !== null ? st.units[ev.by] : null;
       if (by?.isPlayer) stats.revives++;
       if (ff) break;
-      if (u.team === mt || unitVisible(u)) H.feedLine({ a: by ? unitName(by) : null, aMine: by?.team === mt, icon: 'revive', b: unitName(u), bMine: u.team === mt, note: 'revived', kind: 'revive' });
+      if (u.team === mt || unitVisible(u)) H.feedLine({ a: by ? unitName(by) : null, aMine: by?.team === mt, aColor: by ? teamColor(by.team) : null, icon: 'revive', b: unitName(u), bMine: u.team === mt, bColor: teamColor(u.team), note: 'revived', kind: 'revive' });
       if (u.isPlayer) { H.banner('BACK IN THE FIGHT', 'heal', `${by ? by.name : 'A squadmate'} got you up · ${ev.hp ?? u.hp} HP`, 1700); H.edgeGlow('heal', 1200); buzz('revive'); }
       else if (u.team === mt) { H.toast(`${u.name} is back up${by?.isPlayer ? '. Nice save' : ''} · ${ev.hp ?? u.hp} HP`, 'heal', 'revive'); buzz('revive'); }
       else if (unitVisible(u)) H.toast(`Squad ${u.team + 1} revived ${u.name}`, 'warn', 'revive');
@@ -1784,7 +2064,7 @@ function meta(ev) {
       break;
     case 'smoke': {
       const s = st.units[ev.id];
-      if (!ff && (s?.team === mt || tileVisible(ev.x, ev.y))) H.feedLine({ a: s ? unitName(s) : null, aMine: s?.team === mt, icon: 'smoke', note: 'smoke screen', kind: 'smoke' });
+      if (!ff && (s?.team === mt || tileVisible(ev.x, ev.y))) H.feedLine({ a: s ? unitName(s) : null, aMine: s?.team === mt, aColor: s ? teamColor(s.team) : null, icon: 'smoke', note: 'smoke screen', kind: 'smoke' });
       queueHud();
       break;
     }
@@ -1802,6 +2082,7 @@ function meta(ev) {
           victim: unitName(u),
           cause,
           killerMine: k?.team === mt, victimMine: u.team === mt,
+          killerColor: k ? teamColor(k.team) : null, victimColor: teamColor(u.team),
         });
         if (k?.isPlayer && u.team !== mt) { H.toast(`You eliminated ${u.name}`, 'kill', 'skull'); buzz('kill'); }
       }
@@ -1825,7 +2106,7 @@ function meta(ev) {
         // One defeat stinger per match (showEnd skips its own); none if this wipe still wins.
         if (!ff && st.winner !== mt && stats) { sfx.stinger('defeat'); stats.defeatPlayed = true; }
       } else if (!ff) {
-        H.feedInfo(`Squad ${ev.team + 1} eliminated · #${ev.place}`, 'out');
+        H.feedLine({ a: `Squad ${ev.team + 1}`, aColor: teamColor(ev.team), icon: 'squads', note: `eliminated · #${ev.place}`, kind: 'out' });
         if (lastKillerTeam === mt && st.winner === null) H.banner('SQUAD ELIMINATED', 'kill', `${G.aliveTeams(st).length} squads left`, 1300);
       }
       break;
@@ -1846,11 +2127,25 @@ function meta(ev) {
     case 'overwatch_trigger':
       if (!ff && st.units[ev.target].team === mt) H.toast(`Overwatch fire on ${unitName(st.units[ev.target])}!`, 'warn', 'overwatch');
       break;
-    case 'zone_shrink':
+    case 'zone_shrink': {
       if (!ff) sfx.stinger('tide');
       updateAmbience();
-      if (!ff) H.banner('THE TIDE RISES', 'tide', `Safe radius ${ev.r} · next ${ev.next}`, 1800);
+      const cx = ev.x ?? st.zone.x, cy = ev.y ?? st.zone.y;
+      const moved = zoneCenter && Math.hypot(cx - zoneCenter.x, cy - zoneCenter.y) > 0.5;
+      const nz = nextZone(st.zone);
+      const drifting = moved || Math.hypot(nz.x - st.zone.x, nz.y - st.zone.y) > 0.5;
+      zoneCenter = { x: cx, y: cy };
+      const u = me();
+      const outN = u?.alive && !insideNext(u.x, u.y);
+      if (!ff) {
+        if (drifting) {
+          H.banner('THE ZONE DRIFTS', 'tide', outN ? 'The next ring is moving away from you. Rotate now' : 'Follow the cyan ring on the minimap', 2000);
+          H.feedInfo('Safe zone drifting', 'signal');
+        } else H.banner('THE TIDE RISES', 'tide', `Safe radius ${ev.r} · next ${typeof ev.next === 'number' ? ev.next : nz.r}`, 1800);
+      }
+      queueHud();
       break;
+    }
     case 'round_start':
       if (!ff) sfx.stinger('round');
       if (!ff) updateHud();
@@ -1868,6 +2163,9 @@ function recordCareer(place) {
   if (!stats || stats.recorded || !state) return null;
   stats.recorded = true;
   const u = me();
+  try {
+    stats.award = M.awardMatch({ cls: u.cls, place, total: state.teams.length, kills: u.kills, damage: stats.dmg, revives: stats.revives });
+  } catch (e) { warnOnce('awardMatch', e); }
   return recordMatch({
     mode: state.mode, cls: u.cls, place, total: state.teams.length,
     kills: u.kills, damage: stats.dmg, revives: stats.revives, rounds: stats.roundOut ?? state.round,
@@ -1892,6 +2190,8 @@ function showEnd(token) {
   $('endPlace').innerHTML = `<span class="hash">#</span>${place}<small>/${total}</small>`;
   $('endPlace').className = 'end-place' + (won ? ' win' : '');
   const cause = lastCause[u.id];
+  const st = curStage();
+  if (st) $('endKicker').innerHTML += `<span>${esc(st.name)}</span>`;
   $('endTitle').textContent = won ? 'LAST SQUAD STANDING'
     : u.alive ? 'SQUAD WIPED'
     : place <= 3 ? 'SO CLOSE'
@@ -1918,6 +2218,9 @@ function showEnd(token) {
   if (c.streak > 1) flags.push(`<span class="ec-flag">${ICON.bolt}${c.streak} win streak</span>`);
   $('endCareer').innerHTML = `${flags.join('')}<span class="ec-line">Career · ${c.wins} win${c.wins === 1 ? '' : 's'} · ${c.kills} kill${c.kills === 1 ? '' : 's'} · ${c.matches} match${c.matches === 1 ? '' : 'es'} · best #${c.best || '–'}</span>`;
   $('specBar').classList.add('hidden');
+  const award = stats.award;
+  renderEndPrestige(award);
+  $('endShopSalv').innerHTML = `${ICON.coin}${M.salvage().toLocaleString('en-US')}`;
   clearTimeout(endTimer);
   endTimer = setTimeout(() => {
     if (token !== gameToken || !state) return; // left the match meanwhile
@@ -1925,8 +2228,87 @@ function showEnd(token) {
     document.body.classList.add('ended');
     const es = $('endScreen');
     es.classList.remove('hidden');
-    requestAnimationFrame(() => { es.classList.add('open'); $('againBtn').focus({ preventScroll: true }); });
+    requestAnimationFrame(() => {
+      es.classList.add('open');
+      $('againBtn').focus({ preventScroll: true });
+      animateEndPrestige(award, token);
+    });
   }, fastForward ? 0 : 1500);
+}
+
+// ----- prestige + Salvage on the end screen
+
+function xpLine(P) {
+  return P.next === null ? `${P.xp.toLocaleString('en-US')} XP · max tier` : `${P.xp.toLocaleString('en-US')} / ${P.next.toLocaleString('en-US')} XP · ${P.toNext.toLocaleString('en-US')} to ${M.TIER_NAMES[P.tier + 1]}`;
+}
+function renderEndPrestige(a) {
+  const el = $('endPrestige');
+  if (!a) { el.innerHTML = ''; return; }
+  const b = a.before;
+  const chips = (parts) => parts.map(([k, v]) => `<span class="ep-chip">${esc(k)}<b>+${v.toLocaleString('en-US')}</b></span>`).join('');
+  el.innerHTML = `
+    <div class="ep-row">
+      <div class="ep-badge" id="epBadge">${badgeSVG(a.cls, b.tier, { size: 72 })}</div>
+      <div class="ep-main">
+        <div class="ep-h"><b>${esc(CLASSES[a.cls]?.name || a.cls)} · <span id="epTier" class="t${b.tier}">${b.name}</span></b><span class="ep-gain">+${a.xp.total.toLocaleString('en-US')} XP</span></div>
+        <div class="xpbar big"><i id="epFill" style="--w:${Math.round(b.frac * 100)}%"></i></div>
+        <small id="epLine" class="ep-line">${xpLine(b)}</small>
+      </div>
+    </div>
+    <div class="ep-chips">${chips(a.xp.parts)}</div>
+    <div class="ep-salv"><span class="ep-sv">${ICON.coin}<b>+${a.salvage.total.toLocaleString('en-US')}</b> Salvage</span><span class="ep-bal">Balance ${a.salvage.balance.toLocaleString('en-US')}</span></div>`;
+}
+function animateEndPrestige(a, token) {
+  if (!a) return;
+  const fill = $('epFill');
+  if (!fill) return;
+  const step2 = () => {
+    if (token !== gameToken) return;
+    // Land on the new tier's progress and swap the badge.
+    fill.style.transition = 'none';
+    fill.style.setProperty('--w', '0%');
+    void fill.offsetWidth;
+    fill.style.transition = '';
+    $('epBadge').innerHTML = badgeSVG(a.cls, a.after.tier, { size: 72 });
+    $('epBadge').classList.add('up');
+    $('epTier').textContent = a.after.name;
+    $('epTier').className = 't' + a.after.tier;
+    requestAnimationFrame(() => fill.style.setProperty('--w', `${Math.round(a.after.frac * 100)}%`));
+    $('epLine').textContent = xpLine(a.after);
+  };
+  setTimeout(() => {
+    if (token !== gameToken) return;
+    if (a.tierUp) {
+      fill.style.setProperty('--w', '100%');
+      later(() => { step2(); showTierUp(a); }, 1100);
+    } else {
+      fill.style.setProperty('--w', `${Math.round(a.after.frac * 100)}%`);
+      $('epLine').textContent = xpLine(a.after);
+    }
+  }, 450);
+}
+function showTierUp(a) {
+  const el = $('tierUp');
+  $('tuClass').textContent = CLASSES[a.cls]?.name || a.cls;
+  $('tuBadge').innerHTML = badgeSVG(a.cls, a.after.tier, { size: 190, animated: true });
+  $('tuName').textContent = a.after.name;
+  $('tuName').className = 'tu-name t' + a.after.tier;
+  $('tuSub').textContent = a.after.tier >= 4 ? 'The highest honour. Your badge is now a living legend.' : `Your ${CLASSES[a.cls]?.name || a.cls} badge evolves. Next: ${M.TIER_NAMES[a.after.tier + 1]} at ${a.after.next.toLocaleString('en-US')} XP.`;
+  el.classList.remove('hidden');
+  requestAnimationFrame(() => el.classList.add('open'));
+  sfx.stinger('victory');
+  buzz('win');
+  clearTimeout(tierUpT);
+  tierUpT = setTimeout(() => $('tuOk').focus({ preventScroll: true }), 300);
+}
+function closeTierUp(instant = false) {
+  const el = $('tierUp');
+  if (!el || el.classList.contains('hidden')) return;
+  clearTimeout(tierUpT);
+  el.classList.remove('open');
+  if (instant) el.classList.add('hidden');
+  else tierUpT = setTimeout(() => el.classList.add('hidden'), 300);
+  if (!instant) $('againBtn')?.focus({ preventScroll: true });
 }
 
 // ---------------------------------------------------------------- PWA
@@ -2107,5 +2489,32 @@ if (DEBUG) {
       return 'waiting';
     },
     fastForward: () => { fastForward = true; },
+    meta: M,
+    shop,
+    coverFade: () => coverFadeOn,
+    stage: () => state?.stage,
+    grant: (n = 5000) => { const v = M._debugGrant(n); menu.refreshMeta(); return v; },
+    xp: (cls, n) => { const p = M._debugXp(cls, n); menu.refreshMeta(); return p; },
+    /** Debug only: aim at the best barrel, if any. */
+    barrel() {
+      if (!turnCtx) return 'not my turn';
+      const b = barrelTargetList(turnCtx.u)[0];
+      if (!b) return 'no barrel';
+      setMode('shoot');
+      if (ui.mode !== 'shoot') return 'shoot unavailable';
+      selectTarget(b.id);
+      return `barrel ${b.x},${b.y} hits ${b.pv.units.length}`;
+    },
+    /** Debug only: move the player onto the nearest tile of a terrain type (1 kelp, 2 shallows). */
+    toTerrain(v = 1) {
+      const u = me(); const S = state.map.size; let best = null;
+      state.map.terrain?.forEach((t, k) => { if (t !== v || state.map.cover[k] || unitAt(k % S, (k / S) | 0)) return; const d = RU.dist(u.x, u.y, k % S, (k / S) | 0); if (!best || d < best.d) best = { k, d }; });
+      if (!best) return 'none';
+      u.x = best.k % S; u.y = (best.k / S) | 0;
+      Rcall('syncFromState'); Rcall('focus', u.x, u.y);
+      if (turnCtx) setMode('move'); else updateHud();
+      return `at ${u.x},${u.y}`;
+    },
+    tierUp: (cls = 'assault', t = 2) => { const P = M.classProgress(cls); showTierUp({ cls, after: { ...P, tier: t, name: M.TIER_NAMES[t], next: M.TIER_XP[t + 1] ?? null } }); return 'ok'; },
   };
 }

@@ -5,14 +5,46 @@
 //   (revalidated against the HTTP cache, so a new deploy is picked up on the very
 //   next load and modules never mix versions), falling back to the cache when
 //   offline or when the network is too slow.
-// Bump VERSION to force-drop every old cache.
+// Bump VERSION to force-drop every old cache. SHELL lists every module, so a
+// fresh install is fully offline-capable even before the first warm message.
 
-const VERSION = 'tidefall-v2.0.1';
+const VERSION = 'tidefall-v3.0.0';
 const NET_TIMEOUT = 4000; // ms before a cached copy wins over a slow network
 const SHELL = [
-  './', './index.html', './styles.css', './manifest.webmanifest', './src/client/main.js',
-  './assets/icon/favicon.svg', './assets/icon/icon-180.png', './assets/icon/icon-192.png', './assets/icon/icon-512.png', './assets/icon/icon-maskable-512.png',
+  './', './index.html', './styles.css', './manifest.webmanifest',
+  // assets/icon/
+  './assets/icon/favicon.svg', './assets/icon/icon-180.png', './assets/icon/icon-192.png', './assets/icon/icon-512.png',
+  './assets/icon/icon-maskable-512.png',
+  // src/client/
+  './src/client/audio.js', './src/client/main.js', './src/client/render.js', './src/client/wakelock.js',
+  // src/client/gfx/
+  './src/client/gfx/ambient.js', './src/client/gfx/cosmeticfx.js', './src/client/gfx/fields.js', './src/client/gfx/fx.js',
+  './src/client/gfx/overlays.js', './src/client/gfx/palette.js', './src/client/gfx/pickups.js', './src/client/gfx/post.js',
+  './src/client/gfx/preview.js', './src/client/gfx/props.js', './src/client/gfx/skins.js', './src/client/gfx/stages.js',
+  './src/client/gfx/terrain.js', './src/client/gfx/units.js', './src/client/gfx/util.js', './src/client/gfx/water.js',
+  // src/client/sfx/
+  './src/client/sfx/ambience.js', './src/client/sfx/buffers.js', './src/client/sfx/menu.js', './src/client/sfx/music.js',
+  // src/client/ui/
+  './src/client/ui/ambient.js', './src/client/ui/badges.js', './src/client/ui/career.js', './src/client/ui/haptics.js', './src/client/ui/hud.js',
+  './src/client/ui/icons.js', './src/client/ui/menu.js', './src/client/ui/meta.js', './src/client/ui/minimap.js', './src/client/ui/settings.js',
+  './src/client/ui/shop.js', './src/client/ui/squads.js', './src/client/ui/stages.js',
+  './src/client/ui/fonts/barlow-condensed-latin-600-normal.woff2', './src/client/ui/fonts/barlow-condensed-latin-800-normal.woff2',
+  // src/shared/
+  './src/shared/colors.js', './src/shared/cosmetics.js',
+  // src/sim/
+  './src/sim/ai.js', './src/sim/constants.js', './src/sim/game.js', './src/sim/map.js', './src/sim/rng.js', './src/sim/rules.js',
   'https://unpkg.com/three@0.170.0/build/three.module.js',
+  // three/addons used by gfx/post.js (lazy import; precached so bloom works offline)
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/EffectComposer.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/RenderPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/UnrealBloomPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/OutputPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/ShaderPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/MaskPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/Pass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/shaders/CopyShader.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/shaders/LuminosityHighPassShader.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/shaders/OutputShader.js',
 ];
 
 const cacheable = (url) => url.startsWith(self.location.origin) || url.startsWith('https://unpkg.com/three@');

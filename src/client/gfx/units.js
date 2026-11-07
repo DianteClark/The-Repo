@@ -20,21 +20,15 @@
 import * as THREE from 'three';
 import { GeoBuilder, damp, clamp } from './util.js';
 import { TEAM } from './palette.js';
+import { CLASS_KIT, TAG, skinKit, hasSkin, makeSkinMaterial, tickSkinMaterial } from './skins.js';
 
 export const HIP = 0.4;
 export const XRAY_LAYER = 1;
 const NECK = 0.4; // torso-local neck pivot
 const SHOULDER = 0.33;
 
-const BODY = {
-  assault: { cloth: 0x86a3a6, vest: 0x56706f, helm: 0x6d8a88, w: 0.3 },
-  marksman: { cloth: 0xa7a07a, vest: 0x6f6a4b, helm: 0x8a8462, w: 0.26 },
-  breacher: { cloth: 0x7d879a, vest: 0x4e5566, helm: 0x666f80, w: 0.38 },
-  medic: { cloth: 0xb8b3a2, vest: 0x6a7774, helm: 0xd2cab4, w: 0.29 },
-  recon: { cloth: 0x5f7468, vest: 0x3c4a44, helm: 0x4d6157, w: 0.27 },
-};
+const BODY = CLASS_KIT;
 export const CLASS_KEYS = Object.keys(BODY);
-const SKIN = 0xd9b896, DARK = 0x2f3538, METAL = 0x69737a, BOOT = 0x3a3330, WOOD = 0x5b4a36;
 
 /** Per-position averaged normals → 'aOut' attribute so inflated outline shells stay watertight. */
 function addOutlineNormals(geo) {
@@ -57,69 +51,75 @@ function addOutlineNormals(geo) {
 }
 
 const GEO = new Map();
-function geos(cls) {
+/** Class geometry baked with a skin's palette. Silhouette is identical for every skin. */
+export function soldierGeos(cls, skin = 'default') {
   if (!BODY[cls]) cls = 'assault';
-  if (GEO.has(cls)) return GEO.get(cls);
-  const B = BODY[cls];
+  if (!hasSkin(skin)) skin = 'default';
+  const gk = cls + '|' + skin;
+  if (GEO.has(gk)) return GEO.get(gk);
+  const B = skinKit(cls, skin);
+  const SKIN = B.skinTone, DARK = B.dark, METAL = B.metal, BOOT = B.boot, WOOD = B.wood;
   const w = B.w;
   const bulky = cls === 'breacher';
   // ---- leg (pivot at hip, extends down)
   const lg = new GeoBuilder()
-    .box(bulky ? 0.13 : 0.11, 0.3, 0.13, 0, -0.17, 0, B.cloth)
-    .box(0.125, 0.1, 0.18, 0, -0.35, 0.025, BOOT)
-    .box(0.125, 0.08, 0.045, 0, -0.13, 0.07, B.vest); // knee pad
+    .tag(TAG.cloth).box(bulky ? 0.13 : 0.11, 0.3, 0.13, 0, -0.17, 0, B.cloth)
+    .tag(TAG.boot).box(0.125, 0.1, 0.18, 0, -0.35, 0.025, BOOT)
+    .tag(TAG.vest).box(0.125, 0.08, 0.045, 0, -0.13, 0.07, B.vest); // knee pad
+  lg.tag(TAG.pack);
   if (cls === 'recon') lg.box(0.06, 0.09, 0.05, 0.07, -0.06, 0.0, DARK); // thigh pouch
   if (cls === 'medic') lg.box(0.05, 0.1, 0.09, -0.07, -0.08, 0.0, B.vest);
   const leg = lg.build({ ao: false });
 
   // ---- torso body (pivot at hip)
   const t = new GeoBuilder();
-  t.box(w * 0.85, 0.1, 0.2, 0, 0.04, 0, B.vest); // belt
-  t.box(w, 0.3, 0.22, 0, 0.23, 0, B.cloth);
-  t.box(w * 0.92, 0.22, 0.24, 0, 0.25, 0.005, B.vest); // plate carrier
-  t.box(0.07, 0.06, 0.03, -w * 0.25, 0.2, 0.13, DARK); // pouches
+  t.tag(TAG.vest).box(w * 0.85, 0.1, 0.2, 0, 0.04, 0, B.vest); // belt
+  t.tag(TAG.cloth).box(w, 0.3, 0.22, 0, 0.23, 0, B.cloth);
+  t.tag(TAG.vest).box(w * 0.92, 0.22, 0.24, 0, 0.25, 0.005, B.vest); // plate carrier
+  t.tag(TAG.pack).box(0.07, 0.06, 0.03, -w * 0.25, 0.2, 0.13, DARK); // pouches
   t.box(0.07, 0.06, 0.03, w * 0.05, 0.2, 0.13, DARK);
   if (cls === 'assault') {
-    t.box(0.26, 0.3, 0.14, 0, 0.26, -0.18, 0x3b4a3f); // backpack
-    t.cyl(0.06, 0.3, 7, 0, 0.44, -0.18, 0x6c6150, 0, 0, Math.PI / 2); // bedroll
+    t.box(0.26, 0.3, 0.14, 0, 0.26, -0.18, B.pack); // backpack
+    t.cyl(0.06, 0.3, 7, 0, 0.44, -0.18, B.pack2, 0, 0, Math.PI / 2); // bedroll
     t.box(0.1, 0.12, 0.05, 0.1, 0.18, -0.26, DARK);
     t.box(0.1, 0.12, 0.05, -0.1, 0.18, -0.26, DARK);
   } else if (cls === 'marksman') {
-    t.box(0.18, 0.22, 0.1, -0.03, 0.26, -0.16, 0x3c3a2c); // radio
-    t.cyl(0.012, 0.78, 4, -0.09, 0.72, -0.19, DARK); // antenna
-    t.box(0.34, 0.34, 0.035, 0, 0.2, -0.14, 0x5b583f, 0, 0.12); // cape
-    t.box(0.36, 0.08, 0.06, 0, 0.36, -0.11, 0x5b583f);
+    t.box(0.18, 0.22, 0.1, -0.03, 0.26, -0.16, B.pack); // radio
+    t.tag(TAG.metal).cyl(0.012, 0.78, 4, -0.09, 0.72, -0.19, DARK); // antenna
+    t.tag(TAG.cloth).box(0.34, 0.34, 0.035, 0, 0.2, -0.14, B.pack2, 0, 0.12); // cape
+    t.box(0.36, 0.08, 0.06, 0, 0.36, -0.11, B.pack2);
   } else if (cls === 'breacher') {
-    t.box(w * 1.05, 0.12, 0.27, 0, 0.36, 0, METAL); // heavy collar
-    t.box(0.22, 0.2, 0.1, 0, 0.24, -0.17, DARK);
-    t.box(0.08, 0.14, 0.08, 0.13, 0.08, -0.12, 0x6a5a3a); // charges
-    t.box(0.08, 0.14, 0.08, -0.13, 0.08, -0.12, 0x6a5a3a);
+    t.tag(TAG.metal).box(w * 1.05, 0.12, 0.27, 0, 0.36, 0, METAL); // heavy collar
+    t.tag(TAG.pack).box(0.22, 0.2, 0.1, 0, 0.24, -0.17, B.pack);
+    t.box(0.08, 0.14, 0.08, 0.13, 0.08, -0.12, B.pack2); // charges
+    t.box(0.08, 0.14, 0.08, -0.13, 0.08, -0.12, B.pack2);
   } else if (cls === 'medic') {
-    t.box(0.28, 0.32, 0.16, 0, 0.27, -0.19, 0xd8d0bb); // med pack (bone, cross is accent)
-    t.box(0.3, 0.06, 0.17, 0, 0.44, -0.19, 0x9d968a);
-    t.box(0.17, 0.16, 0.12, w / 2 + 0.07, 0.07, 0.02, 0xd8d0bb); // hip satchel
+    t.box(0.28, 0.32, 0.16, 0, 0.27, -0.19, B.pack); // med pack (cross is accent)
+    t.box(0.3, 0.06, 0.17, 0, 0.44, -0.19, B.pack2);
+    t.box(0.17, 0.16, 0.12, w / 2 + 0.07, 0.07, 0.02, B.pack); // hip satchel
     t.box(0.02, 0.02, 0.5, 0, 0.27, 0.0, 0x5c5446, 0, 0.0, 0.78); // satchel strap
   } else if (cls === 'recon') {
     // drone backpack: flat body + 4 arms + rotor rings (wide shoulder silhouette)
-    t.box(0.2, 0.22, 0.09, 0, 0.27, -0.16, DARK); // pack
-    t.box(0.18, 0.05, 0.16, 0, 0.47, -0.2, 0x3a4440); // drone body
+    t.box(0.2, 0.22, 0.09, 0, 0.27, -0.16, B.pack); // pack
+    t.tag(TAG.metal).box(0.18, 0.05, 0.16, 0, 0.47, -0.2, 0x3a4440); // drone body
     for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
       t.box(0.2, 0.025, 0.025, sx * 0.1, 0.48, -0.2 + sz * 0.07, METAL, sx * sz * 0.6);
       t.cyl(0.075, 0.015, 10, sx * 0.19, 0.5, -0.2 + sz * 0.13, 0x232a2c);
     }
-    t.box(0.3, 0.24, 0.03, 0, 0.18, -0.135, 0x46574f, 0, 0.1); // short cloak
+    t.tag(TAG.cloth).box(0.3, 0.24, 0.03, 0, 0.18, -0.135, B.pack2, 0, 0.1); // short cloak
   }
   const torso = addOutlineNormals(t.build({ ao: false }));
 
   // ---- head (pivot at neck)
   const h = new GeoBuilder();
-  h.box(0.09, 0.06, 0.09, 0, 0.0, 0, SKIN); // neck
+  h.tag(TAG.skin).box(0.09, 0.06, 0.09, 0, 0.0, 0, SKIN); // neck
   h.sphere(0.105, 0, 0.09, 0.01, SKIN, 1, 1.05, 1, 8, 6);
+  h.tag(TAG.helm);
   if (cls === 'recon') {
     // peaked hood
     h.sphere(0.13, 0, 0.1, -0.015, B.helm, 1.05, 1.0, 1.12, 8, 6);
     h.cone(0.11, 0.0, 0.16, 6, 0, 0.24, -0.04, B.helm, 0, -0.35);
-    h.box(0.24, 0.05, 0.08, 0, -0.01, 0.02, B.helm); // scarf
+    h.tag(TAG.cloth).box(0.24, 0.05, 0.08, 0, -0.01, 0.02, B.helm); // scarf
   } else if (cls === 'marksman') {
     h.sphere(0.12, 0, 0.13, -0.005, B.helm, 1.05, 0.62, 1.1, 8, 5); // boonie crown
     h.cyl(0.2, 0.02, 10, 0, 0.12, 0, B.helm); // brim
@@ -129,11 +129,11 @@ function geos(cls) {
   } else {
     h.sphere(bulky ? 0.135 : 0.125, 0, 0.13, -0.005, B.helm, 1.05, 0.8, 1.1, 8, 5);
     h.box(bulky ? 0.29 : 0.27, 0.025, 0.27, 0, 0.1, -0.01, B.helm);
-    if (bulky) h.box(0.22, 0.09, 0.03, 0, 0.06, 0.12, METAL); // face guard
+    if (bulky) h.tag(TAG.metal).box(0.22, 0.09, 0.03, 0, 0.06, 0.12, METAL); // face guard
   }
   const head = addOutlineNormals(h.build({ ao: false }));
 
-  // ---- team accents (torso: shoulders + class back marks; head: visor/stripe)
+  // ---- squad accents (torso: shoulders + class back marks; head: visor/stripe)
   const a = new GeoBuilder();
   const sw = bulky ? 0.13 : 0.1;
   a.box(sw, 0.07, 0.17, -w / 2 - 0.02, 0.35, 0, 0xffffff, 0, 0, 0.2);
@@ -167,9 +167,10 @@ function geos(cls) {
   // ---- arms + weapon (pivot at shoulder)
   const g = new GeoBuilder();
   const ax = w / 2 + 0.02;
-  g.box(0.08, 0.08, 0.26, ax, -0.08, 0.08, B.cloth, 0, 0.5); // right arm
+  g.tag(TAG.cloth).box(0.08, 0.08, 0.26, ax, -0.08, 0.08, B.cloth, 0, 0.5); // right arm
   g.box(0.08, 0.08, 0.24, -w / 2, -0.08, 0.1, B.cloth, 0.35, 0.4); // left arm
-  g.box(0.07, 0.07, 0.07, 0.08, -0.13, 0.25, SKIN);
+  g.tag(TAG.skin).box(0.07, 0.07, 0.07, 0.08, -0.13, 0.25, SKIN);
+  g.tag(TAG.metal);
   let muzzleZ, gx = 0.09;
   if (cls === 'assault') {
     g.box(0.06, 0.09, 0.42, gx, -0.1, 0.32, DARK);
@@ -190,9 +191,9 @@ function geos(cls) {
     g.box(0.07, 0.06, 0.16, gx, -0.16, 0.36, WOOD); // pump
     muzzleZ = 0.6;
     // door-shield on the left arm
-    g.box(0.56, 0.7, 0.05, -0.1, -0.13, 0.32, 0x9a8a72, -0.15);
-    g.box(0.5, 0.62, 0.012, -0.1, -0.14, 0.35, 0xb0582f, -0.15); // rusted skin
-    g.box(0.32, 0.1, 0.02, -0.1, 0.07, 0.357, 0x1a2328, -0.15); // window slit
+    g.tag(TAG.vest).box(0.56, 0.7, 0.05, -0.1, -0.13, 0.32, skin === 'default' ? 0x9a8a72 : B.shield, -0.15);
+    g.box(0.5, 0.62, 0.012, -0.1, -0.14, 0.35, skin === 'default' ? 0xb0582f : B.shieldSkin, -0.15); // rusted skin
+    g.tag(TAG.metal).box(0.32, 0.1, 0.02, -0.1, 0.07, 0.357, 0x1a2328, -0.15); // window slit
     g.box(0.5, 0.05, 0.07, -0.1, -0.47, 0.32, METAL, -0.15);
     g.box(0.05, 0.62, 0.07, -0.37, -0.13, 0.36, METAL, -0.15);
     g.box(0.05, 0.62, 0.07, 0.17, -0.13, 0.28, METAL, -0.15);
@@ -214,13 +215,14 @@ function geos(cls) {
   }
   const arms = addOutlineNormals(g.build({ ao: false }));
   const aa = new GeoBuilder();
-  if (cls === 'medic') aa.box(0.085, 0.05, 0.1, ax, -0.07, 0.0, 0xffffff, 0, 0.5); // armband
+  // squad armband on the right upper arm (every class)
+  aa.box(0.085, 0.05, 0.1, ax, -0.07, 0.0, 0xffffff, 0, 0.5);
   if (cls === 'recon') aa.box(0.012, 0.012, 0.02, gx, -0.03, 0.315, 0xffffff); // optic glint
-  const armsAccent = aa.empty ? null : aa.build({ ao: false });
+  const armsAccent = aa.build({ ao: false });
   addOutlineNormals(leg);
   const res = { leg, torso, head, accent, headAccent, arms, armsAccent, muzzleZ, gx };
   for (const k of ['leg', 'torso', 'head', 'accent', 'headAccent', 'arms', 'armsAccent']) if (res[k]) res[k].userData.shared = true;
-  GEO.set(cls, res);
+  GEO.set(gk, res);
   return res;
 }
 
@@ -291,14 +293,21 @@ function makeXrayShellMat() {
 const _wp = new THREE.Vector3();
 
 export class SoldierView {
-  constructor(u, mine) {
+  /**
+   * opts: { color: 0xRRGGBB squad colour, skin: cosmetic skin id }.
+   * (Legacy: a boolean second argument means "my squad" → amber / magenta.)
+   */
+  constructor(u, opts = {}) {
     sharedGeos();
-    const G = geos(u.cls);
+    if (typeof opts === 'boolean') opts = { color: opts ? TEAM.amber : TEAM.magenta };
+    const skin = hasSkin(opts.skin) ? opts.skin : 'default';
+    this.skin = skin;
+    const G = soldierGeos(u.cls, skin);
     this.cls = BODY[u.cls] ? u.cls : 'assault';
     this.id = u.id;
-    const team = mine ? TEAM.amber : TEAM.magenta;
+    const team = opts.color ?? TEAM.magenta;
     this.teamCol = new THREE.Color(team);
-    this.bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.05, emissive: 0xffffff, emissiveIntensity: 0 });
+    this.bodyMat = makeSkinMaterial(skin);
     this.accentMat = new THREE.MeshStandardMaterial({ color: team, emissive: team, emissiveIntensity: 0.45, roughness: 0.5 });
     this.ringMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(team).multiplyScalar(1.6), transparent: true, opacity: 0.95, depthWrite: false });
 
@@ -320,7 +329,7 @@ export class SoldierView {
     this.torso.add(this.head);
     this.arms = new THREE.Group(); this.arms.position.y = SHOULDER;
     this.arms.add(mk(G.arms, this.bodyMat));
-    if (G.armsAccent) this.arms.add(mk(G.armsAccent, this.accentMat, false));
+    this.arms.add(mk(G.armsAccent, this.accentMat, false));
     this.muzzle = new THREE.Object3D(); this.muzzle.position.set(G.gx, -0.09, G.muzzleZ);
     this.arms.add(this.muzzle);
     this.torso.add(this.arms);
@@ -414,7 +423,8 @@ export class SoldierView {
   revive() {
     this.dead = false; this.deathT = 0; this.corpse = false;
     this.pose.rotation.set(0, 0, 0); this.pose.position.set(0, 0, 0);
-    this.root.visible = true;
+    this.pose.visible = true; this.derezzed = false;
+    this.root.visible = true; this.root.scale.set(1, 1, 1); this.root.rotation.x = this.root.rotation.z = 0;
     this.ring.visible = true; this.blob.visible = true;
     if (this.ring2) this.ring2.visible = true;
     this.down = this.downGoal = 0; this.bleedRing.visible = false;
@@ -456,6 +466,7 @@ export class SoldierView {
     if (this.reload < 1) this.reload = Math.min(1, this.reload + dt / 0.75);
     this.aim += (this.aimGoal - this.aim) * damp(12, dt);
     this.bodyMat.emissiveIntensity = this.flash * 1.4;
+    tickSkinMaterial(this.bodyMat, t);
     // overwatch cone fade in/out
     this.coneK += (this.coneGoal - this.coneK) * damp(8, dt);
     if (this.cone.visible) {
@@ -545,6 +556,14 @@ export class SoldierView {
 
   /** World position of the head (for labels / text anchors). */
   headWorld(out) { this.head.getWorldPosition(out); return out; }
+
+  /** Squad colour (rings, visor, armband, bleed ring). */
+  setColor(hex) {
+    this.teamCol.set(hex);
+    this.accentMat.color.set(hex); this.accentMat.emissive.set(hex);
+    this.ringMat.color.set(hex).multiplyScalar(1.6);
+    this.bleedMat.uniforms.uCol.value.set(hex);
+  }
 
   dispose() {
     this.bodyMat.dispose(); this.accentMat.dispose(); this.ringMat.dispose(); this.bleedMat.dispose();

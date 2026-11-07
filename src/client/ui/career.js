@@ -17,7 +17,13 @@ try {
     const saved = JSON.parse(raw);
     if (saved && typeof saved === 'object') {
       const base = EMPTY();
-      for (const k of Object.keys(base)) if (typeof saved[k] === typeof base[k] || (k === 'last' && saved[k])) base[k] = saved[k];
+      for (const k of Object.keys(base)) {
+        const v = saved[k], b = base[k];
+        if (typeof b === 'number') { if (Number.isFinite(v)) base[k] = Math.max(0, v); }
+        else if (k === 'last') { if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v; }
+        else if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v;
+      }
+      for (const [m, r] of Object.entries(base.byMode)) if (!r || typeof r !== 'object') delete base.byMode[m];
       data = base;
     }
   }

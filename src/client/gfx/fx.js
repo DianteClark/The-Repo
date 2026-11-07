@@ -218,9 +218,9 @@ export class Fx {
     this.world = world;
     this.overlay = overlay;
     this.scale = opts.scale ?? 1; // particle-count scale (quality)
-    this.add = new Particles(1000, THREE.AdditiveBlending);
-    this.alpha = new Particles(1400, THREE.NormalBlending);
-    this.debris = new Debris(260);
+    this.add = new Particles(opts.add ?? 1000, THREE.AdditiveBlending);
+    this.alpha = new Particles(opts.alpha ?? 1400, THREE.NormalBlending);
+    this.debris = new Debris(opts.debris ?? 260);
     world.add(this.add.mesh, this.alpha.mesh, this.debris.mesh);
     this.items = []; // timed custom effects {t, dur, fn}
     this.floodedAt = null;
@@ -263,7 +263,7 @@ export class Fx {
     this.scorchI = 0;
     // floating text pool
     this.texts = [];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < (opts.texts ?? 10); i++) {
       const c = document.createElement('canvas'); c.width = 512; c.height = 128;
       const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
       const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
@@ -583,6 +583,7 @@ export class Fx {
 
   /** style: 'hit' | 'graze' | 'miss' | 'heal' | 'info' | 'tide' | 'kill' */
   floatText(x, y, z, text, color, big = 1) {
+    if (!this.texts.length) return;
     const T = this.texts[this.textI++ % this.texts.length];
     // Stack above fresh texts on the same spot (e.g. FLANKED + damage + GRAZE) instead of overprinting.
     for (let n = 0; n < 4; n++) {
@@ -648,6 +649,17 @@ export class Fx {
       T.s.material.opacity = k > 0.72 ? 1 - (k - 0.72) / 0.28 : 1;
     }
     this.shake = Math.max(0, this.shake - dt * 1.6);
+  }
+
+  dispose() {
+    this.clear();
+    for (const P of [this.add, this.alpha]) { P.geo.dispose(); P.mat.dispose(); }
+    this.debris.mesh.geometry.dispose(); this.debris.mesh.material.dispose(); this.debris.mesh.dispose?.();
+    this.beamGeo.dispose(); for (const b of this.beams) b.material.dispose();
+    this.ringGeo.dispose(); this.thinRingGeo.dispose(); for (const r of this.rings) r.material.dispose();
+    this.scorchTex.dispose(); this.scorchGeo.dispose(); for (const s of this.scorches) s.m.material.dispose();
+    for (const t of this.texts) { t.tex.dispose(); t.s.material.dispose(); }
+    this.nade.geometry.dispose(); this.nade.material.dispose(); this.sweepMat.dispose(); this.sweep.geometry.dispose();
   }
 
   clear() {

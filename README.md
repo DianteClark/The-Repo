@@ -6,7 +6,7 @@ A 16-player, turn-based, XCOM-style battle royale that runs in the browser.
 One soldier per player. Rival salvage crews fight across a drowning archipelago
 while the storm tide (**the Surge**) floods the map from the edges in.
 
-> **Status: v2.0.** Single device against 15 bots, installable to your home screen and playable offline after your first visit. Online invite-code lobbies are the next build.
+> **Status: v3.0.** Single device against 15 bots, installable to your home screen and playable offline after your first visit. Online invite-code lobbies are the next build.
 
 ## Play it
 
@@ -18,12 +18,13 @@ while the storm tide (**the Surge**) floods the map from the edges in.
 - Tap a visible enemy to aim, then **Fire**. Firing ends your turn.
 - Drag to pan the map. Pinch or scroll to zoom. ⟲ ⟳ rotate the camera.
 
-## What's in 2.0
+## What's in 3.0
 
 | Area | Details |
 | --- | --- |
 | Modes | Solos 16×1 · Duos 8×2 · Trios 5×3 + 1 **Lone Wolf** (+1 AP, +50% HP, +1 armor; volunteer in the menu) · Quads 4×4 |
 | Turns | Each squad gets **20 s**. Teammates act in the same window, and the clock pauses while your own action animates. When time runs out, your unit goes on overwatch |
+| Stages | 44×44 maps. **Drowned Harbor** (classic) · **Kelp Shallows** (kelp hides you beyond 3 tiles) · **Rig Graveyard** (explosive barrels that chain; shoot them) · **Night Spires** (sight 6; firing flares you to everyone) · **Surge Point** (the safe zone drifts) |
 | Classes | Assault · Marksman (Aimed Shot) · Breacher (Breach charge) · **Medic** (Patch / revive) · **Recon** (Scan reveals through fog) |
 | Actions | Move/dash · Shoot · Frag (destroys cover) · Smoke · class ability · Revive · Hunker · Overwatch · Medkit |
 | Squads | In Duos, Trios and Quads, 0 HP **downs** you. You bleed out over 2 turns unless a squadmate revives you |
@@ -32,6 +33,7 @@ while the storm tide (**the Surge**) floods the map from the edges in.
 | The Surge | The tide floods in every 2 rounds and its damage grows. The storm grade, rain and lightning intensify late game |
 | Graphics | Stylized diorama: ACES, soft shadows, bloom, animated water and tide, prop-based cover, debris, action cam, hit-stop. Auto quality (`?gfx=low\|high` to force) |
 | Audio | Synthesized weapons per class, title theme, adaptive match score, ambience from waves and gulls to storm |
+| Meta | Class badges with 5 prestige tiers (Recruit → Legend) · Salvage currency · Shop and Locker for skins, kill effects and drop-in arrivals · a distinct colour per squad (yours is amber) |
 | App | PWA with home-screen icon (`assets/icon/`) and an offline cache (`sw.js`) |
 | UI | Cinematic title screen, career stats, callsign, tutorial, DROP IN intro, haptics, damage-direction arcs. Tap to preview, tap again to confirm. Hit-% badges, grenade AoE preview, minimap, kill feed, turn-order strip, spectator mode, and keyboard shortcuts on desktop |
 

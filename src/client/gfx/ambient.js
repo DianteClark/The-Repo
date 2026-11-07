@@ -10,7 +10,7 @@ import { WATER_Y } from './fields.js';
 
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(1, 1, 1), _e = new THREE.Euler();
 
-function gullGeometry() {
+export function gullGeometry() {
   // body + two wings (wings are flapped in the shader by |x|)
   const g = new GeoBuilder();
   g.box(0.07, 0.06, 0.26, 0, 0, 0, 0xeee8da);
@@ -25,7 +25,8 @@ function gullGeometry() {
 }
 
 export class Ambient {
-  constructor(world, S, seed, high) {
+  constructor(world, S, seed, high, look = null) {
+    this.gullK = look ? look.gulls ?? 1 : 1;
     this.S = S;
     const r = rng((seed ^ 0x9a11) >>> 0);
     this.group = new THREE.Group();
@@ -110,7 +111,7 @@ export class Ambient {
     this.setQuality(high);
   }
 
-  setQuality(high) { this.gulls.count = high ? this.birds.length : 6; }
+  setQuality(high) { this.gulls.count = Math.round((high ? this.birds.length : 6) * this.gullK); this.gulls.visible = this.gulls.count > 0; }
 
   update(dt, t, storm) {
     this.gullU.uT.value = t;

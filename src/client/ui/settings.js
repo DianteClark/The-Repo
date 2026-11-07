@@ -17,6 +17,8 @@ const DEFAULTS = {
   seenTutorial: false, // first-launch tips on the title screen
   haptics: true,       // navigator.vibrate on hits, kills and turn start
   callsign: '',        // shown on squad cards and the end screen
+  stage: 'random',     // stage key or 'random'
+  coverFade: true,     // fade cover props while picking a move
 };
 
 let data = { ...DEFAULTS };

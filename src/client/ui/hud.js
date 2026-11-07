@@ -1,6 +1,8 @@
 // HUD rendering helpers. Pure DOM: main.js owns the game state and calls in.
 
-import { ICON, SILHOUETTE } from './icons.js';
+import { ICON } from './icons.js';
+import { badgeCached } from './badges.js';
+import { squadColor } from './squads.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -22,7 +24,7 @@ export function renderTurnStrip(state, { myTeam, activeTeam, alive }) {
     if (out) cls.push('out');
     if (team.isLoneWolf) cls.push('wolf');
     const dots = solo ? '' : team.members.map((id) => { const m = state.units[id]; return `<i class="${!m.alive ? 'x' : m.downed ? 'dn' : ''}"></i>`; }).join('');
-    return `<span class="${cls.join(' ')}" title="${t === myTeam ? 'Your squad' : 'Squad ' + (t + 1)}">${solo ? '' : dots}</span>`;
+    return `<span class="${cls.join(' ')}" style="--sq:${squadColor(t, myTeam)}" title="${t === myTeam ? 'Your squad' : 'Squad ' + (t + 1)}">${solo ? '' : dots}</span>`;
   }).join('');
   if (el._html !== html) { el.innerHTML = html; el._html = html; }
   el.classList.toggle('solo', solo);
@@ -72,13 +74,14 @@ export function renderChips({ round, squadsLeft, squadsTotal, tideIn, tideDmg, o
 
 // ---------- unit card ----------
 
-export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weaponStats, spectating, aliveMates, callsign, inSmoke, spotted }) {
+export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weaponStats, spectating, aliveMates, callsign, inSmoke, spotted, tier = 0, inKelp, flared, inShallows }) {
+  const badge = (dim) => `<div class="uc-sil uc-badge${dim ? ' dim' : ''}">${u ? badgeCached(u.cls, tier, { size: 46, animated: tier >= 4 && !dim }) : ''}</div>`;
   const el = $('unitCard');
   if (!u) { el.innerHTML = ''; el._html = ''; return; }
   const c = CLASSES[u.cls];
   if (u.alive && u.downed) {
     const pips = Array.from({ length: Math.max(2, u.bleed || 0) }, (_, i) => `<i class="${i < (u.bleed || 0) ? 'on' : ''}"></i>`).join('');
-    const html = `<div class="uc downed"><div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
+    const html = `<div class="uc downed">${badge(true)}
       <div class="uc-main"><div class="uc-top"><span class="uc-name">Downed</span><span class="tag bleed">${ICON.bleed}${u.bleed || 0} turn${u.bleed === 1 ? '' : 's'} left</span></div>
       <div class="uc-sub">${aliveMates ? 'Hold on. A squadmate next to you can revive you.' : 'No squadmate standing to revive you.'}</div></div>
       <div class="uc-bleed" title="Bleed-out counter"><span class="bl-pips">${pips}</span><small>Bleed</small></div></div>`;
@@ -86,7 +89,7 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
     return;
   }
   if (!u.alive) {
-    const html = `<div class="uc dead"><div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
+    const html = `<div class="uc dead">${badge(true)}
       <div class="uc-main"><div class="uc-top"><span class="uc-name">Eliminated</span></div>
       <div class="uc-sub">${spectating ? (aliveMates ? `Spectating your squad · ${aliveMates} still fighting` : 'Spectating the match') : ''} · ${u.kills} kill${u.kills === 1 ? '' : 's'}</div></div></div>`;
     if (el._html !== html) { el.innerHTML = html; el._html = html; }
@@ -98,10 +101,13 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
   const apPips = Array.from({ length: u.maxAp }, (_, i) => `<i class="${myTurn && i < u.ap ? 'on' : ''}"></i>`).join('');
   const armor = u.armor > 0 ? `<span class="armor" title="Armor: blocks ${u.armor} damage per hit">${ICON.shield}<b>${u.armor}</b></span>` : '';
   const tags = [
+    flared && `<span class="tag flare" title="Your gunfire lit a flare: every squad can see you until your next turn">${ICON.flare}Flared · visible</span>`,
+    !flared && inSmoke && `<span class="tag hid" title="Hidden in smoke: enemies more than a tile away can't see you. -20 aim on shots in or out">${ICON.hidden}Hidden · smoke</span>`,
+    !flared && !inSmoke && inKelp && `<span class="tag hid" title="Hidden in kelp: enemies more than 3 tiles away can't see you. -10 aim against you">${ICON.hidden}Hidden · kelp</span>`,
     u.isLoneWolf && `<span class="tag wolf">${ICON.wolf}Lone wolf</span>`,
     u.overwatch && `<span class="tag ow">${ICON.overwatch}Overwatch</span>`,
     u.hunkered && `<span class="tag hk">${ICON.hunker}Hunkered</span>`,
-    inSmoke && `<span class="tag sm">${ICON.smoke}Smoke</span>`,
+    inShallows && `<span class="tag" title="Shallow water: costs double movement">${ICON.water}Shallows</span>`,
     spotted && `<span class="tag spot">${ICON.scan}Scanned</span>`,
     outside ? `<span class="tag danger">${ICON.tide}In the tide</span>` : nextOutside ? `<span class="tag warn">${ICON.tide}Tide next</span>` : '',
   ].filter(Boolean).join('');
@@ -115,8 +121,8 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
     (u.items.smoke ?? 0) > 0 || u.cls === 'recon' ? `<span class="g item${u.items.smoke ? '' : ' none'}" title="Smoke grenades">${ICON.smoke}${u.items.smoke ?? 0}</span>` : '',
     u.missStreak ? `<span class="g streak" title="Miss streak bonus">+${u.missStreak * 10}%</span>` : '',
   ].filter(Boolean).join('');
-  const html = `<div class="uc">
-    <div class="uc-sil">${SILHOUETTE[u.cls] || ''}</div>
+  const html = `<div class="uc${flared ? ' flared' : ''}">
+    ${badge(false)}
     <div class="uc-main">
       <div class="uc-top"><span class="uc-name">${callsign ? `${esc(callsign)}<em>${esc(c.name)}</em>` : esc(c.name)}</span>${tags}</div>
       <div class="uc-hp"><span class="hp-pips${u.maxHp > 14 ? ' dense' : ''}">${hpPips}</span><span class="hp-num">${u.hp}<small>/${u.maxHp}</small></span>${armor}</div>
@@ -131,7 +137,7 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
 
 export function renderActions(list, onPress) {
   const el = $('actions');
-  const sig = list.map((a) => `${a.key}:${a.state}:${a.badge ?? ''}:${a.reason ?? ''}:${a.label}`).join('|');
+  const sig = list.map((a) => `${a.key}:${a.state}:${a.badge ?? ''}:${a.badgeKind ?? ''}:${a.reason ?? ''}:${a.label}`).join('|');
   if (el._sig === sig) return;
   el._sig = sig;
   el.innerHTML = '';
@@ -140,10 +146,12 @@ export function renderActions(list, onPress) {
     b.className = `act ${a.state}${a.key === 'end' ? ' end' : ''}`;
     b.dataset.act = a.key;
     b.setAttribute('aria-disabled', a.state === 'off' ? 'true' : 'false');
-    b.title = a.state === 'off' && a.reason ? `${a.label}: ${a.reason}` : a.label + (a.hotkey ? ` [${a.hotkey}]` : '');
+    b.title = (a.state === 'off' && a.reason ? `${a.label}: ${a.reason}` : a.label + (a.hotkey ? ` [${a.hotkey}]` : '')) + (a.endsTurn ? ' · ends your turn' : '');
+    if (a.endsTurn) b.classList.add('ends');
     b.innerHTML = `<span class="ai">${ICON[a.icon] || ''}</span><span class="al">${a.label}</span>`
       + (a.badge !== undefined && a.badge !== null && a.badge !== '' ? `<span class="badge${a.badgeKind ? ' ' + a.badgeKind : ''}">${a.badge}</span>` : '')
-      + (a.hotkey ? `<kbd>${a.hotkey}</kbd>` : '');
+      + (a.hotkey ? `<kbd>${a.hotkey}</kbd>` : '')
+      + (a.endsTurn ? `<i class="et" aria-label="ends turn">${ICON.endturn}</i>` : '');
     b.addEventListener('click', (e) => { e.stopPropagation(); onPress(a); });
     el.appendChild(b);
   }
@@ -170,26 +178,27 @@ export function hideContext() {
 
 // ---------- feed / toasts / banners ----------
 
-export function feedKill({ killer, victim, cause, killerMine, victimMine }) {
-  const f = $('feed');
+const nameSpan = (cls, txt, mine, color) => `<span class="${cls} ${mine ? 'mine' : ''}"${color && !mine ? ` style="color:${color}"` : ''}>${esc(txt)}</span>`;
+
+export function feedKill({ killer, victim, cause, killerMine, victimMine, killerColor, victimColor }) {
   const d = document.createElement('div');
   d.className = 'kf' + (killerMine ? ' by-me' : '') + (victimMine ? ' on-me' : '');
   const ic = CAUSE_ICON[cause] || ICON.skull;
   const note = { tide: 'drowned', bleed: 'bled out', downed: 'down' }[cause] || 'down';
   d.innerHTML = killer
-    ? `<span class="a ${killerMine ? 'mine' : ''}">${esc(killer)}</span><span class="kic">${ic}</span><span class="b ${victimMine ? 'mine' : ''}">${esc(victim)}</span>`
-    : `<span class="kic ${cause === 'tide' ? 'tide' : ''}">${ic}</span><span class="b ${victimMine ? 'mine' : ''}">${esc(victim)}</span><small>${note}</small>`;
+    ? `${nameSpan('a', killer, killerMine, killerColor)}<span class="kic">${ic}</span>${nameSpan('b', victim, victimMine, victimColor)}`
+    : `<span class="kic ${cause === 'tide' ? 'tide' : ''}">${ic}</span>${nameSpan('b', victim, victimMine, victimColor)}<small>${note}</small>`;
   pushFeed(d);
 }
-const CAUSE_ICON = { shoot: ICON.shoot, aimed: ICON.aimed, grenade: ICON.grenade, breach: ICON.breach, tide: ICON.tide, overwatch: ICON.overwatch, bleed: ICON.bleed, execute: ICON.skull };
+const CAUSE_ICON = { shoot: ICON.shoot, aimed: ICON.aimed, grenade: ICON.grenade, breach: ICON.breach, tide: ICON.tide, overwatch: ICON.overwatch, bleed: ICON.bleed, execute: ICON.skull, barrel: ICON.barrelx };
 
 /** One feed line: [a] icon [b] note. kind: down | revive | patch | scan | smoke */
-export function feedLine({ a, aMine, icon, b, bMine, note, kind = '' }) {
+export function feedLine({ a, aMine, aColor, icon, b, bMine, bColor, note, kind = '' }) {
   const d = document.createElement('div');
   d.className = `kf ev ${kind}` + (aMine || bMine ? ' mineish' : '');
-  d.innerHTML = (a ? `<span class="a ${aMine ? 'mine' : ''}">${esc(a)}</span>` : '')
+  d.innerHTML = (a ? nameSpan('a', a, aMine, aColor) : '')
     + `<span class="kic">${ICON[icon] || ''}</span>`
-    + (b ? `<span class="b ${bMine ? 'mine' : ''}">${esc(b)}</span>` : '')
+    + (b ? nameSpan('b', b, bMine, bColor) : '')
     + (note ? `<small>${esc(note)}</small>` : '');
   pushFeed(d);
 }
@@ -223,7 +232,8 @@ function pushFeed(d) {
 export function clearFeed() { $('feed').innerHTML = ''; $('toasts').innerHTML = ''; merged = null; }
 
 export function toast(msg, kind = 'info', iconName) {
-  const t = $('toasts');
+  // Outside a match (menu, shop) the HUD is hidden: use the global host.
+  const t = $('hud').classList.contains('hidden') || document.body.classList.contains('ended') ? $('menuToasts') : $('toasts');
   const d = document.createElement('div');
   d.className = 'toast ' + kind;
   const ic = iconName ? ICON[iconName] : kind === 'error' ? ICON.warn : kind === 'loot' ? ICON.crate : '';

@@ -6,10 +6,14 @@
 // shot, hunker or overwatch).
 
 import {
-  act, moveOptions, shotPreview, aimedPreview, insideZone, zoneDamage, grenadePreview, breachTargets, breachPreview,
+  act, moveOptions, shotPreview, aimedPreview, insideZone, insideNextZone, zoneDamage, grenadePreview, breachTargets, breachPreview,
+  barrelTargets, barrelPreview,
   smokeTargets,
 } from './game.js';
-import { coverVs, dist, teamSeesUnit, teamSeesTile, hitChance, los, weaponRange, standing, inBounds } from './rules.js';
+import {
+  coverVs, dist, teamSeesUnit, teamSeesTile, hitChance, los, weaponRange, standing, inBounds,
+  concealment, isFlared, isKelp, sightOf, smokeAt,
+} from './rules.js';
 import { roll } from './rng.js';
 import { FRAG, SCAN } from './constants.js';
 
@@ -49,7 +53,8 @@ function bestShot(state, u) {
     const useAimed = aimedReady && !e.downed;
     const p = useAimed ? aimedPreview(state, u, e) : shotPreview(state, u, e);
     if (!p) continue;
-    const value = shotValue(p, e);
+    // Somebody who just fired at night is a known, live threat: punish it.
+    const value = shotValue(p, e) + (isFlared(state, e) ? 1 : 0);
     if (!best || value > best.value) {
       best = {
         target: e, chance: e.downed ? p.chance + p.graze : p.chance, value,
@@ -79,7 +84,7 @@ function grenadeValue(state, u, x, y, enemies) {
     const after = coverVs(state.map, e.x, e.y, u.x, u.y);
     if (after < before[i]) { coverBroken += before[i] - after; value += (before[i] - after) * 2.5; if (before[i] === 2) value += 2; }
   });
-  for (const c of p.cover) state.map.cover[c.y * S + c.x] = c.from;
+  for (let i = p.cover.length - 1; i >= 0; i--) state.map.cover[p.cover[i].y * S + p.cover[i].x] = p.cover[i].from;
   const fullBroken = enemies.some((e, i) => before[i] === 2 && p.units.some((h) => h.id === e.id)
     && p.cover.length && coverBroken > 0);
   const worth = hits >= 2 || fullBroken || p.units.some((h) => h.lethal) || (coverBroken > 0 && u.ap >= 2);
@@ -108,6 +113,24 @@ function bestGrenade(state, u, enemies) {
   return best;
 }
 
+/** Best fuel drum to shoot: worth it when it catches 2+ enemies, kills, or beats the best shot. */
+function bestBarrel(state, u, enemies) {
+  if (u.ap < 1 || !state.map.explosive || !enemies.length) return null;
+  const S = state.map.size;
+  let best = null;
+  for (const k of barrelTargets(state, u)) {
+    const x = k % S, y = (k / S) | 0;
+    if (!enemies.some((e) => dist(e.x, e.y, x, y) <= 4)) continue; // chains reach a few tiles at most
+    const p = barrelPreview(state, u, x, y);
+    if (p.units.some((h) => h.ally)) continue;
+    const hits = p.units.length;
+    if (!hits) continue;
+    const value = p.units.reduce((s2, h) => s2 + h.dmg + (h.lethal ? 8 : 0), 0) + p.cover.length * 0.3;
+    if (!best || value > best.value) best = { x, y, value, hits, lethal: p.units.some((h) => h.lethal) };
+  }
+  return best;
+}
+
 function bestBreach(state, u) {
   let best = null;
   for (const k of breachTargets(state, u)) {
@@ -121,18 +144,27 @@ function bestBreach(state, u) {
   return best;
 }
 
-/** Expected incoming fire if `u` stood on (x,y): sum of visible enemies' hit chances. */
+/**
+ * Expected incoming fire if `u` stood on (x,y): sum of visible enemies' hit chances.
+ * Smoke and kelp hide the tile from anyone further than 1.5 / 3 tiles; at night,
+ * enemies beyond sight mostly can't find you unless you've lit yourself up.
+ */
 function threatAt(state, u, x, y, enemies, hunker = false) {
   const ghost = { ...u, x, y, hunkered: hunker };
+  const hide = concealment(state, x, y).range;
+  const flared = isFlared(state, u);
+  const sight = sightOf(state.map);
   let t = 0;
   for (const e of enemies) {
     if (e.downed) continue;
     const d = dist(e.x, e.y, x, y);
     if (d > weaponRange(e) + e.move * 0.5) continue;
+    if (!flared && d > hide + e.move * 0.25) continue;
     if (!los(state.map, e.x, e.y, x, y)) continue;
+    const dark = !flared && d > sight ? 0.35 : 1;
     // Enemies can reposition, so treat "just out of range" as a lesser threat.
     const c = d <= weaponRange(e) ? hitChance(state, e, ghost).chance : 25;
-    t += c / 100;
+    t += (c / 100) * dark;
   }
   return t;
 }
@@ -151,7 +183,7 @@ function chooseMove(state, u, { costOne = true, defensive = false } = {}) {
       crates.sort((a, b) => dist(a.x, a.y, u.x, u.y) - dist(b.x, b.y, u.x, u.y));
       goal = crates[0];
     } else {
-      goal = { x: z.x, y: z.y };
+      goal = { x: z.nx ?? z.x, y: z.ny ?? z.y }; // head for where the circle is going
     }
   }
   const mates = matesOf(state, u);
@@ -167,8 +199,12 @@ function chooseMove(state, u, { costOne = true, defensive = false } = {}) {
     const x = k % S, y = (k / S) | 0;
     let score = 0;
     const dz = dist(x, y, z.x, z.y);
-    if (dz > z.next) score -= (dz - z.next) * 4;
+    const dn = dist(x, y, z.nx ?? z.x, z.ny ?? z.y); // the next ring may sit elsewhere (drift)
+    if (dn > z.next) score -= (dn - z.next) * 4;
     if (dz > z.r) score -= 40 + (dz - z.r) * 6 + (u.hp <= zoneDamage(state) ? 200 : 0);
+    // Kelp and smoke hide you: good ground to advance through.
+    if (isKelp(state.map, x, y)) score += near.length ? 3 : 1;
+    if (near.length && smokeAt(state, x, y)) score += 2;
     if (near.length) {
       // Defense: incoming expected hits from everyone who can see this tile.
       const threat = threatAt(state, u, x, y, near);
@@ -277,9 +313,10 @@ function tryScan(state, u, enemies, doAct) {
   for (let i = 0; i < 9; i++) {
     let x, y;
     if (i === 8) {
-      const d = dist(u.x, u.y, z.x, z.y) || 1;
+      const gx = z.nx ?? z.x, gy = z.ny ?? z.y;
+      const d = dist(u.x, u.y, gx, gy) || 1;
       const k = Math.min(1, 9 / d);
-      x = Math.round(u.x + (z.x - u.x) * k); y = Math.round(u.y + (z.y - u.y) * k);
+      x = Math.round(u.x + (gx - u.x) * k); y = Math.round(u.y + (gy - u.y) * k);
     } else {
       const a = (i / 8) * Math.PI * 2;
       x = Math.round(u.x + Math.cos(a) * 9); y = Math.round(u.y + Math.sin(a) * 9);
@@ -313,9 +350,15 @@ function trySmoke(state, u, enemies, doAct) {
     if (!(m.downed || m.hp <= m.maxHp * 0.6 || m.id === u.id)) continue;
     if (state.smokes.some((c) => dist(c.x, c.y, m.x, m.y) <= c.radius)) continue;
     if (!targets.has(m.y * S + m.x)) continue;
-    const t = m.downed
+    let t = m.downed
       ? foes.filter((e) => dist(e.x, e.y, m.x, m.y) <= weaponRange(e) + 2).length * 0.5
       : threatAt(state, m, m.x, m.y, foes);
+    if (!m.downed) {
+      // Smoke now hides rather than shields: value it by how much fire it actually breaks.
+      state.smokes.push({ id: -1, x: m.x, y: m.y, radius: 1.5 });
+      t -= threatAt(state, m, m.x, m.y, foes);
+      state.smokes.pop();
+    }
     if (t < (m.id === u.id && m.hp > m.maxHp * 0.6 ? 0.6 : 0.3)) continue;
     const value = t + (m.downed ? 0.6 : 0) + (m.id === u.id ? 0.2 : 0);
     if (!best || value > best.value) best = { x: m.x, y: m.y, value };
@@ -363,6 +406,11 @@ export function botTakeTurn(state, unitId) {
     if (nade && (!shot || nade.value >= shot.value * 0.8 || nade.hits >= 2 || u.ap >= 2)) {
       if (doAct({ type: 'grenade', x: nade.x, y: nade.y })) continue;
     }
+    // Fuel drums: shooting one ends the turn, so it has to beat the best shot.
+    const drum = bestBarrel(state, u, enemies);
+    if (drum && (drum.hits >= 2 || drum.lethal || !shot || drum.value >= shot.value * 1.3)) {
+      if (doAct({ type: 'shoot_barrel', x: drum.x, y: drum.y })) break;
+    }
 
     // 5. Take a good shot from here; after moving, accept a lesser one.
     const canStillMove = !moved && u.ap >= 1;
@@ -377,13 +425,19 @@ export function botTakeTurn(state, unitId) {
     if (moved < 2 && u.ap >= 1) {
       const fighting = foes.length > 0;
       const downedMate = matesOf(state, u).some((m) => m.downed);
-      const travel = !fighting && (moved === 0 || !insideZone(state, u.x, u.y, state.zone.next));
+      const travel = !fighting && (moved === 0 || !insideNextZone(state, u.x, u.y));
       if (inTide || (fighting || downedMate ? moved === 0 : travel)) {
-        const dest = chooseMove(state, u, {
+        const opts = {
           // Caught in the tide: dash for dry ground even mid-fight.
           costOne: inTide ? false : fighting || downedMate || u.ap >= 2,
           defensive: lowHp && !(shot && shot.chance >= 50),
-        });
+        };
+        let dest = chooseMove(state, u, opts);
+        // Approach under smoke: if the best tile is exposed, drop a cloud on it first.
+        if (dest && fighting && u.items.smoke > 0 && u.ap >= 2 && !smokeAt(state, dest.x, dest.y)
+          && threatAt(state, u, dest.x, dest.y, foes) >= 0.5 && doAct({ type: 'smoke', x: dest.x, y: dest.y })) {
+          dest = chooseMove(state, u, opts);
+        }
         if (dest && doAct({ type: 'move', x: dest.x, y: dest.y })) { moved++; continue; }
       }
     }

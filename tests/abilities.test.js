@@ -199,6 +199,7 @@ test('hunker: ends turn, doubles cover, no grazes, clears on own next turn', () 
 
 test('supply drops land inside the next zone at rounds 4, 8, 12 and caches give scope+barrel+frag', () => {
   const s = createGame({ seed: 11, mode: 'quads', noHuman: true });
+  for (const u of s.units) { u.hp = u.maxHp = 999; } // nobody dies to the tide while we fast-forward
   const drops = [];
   while (s.round < 13 && s.winner === null) {
     const evs = endTeamTurn(s);
@@ -208,7 +209,7 @@ test('supply drops land inside the next zone at rounds 4, 8, 12 and caches give 
         assert.equal(e.crate.type, 'cache');
         assert.equal(s.map.cover[e.crate.y * s.map.size + e.crate.x], 0);
         const z = s.zone;
-        assert.ok(Math.hypot(e.crate.x - z.x, e.crate.y - z.y) <= Math.max(z.next, z.r));
+        assert.ok(Math.hypot(e.crate.x - z.nx, e.crate.y - z.ny) <= z.next || Math.hypot(e.crate.x - z.x, e.crate.y - z.y) <= z.r);
       }
     }
   }

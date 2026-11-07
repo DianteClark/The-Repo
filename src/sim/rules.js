@@ -1,5 +1,5 @@
 import {
-  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED, SMOKE,
+  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED, SMOKE, KELP,
 } from './constants.js';
 
 export const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
@@ -61,9 +61,18 @@ export function tileCoverDirs(map, x, y) {
   return DIRS4.map(([dx, dy]) => (inBounds(map, x + dx, y + dy) ? map.cover[(y + dy) * map.size + x + dx] : 0));
 }
 
+/** Sight radius on this map (night stages see less). */
+export const sightOf = (map) => map.sight ?? SIGHT;
+
 export function canSeeTile(map, ux, uy, x, y) {
-  return dist(ux, uy, x, y) <= SIGHT && los(map, ux, uy, x, y);
+  return dist(ux, uy, x, y) <= sightOf(map) && los(map, ux, uy, x, y);
 }
+
+export const terrainAt = (map, x, y) => (map.terrain && inBounds(map, x, y) ? map.terrain[y * map.size + x] : 0);
+export const isKelp = (map, x, y) => terrainAt(map, x, y) === 1;
+export const isWater = (map, x, y) => terrainAt(map, x, y) === 2;
+export const isBarrel = (map, x, y) => !!(map.explosive && inBounds(map, x, y) && map.explosive[y * map.size + x]
+  && map.cover[y * map.size + x] > 0);
 
 /** Alive and not downed: can act, spot and take cover. */
 export const standing = (u) => u.alive && !u.downed;
@@ -83,9 +92,36 @@ export function revealedTo(state, team, target) {
   return false;
 }
 
+/** Has this unit fired at night and lit itself up for everyone? */
+export function isFlared(state, u) {
+  return !!state.flares && state.flares.some((f) => f.id === u.id);
+}
+
+/**
+ * How close an enemy must be to see a unit standing at (x,y):
+ * smoke 1.5, kelp 3, otherwise unlimited (normal sight). { range, by:'smoke'|'kelp'|null }
+ */
+export function concealment(state, x, y) {
+  if (smokeAt(state, x, y)) return { range: SMOKE.reveal, by: 'smoke' };
+  if (isKelp(state.map, x, y)) return { range: KELP.reveal, by: 'kelp' };
+  return { range: Infinity, by: null };
+}
+
+/**
+ * Can `team` see `target`? Squadmates always; scans and flares reveal through
+ * anything; otherwise a standing teammate needs sight + line of sight, and must
+ * be close if the target is in smoke (1.5) or kelp (3).
+ */
 export function teamSeesUnit(state, team, target) {
   if (target.team === team) return true;
-  return revealedTo(state, team, target) || teamSeesTile(state, team, target.x, target.y);
+  if (revealedTo(state, team, target) || isFlared(state, target)) return true;
+  const { range } = concealment(state, target.x, target.y);
+  if (range === Infinity) return teamSeesTile(state, team, target.x, target.y);
+  for (const u of state.units) {
+    if (u.team !== team || !standing(u)) continue;
+    if (dist(u.x, u.y, target.x, target.y) <= range && canSeeTile(state.map, u.x, u.y, target.x, target.y)) return true;
+  }
+  return false;
 }
 
 /** The smoke cloud covering (x,y), if any. */
@@ -113,12 +149,12 @@ export function isFlanked(map, tx, ty, ax, ay) {
 /**
  * Hit chance as an integer percentage, plus a breakdown for the UI.
  * opts.reaction: overwatch shot. opts.ability: 'aimed' for the Marksman's aimed shot.
- * Returns { chance, cover, flank, hunkered, smoke, notes }.
+ * Returns { chance, cover, flank, hunkered, smoke, kelp, notes }.
  */
 export function hitChance(state, shooter, target, { reaction = false, ability } = {}) {
   const d = dist(shooter.x, shooter.y, target.x, target.y);
   const range = weaponRange(shooter);
-  if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, smoke: false, notes: ['Out of range'] };
+  if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, smoke: false, kelp: false, notes: ['Out of range'] };
   const w = shooter.weapon;
   const notes = [];
   let aim = w.aim + shooter.mods.scope * 5;
@@ -139,7 +175,11 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
   if (w.closePenalty && d < 4) { aim -= 15; notes.push('Too close -15'); }
   const longP = Math.max(0, Math.round((d - range * 0.6) * 2));
   if (longP) { aim -= longP; notes.push('Long range -' + longP); }
-  if (smokeAt(state, target.x, target.y)) { aim -= SMOKE.defense; notes.push('Smoke -' + SMOKE.defense); }
+  const tSmoke = !!smokeAt(state, target.x, target.y);
+  if (tSmoke) { aim -= SMOKE.aimIn; notes.push('Target in smoke -' + SMOKE.aimIn); }
+  if (smokeAt(state, shooter.x, shooter.y)) { aim -= SMOKE.aimOut; notes.push('Firing from smoke -' + SMOKE.aimOut); }
+  const kelp = isKelp(state.map, target.x, target.y);
+  if (kelp) { aim -= KELP.aim; notes.push('Kelp -' + KELP.aim); }
   if (shooter.missStreak) {
     const b = shooter.missStreak * MISS_STREAK_BONUS;
     aim += b; notes.push('Miss streak +' + b);
@@ -147,10 +187,16 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
   if (ability === 'aimed') { aim += AIMED.aim; notes.push('Aimed +' + AIMED.aim); }
   if (reaction) { aim -= REACTION_PENALTY; notes.push('Reaction -' + REACTION_PENALTY); }
   const chance = Math.max(5, Math.min(95, Math.round(aim)));
-  return { chance, cover, flank, hunkered, smoke: !!smokeAt(state, target.x, target.y), notes };
+  return { chance, cover, flank, hunkered, smoke: tSmoke, kelp, notes };
 }
 
-/** BFS over 8 directions without cutting corners. Returns Map<tileKey, {d, prev}>. */
+/** Movement cost of stepping onto a tile: shallow water costs 2, everything else 1. */
+export const stepCost = (map, k) => (map.terrain && map.terrain[k] === 2 ? 2 : 1);
+
+/**
+ * Cheapest paths over 8 directions without cutting corners, up to `maxSteps`
+ * movement. Returns Map<tileKey, {d, prev}> where d is the movement spent.
+ */
 export function reachable(state, u, maxSteps) {
   const { map } = state;
   const S = map.size;
@@ -158,22 +204,28 @@ export function reachable(state, u, maxSteps) {
   for (const o of state.units) if (o.alive && o.id !== u.id) occ.add(o.y * S + o.x);
   const start = u.y * S + u.x;
   const res = new Map([[start, { d: 0, prev: -1 }]]);
-  let frontier = [start];
-  for (let d = 1; d <= maxSteps && frontier.length; d++) {
-    const next = [];
-    for (const k of frontier) {
+  // Bucket queue: costs are small integers.
+  const buckets = [[start]];
+  for (let d = 0; d <= maxSteps; d++) {
+    const list = buckets[d];
+    if (!list) continue;
+    for (const k of list) {
+      if (res.get(k).d !== d) continue; // stale entry
       const x = k % S, y = (k / S) | 0;
       for (const [dx, dy] of DIRS8) {
         const nx = x + dx, ny = y + dy;
         if (!inBounds(map, nx, ny)) continue;
         const nk = ny * S + nx;
-        if (res.has(nk) || map.cover[nk] > 0 || occ.has(nk)) continue;
+        if (map.cover[nk] > 0 || occ.has(nk)) continue;
         if (dx && dy && (map.cover[y * S + nx] > 0 || map.cover[ny * S + x] > 0)) continue;
-        res.set(nk, { d, prev: k });
-        next.push(nk);
+        const nd = d + stepCost(map, nk);
+        if (nd > maxSteps) continue;
+        const prev = res.get(nk);
+        if (prev && prev.d <= nd) continue;
+        res.set(nk, { d: nd, prev: k });
+        (buckets[nd] ||= []).push(nk);
       }
     }
-    frontier = next;
   }
   return res;
 }

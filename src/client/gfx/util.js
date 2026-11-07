@@ -91,7 +91,10 @@ const _c = new THREE.Color();
  * emits one flat-shaded BufferGeometry. Not used in hot paths.
  */
 export class GeoBuilder {
-  constructor(cull = false) { this.pos = []; this.col = []; this.parent = null; this.cull = cull; }
+  constructor(cull = false) { this.pos = []; this.col = []; this.tags = null; this.tagV = 0; this.parent = null; this.cull = cull; }
+
+  /** Material tag for the following primitives (emitted as an 'aTag' float attribute; used by skins). */
+  tag(v) { this.tagV = v; if (!this.tags && v) this.tags = new Array(this.pos.length / 3).fill(0); return this; }
 
   /** Optional matrix applied to every following primitive (e.g. a prop's tile transform). */
   setParent(m) { this.parent = m; return this; }
@@ -103,10 +106,11 @@ export class GeoBuilder {
     _m.compose(_p.set(x, y, z), _q, _s.set(sx, sy, sz));
     if (this.parent) _m.premultiply(this.parent);
     _c.set(color);
-    const { pos, col } = this;
+    const { pos, col, tags } = this;
     for (let i = 0; i < tpl.length; i += 3) {
       _v.set(tpl[i], tpl[i + 1], tpl[i + 2]).applyMatrix4(_m);
       pos.push(_v.x, _v.y, _v.z);
+      if (tags) tags.push(this.tagV);
       let k = 1;
       if (shade) k = shade(tpl[i], tpl[i + 1], tpl[i + 2]);
       col.push(_c.r * k, _c.g * k, _c.b * k);
@@ -162,6 +166,7 @@ export class GeoBuilder {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    if (this.tags) geo.setAttribute('aTag', new THREE.BufferAttribute(new Float32Array(this.tags), 1));
     geo.computeVertexNormals(); // non-indexed → flat normals
     geo.computeBoundingSphere();
     return geo;
