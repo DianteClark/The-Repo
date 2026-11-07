@@ -8,7 +8,7 @@
 // Bump VERSION to force-drop every old cache. SHELL lists every module, so a
 // fresh install is fully offline-capable even before the first warm message.
 
-const VERSION = 'tidefall-v3.0.0';
+const VERSION = 'tidefall-v3.0.1';
 const NET_TIMEOUT = 4000; // ms before a cached copy wins over a slow network
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
