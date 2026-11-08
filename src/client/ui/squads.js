@@ -37,9 +37,31 @@ try {
 
 const valid = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
 
+// Colourblind presets (5.0): enemy palettes that stay distinct under each
+// deficiency by leaning on lightness as well as hue. Amber (you) and cyan
+// (signals) stay reserved in every preset.
+export const PRESET_PALETTES = {
+  // Red-green safe: blues, purples, magentas, yellows, whites at varied lightness.
+  deutan: ['#3d6bff', '#ff4fd8', '#f5f06a', '#9b6bff', '#ffffff', '#1f3fa8', '#ff9fe8', '#c9c400', '#6a3df0', '#b8c9ff', '#a8008a', '#e6e6a0', '#5a8cff', '#d78cff', '#8a8a8a'],
+  protan: ['#2f6dff', '#ff66e0', '#e8e04a', '#a070ff', '#f2f2f2', '#203d9c', '#ffb0ef', '#b3ae00', '#7340f5', '#a9bdff', '#b0129a', '#d9d98f', '#4e7fff', '#cf8aff', '#7d7d7d'],
+  // Blue-yellow safe: reds, pinks, teals and greys.
+  tritan: ['#ff3b3b', '#ff8fb0', '#00a37a', '#c40050', '#ffffff', '#ff7a5c', '#7a0018', '#5fd6b0', '#e05a8a', '#b3b3b3', '#a83250', '#00664c', '#ffb3c2', '#ff5f8f', '#5c5c5c'],
+  // High contrast: maximal lightness spread.
+  high: ['#ff2d55', '#ffffff', '#3d5afe', '#e040fb', '#00e676', '#ff6d00', '#c6ff00', '#7c4dff', '#ff80ab', '#18ffff', '#9e9e9e', '#ffea00', '#d50000', '#304ffe', '#76ff03'],
+};
+let preset = 'standard';
+/** Switch the enemy palette ('standard' uses the shared Graphics palette). */
+export function setColorPreset(p) { preset = PRESET_PALETTES[p] ? p : 'standard'; }
+export const activePalette = () => PRESET_PALETTES[preset] || palette;
+
 /** Colour of team `t` as seen by `myTeam`. Always '#rrggbb'. */
 export function squadColor(t, myTeam) {
   if (t === myTeam) return AMBER;
+  if (PRESET_PALETTES[preset] && t !== null && t !== undefined && t >= 0) {
+    const pal = PRESET_PALETTES[preset];
+    const idx = myTeam >= 0 && t > myTeam ? t - 1 : t;
+    return pal[idx % pal.length];
+  }
   if (impl) {
     try { const c = impl(t, myTeam); if (valid(c)) return c; } catch { /* fall back */ }
   }

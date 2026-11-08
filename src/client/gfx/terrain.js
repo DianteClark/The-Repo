@@ -77,8 +77,9 @@ export function buildTerrain(map, fields, cls, wx, wz, look = null) {
   const mat = patchWorld(new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0 }), fields, 'ground', {
     vertDecl: 'attribute float aType;\nvarying float vType;\nvarying float vNY;\n',
     vert: 'vType = aType; vNY = normal.y;\n',
-    fragDecl: 'varying float vType;\nvarying float vNY;\n',
+    fragDecl: 'varying float vType;\nvarying float vNY;\nfloat gPud = 0.0;\nfloat gUnder = 0.0;\n',
     colorFrag: GROUND_FRAG,
+    preOut: GROUND_OUT,
   });
   const mesh = new THREE.InstancedMesh(geo, mat, n);
   const m4 = new THREE.Matrix4(), col = new THREE.Color();
@@ -106,7 +107,11 @@ export function buildTerrain(map, fields, cls, wx, wz, look = null) {
   group.add(mesh);
 
   // Island skirt: rough rock under the tiles so the map edge reads as a cliff into the sea.
-  const skirtMat = patchWorld(new THREE.MeshStandardMaterial({ color: P.cliff, roughness: 1, flatShading: true }), fields, 'skirt');
+  const skirtMat = patchWorld(new THREE.MeshStandardMaterial({ color: P.cliff, roughness: 1, flatShading: true }), fields, 'skirt', {
+    // underwater cliff face: caustic light + a dark algae waterline band
+    colorFrag: 'diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.32, 0.46, 0.42), smoothstep(0.12, -0.05, vWPos.y) * 0.7);\n',
+    preOut: 'if (uHigh > 0.5) outgoingLight += uSunCol * caustic(vWPos.xz + vWPos.y * 0.6, uTime) * smoothstep(0.1, -0.2, vWPos.y) * smoothstep(-2.4, -0.4, vWPos.y) * 0.22 * uCaustic;\n',
+  });
   const skirtGeo = new THREE.BoxGeometry(S + 0.6, 2.4, S + 0.6, 24, 3, 24);
   const pa = skirtGeo.attributes.position;
   for (let i = 0; i < pa.count; i++) {
@@ -128,8 +133,50 @@ export function buildTerrain(map, fields, cls, wx, wz, look = null) {
   bed.rotation.x = -Math.PI / 2;
   bed.position.y = -2.6;
   group.add(bed);
-  return { group, mesh, mat };
+  const aT = geo.attributes.aType;
+  const _q = new THREE.Quaternion(), _e = new THREE.Euler(), _p = new THREE.Vector3(), _s = new THREE.Vector3(1, 1, 1);
+  /**
+   * 5.0 terrain changes (stage events): retype a tile, optionally sunk by dy
+   * and tilted (collapsing deck slabs). Colour follows the new surface.
+   */
+  function setTile(k, t, dy = 0, tilt = 0) {
+    const x = k % S, y = (k / S) | 0;
+    cls.type[k] = t;
+    _e.set(tilt * 0.6, 0, tilt);
+    _q.setFromEuler(_e);
+    m4.compose(_p.set(wx(x), TOP[t] - dy, wz(y)), _q, _s);
+    mesh.setMatrixAt(k, m4);
+    col.set(base[t]);
+    const j = (hash(k * 3 + 1) - 0.5);
+    col.offsetHSL(j * 0.012, j * 0.04, j * 0.05);
+    mesh.setColorAt(k, col);
+    aT.array[k] = t + cls.dir[k] * 10;
+    aT.needsUpdate = true;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+  }
+  return { group, mesh, mat, setTile };
 }
+
+const GROUND_OUT = /* glsl */`
+{
+  vec2 p = vWPos.xz;
+  // caustics dancing on the seabed through the shallows
+  if (uHigh > 0.5 && gUnder > 0.01) outgoingLight += uSunCol * caustic(p, uTime) * clamp(gUnder, 0.0, 1.0) * 0.34 * uCaustic;
+  // puddles mirror the sky, with rain ripples
+  if (gPud > 0.01) {
+    float rip = 0.0;
+    if (uHigh > 0.5) {
+      vec2 cell = floor(p * 3.0); vec2 f = fract(p * 3.0) - 0.5;
+      float ph = fract(uTime * 0.9 + hash21(cell) * 7.0);
+      vec2 o = (vec2(hash21(cell + 3.1), hash21(cell + 7.7)) - 0.5) * 0.5;
+      rip = (1.0 - smoothstep(0.0, 0.035, abs(length(f - o) - ph * 0.45))) * (1.0 - ph) * uWet;
+    }
+    vec3 refl = skyColor(vec3(0.0, 0.55, 0.0)) * 0.55 + uSunCol * 0.06;
+    outgoingLight = mix(outgoingLight, refl, gPud * 0.38) + vec3(rip * 0.14 * gPud);
+  }
+}
+`;
 
 const GROUND_FRAG = /* glsl */`
 {
@@ -192,13 +239,27 @@ const GROUND_FRAG = /* glsl */`
   c *= 1.0 - grid * 0.22;
   // sides are darker earth
   c = mix(c * vec3(0.55, 0.5, 0.45), c, top);
-  // wet halo near water + algae
+  // baked contact AO: soft dark pools at the foot of walls and props
+  float ao = contactAO(p);
+  c *= 1.0 - ao * 0.58 * top;
+  // wet halo near water + algae; a receding swash line keeps it alive
   float sd = tideSD(p);
   float wet = smoothstep(-1.4, -0.05, sd);
-  c = mix(c, c * vec3(0.55, 0.62, 0.6), wet * 0.75);
+  float swash = smoothstep(-0.55, -0.05, sd + 0.18 * sin(uTime * 0.7 + vnoise(p * 0.9) * 5.0));
+  c = mix(c, c * vec3(0.55, 0.62, 0.6), max(wet * 0.75, swash * 0.85));
+  gUnder = smoothstep(-0.1, 0.25, sd) + step(4.5, ty) * 0.8;
+  // rain: puddles in low spots, everything darker and glossier
+  if (uWet > 0.01) gPud = puddleMask(p) * top * (1.0 - wet) * step(ty, 4.5);
+  c = mix(c, c * vec3(0.5, 0.54, 0.56), gPud * 0.6);
   // next-tide warning: diagonal hazard stripes + darkened wet look
   vec2 fuv = (p - uMapMin) / uMapExt;
   float warn = texture2D(uFogTex, fuv).g;
+  // 5.0 hazard mask (red tide band): toxic algae slick over the ground
+  float rtide = texture2D(uFogTex, fuv).b;
+  if (rtide > 0.01) {
+    float sw = vnoise(p * 1.3 + vec2(uTime * 0.12, -uTime * 0.08)) * 0.6 + vnoise(p * 4.1) * 0.4;
+    c = mix(c, vec3(0.46, 0.07, 0.05) * (0.6 + sw * 0.8), smoothstep(0.1, 0.7, rtide) * (0.45 + 0.25 * sw));
+  }
   float wr = smoothstep(0.42, 0.58, warn);
   float stripe = step(0.5, fract((p.x + p.y) * 1.6 - uTime * 0.25));
   c = mix(c, c * vec3(0.72, 0.86, 0.9), wr * 0.55);

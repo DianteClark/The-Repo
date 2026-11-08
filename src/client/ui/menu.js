@@ -1,34 +1,21 @@
-// Title flow: splash ("tap to start") → loadout (mode, class carousel,
-// callsign, career strip) plus the settings / how-to / tutorial sheets.
-// Pure DOM; main.js owns the match and passes callbacks in.
+// Front end shell: animated title → hub (Play · Barracks · Armory · Store ·
+// Career) with a pinned Deploy footer, plus the settings / transfer / how-to /
+// tutorial sheets. Pure DOM; main.js owns the match and passes callbacks in.
+// The Barracks, Armory, Store and Career pages render themselves (their own
+// modules) when the hub switches to them via onPage(page, el).
 
 import { ICON } from './icons.js';
 import { settings } from './settings.js';
 import { career, resetCareer } from './career.js';
 import { hapticsSupported, buzz } from './haptics.js';
 import { badgeSVG } from './badges.js';
+import * as P from './progress.js';
+import { setColorPreset } from './squads.js';
 import * as M from './meta.js';
 import { stageList, stageArt, stageIcon } from './stages.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-export const CLASS_INFO = {
-  assault: { role: 'Frontline all-rounder', ability: 'grenade', abilityName: 'Frag Grenades ×2' },
-  marksman: { role: 'Long-range precision', ability: 'aimed' },
-  breacher: { role: 'Close-quarters bruiser', ability: 'breach' },
-  medic: { role: 'Squad lifeline', ability: 'patch' },
-  recon: { role: 'Eyes of the squad', ability: 'scan', extra: 'smoke' },
-};
-const ABILITY_FALLBACK = {
-  grenade: { name: 'Frag Grenade', desc: 'Lob up to 7 tiles. 3 damage to everyone in a 3×3 blast, and it shreds cover. Does not end your turn.' },
-  aimed: { name: 'Aimed Shot', desc: '+15 aim and +2 damage on one carefully placed round. 3-round cooldown. Ends your turn.' },
-  breach: { name: 'Breach Charge', desc: 'Blow apart adjacent cover: the tile opens up and enemies within 1 tile take 4 damage. 3-round cooldown.' },
-  patch: { name: 'Patch', desc: 'Heal yourself or an adjacent ally for 5, or revive a downed ally at 4 HP. 1 AP, 2-round cooldown.' },
-  scan: { name: 'Scan', desc: 'Reveal every unit within 5 tiles of a point up to 12 tiles away, through walls, until your next turn.' },
-  smoke: { name: 'Smoke Grenade', desc: 'A 3×3 cloud that hides anyone inside from enemies more than a tile away, until your next turn. Shots into or out of smoke take -20 aim. Does not end your turn.' },
-  hunker: { name: 'Hunker Down', desc: 'Doubles your cover and blocks grazes until your next turn.' },
-};
 
 const MODE_INFO = {
   solos: { line: '16 × 1', desc: 'Every soldier for themselves.' },
@@ -46,22 +33,6 @@ function squadGlyph(mode, teamSize) {
     `<span class="g${gi === 0 ? ' you' : ''}${mode === 'trios' && n === 1 ? ' wolf' : ''}">${'<i></i>'.repeat(n)}</span>`).join('')}</span>`;
 }
 
-const STAT_MAX = { hp: 14, armor: 2, move: 7, range: 14, aim: 90, dmg: 7 };
-
-function statBars(c) {
-  const avg = (c.weapon.dmg[0] + c.weapon.dmg[1]) / 2;
-  const rows = [
-    ['Health', c.hp, STAT_MAX.hp, String(c.hp)],
-    ['Armor', c.armor, STAT_MAX.armor, String(c.armor)],
-    ['Mobility', c.move, STAT_MAX.move, `${c.move} tiles`],
-    ['Range', c.weapon.range, STAT_MAX.range, `${c.weapon.range} tiles`],
-    ['Aim', c.weapon.aim, STAT_MAX.aim, `${c.weapon.aim}`],
-    ['Damage', avg, STAT_MAX.dmg, `${c.weapon.dmg[0]}–${c.weapon.dmg[1]}`],
-  ];
-  return rows.map(([k, v, m, label], i) =>
-    `<div class="stat"><span class="sk">${k}</span><span class="sb"><i style="--w:${Math.max(4, Math.min(100, (v / m) * 100))}%;--d:${i * 40}ms"></i></span><span class="sv">${label}</span></div>`).join('');
-}
-
 export function randomCallsign(K) {
   const pool = K?.CALLSIGNS?.length ? K.CALLSIGNS : ['Rook', 'Vex', 'Salt', 'Kestrel', 'Brine', 'Mako', 'Tern', 'Gale'];
   const n = pool[Math.floor(Math.random() * pool.length)];
@@ -71,19 +42,94 @@ export const cleanCallsign = (s) => String(s || '').toUpperCase().replace(/[^A-Z
 
 // ------------------------------------------------------------------ menu
 
-export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnter, qualityNow, onReplayTutorial, onShop, onLocker }) {
+export const PAGES = ['play', 'barracks', 'armory', 'store', 'career'];
+const PAGE_ICON = { play: 'play', barracks: 'helmet', armory: 'rifle', store: 'shop', career: 'medal' };
+
+export function initMenu({ MODES, K, onDeploy, onClick, onHover, onEnter, qualityNow, onReplayTutorial, onPage, onPlayOnline, onTransfer }) {
   const click = (fn) => (e) => { onClick?.(); fn(e); };
-  const classKeys = () => Object.keys(CLASSES);
+  const menuEl = $('menu');
 
   // static icons
   $('howBtn').innerHTML = ICON.book;
   $('setBtn').innerHTML = ICON.gear;
-  document.querySelector('#menu .cs-ic').innerHTML = ICON.user;
-  $('csDice').innerHTML = ICON.refresh;
-  document.querySelector('#shopBtn .mb-ic').innerHTML = ICON.shop;
-  document.querySelector('#lockerBtn .mb-ic').innerHTML = ICON.locker;
-  $('shopBtn').onclick = click(() => onShop?.());
-  $('lockerBtn').onclick = click(() => onLocker?.());
+  document.querySelectorAll('#hubNav button').forEach((b) => { b.querySelector('.hn-ic').innerHTML = ICON[PAGE_ICON[b.dataset.page]] || ''; });
+  $('playHost').querySelector('.pm-ic').innerHTML = ICON.globe;
+  $('playJoin').querySelector('.pm-ic').innerHTML = ICON.key;
+
+  // ---- hub navigation
+  let page = PAGES.includes(menuEl.dataset.page) ? menuEl.dataset.page : 'play';
+  function moveInk() {
+    const nav = $('hubNav');
+    const btn = nav.querySelector(`button[data-page="${page}"]`);
+    const ink = nav.querySelector('.hn-ink');
+    if (!btn || !ink) return;
+    ink.style.setProperty('--x', btn.offsetLeft + 'px');
+    ink.style.setProperty('--w', btn.offsetWidth + 'px');
+    if (nav.scrollWidth > nav.clientWidth) nav.scrollTo?.({ left: btn.offsetLeft - (nav.clientWidth - btn.offsetWidth) / 2, behavior: 'smooth' });
+  }
+  function setPage(p, { silent = false } = {}) {
+    if (!PAGES.includes(p)) p = 'play';
+    const from = PAGES.indexOf(page), to = PAGES.indexOf(p);
+    const changed = p !== page;
+    page = p;
+    menuEl.dataset.page = p;
+    menuEl.style.setProperty('--dir', to >= from ? '1' : '-1');
+    document.querySelectorAll('#hubNav button').forEach((b) => {
+      const on = b.dataset.page === p;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', String(on));
+    });
+    document.querySelectorAll('#hubPages .page').forEach((el) => {
+      const on = el.dataset.page === p;
+      if (on && changed) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); }
+      el.classList.toggle('on', on);
+      if (on) el.scrollTop = 0;
+    });
+    moveInk();
+    if (changed && !silent) buzz('tap');
+    onPage?.(p, document.querySelector(`#hubPages .page[data-page="${p}"]`));
+  }
+  document.querySelectorAll('#hubNav button').forEach((b) => {
+    b.onclick = () => { if (b.dataset.page === page) return; onClick?.('tab'); setPage(b.dataset.page); };
+    b.onpointerenter = () => onHover?.();
+  });
+  addEventListener('resize', () => requestAnimationFrame(moveInk));
+  // Swipe between hub pages on touch (not inside horizontal scrollers or inputs).
+  let swx = null, swy = 0, swt = 0;
+  $('hubPages').addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch' || e.target.closest('input, textarea, .stage-row, .h-scroll, canvas')) { swx = null; return; }
+    swx = e.clientX; swy = e.clientY; swt = performance.now();
+  }, { passive: true });
+  $('hubPages').addEventListener('pointerup', (e) => {
+    if (swx === null) return;
+    const dx = e.clientX - swx, dy = e.clientY - swy;
+    swx = null;
+    if (performance.now() - swt > 600 || Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    const i = PAGES.indexOf(page) + (dx < 0 ? 1 : -1);
+    if (i >= 0 && i < PAGES.length) { onClick?.('tab'); setPage(PAGES[i]); }
+  });
+
+  // ---- play choices (Solo / Host / Join)
+  document.querySelectorAll('#pagePlay .pm-card').forEach((b) => {
+    b.onpointerenter = () => onHover?.();
+    b.onclick = click(() => {
+      const kind = b.dataset.play;
+      if (kind === 'solo') { settings.playMode = 'solo'; renderPlay(); return; }
+      onPlayOnline?.(kind);
+    });
+  });
+  function renderPlay() {
+    document.querySelectorAll('#pagePlay .pm-card').forEach((b) => b.classList.toggle('sel', b.dataset.play === 'solo'));
+    renderDailies();
+  }
+  function renderDailies() {
+    const el = $('playDailies');
+    if (!el) return;
+    const ds = P.dailies();
+    const h = Math.floor(P.msToDailyReset() / 3600000), m = Math.floor((P.msToDailyReset() % 3600000) / 60000);
+    $('dailyReset').textContent = `New in ${h}h ${m}m`;
+    el.innerHTML = ds.map((d) => `<div class="dm${d.done ? ' done' : ''}"><span class="dm-ic">${d.done ? ICON.check : ICON.calendar}</span><div class="dm-t"><b>${esc(d.label)}</b><span class="xpbar sm"><i style="--w:${Math.round((d.have / d.n) * 100)}%"></i></span></div><span class="dm-r"><b>${d.have}/${d.n}</b><small>+${d.xp.toLocaleString('en-US')} XP</small></span></div>`).join('');
+  }
 
   // ---- modes
   function renderModes() {
@@ -105,122 +151,6 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     wolf.classList.toggle('collapsed', settings.mode !== 'trios');
     $('wolfBox').checked = !!settings.loneWolf;
     $('modeDesc').textContent = (MODE_INFO[settings.mode] || {}).desc || '';
-  }
-
-  // ---- class carousel
-  if (!CLASSES[settings.cls]) settings.cls = classKeys()[0];
-  let lastIdx = classKeys().indexOf(settings.cls);
-  const stage = document.querySelector('#classCarousel .car-stage');
-  stage.innerHTML = classKeys().map((k) => `<div class="car-slide" data-cls="${k}">
-      <div class="car-sil"></div>
-      <div class="car-tier"></div>
-      <div class="car-name"><b>${esc(CLASSES[k].name)}</b><small>${esc(CLASSES[k].weapon.name)}</small></div>
-    </div>`).join('');
-  document.querySelector('#classCarousel .prev').innerHTML = ICON.chevL;
-  document.querySelector('#classCarousel .next').innerHTML = ICON.chevR;
-
-  const pick = (k) => { if (k === settings.cls) return; onClick?.(); settings.cls = k; renderClasses(); };
-  const step = (d) => { const ks = classKeys(); const i = ks.indexOf(settings.cls); pick(ks[(i + d + ks.length) % ks.length]); };
-  document.querySelector('#classCarousel .prev').onclick = () => step(-1);
-  document.querySelector('#classCarousel .next').onclick = () => step(1);
-  for (const sl of stage.children) sl.onclick = () => pick(sl.dataset.cls);
-  // swipe
-  let sx = null, sy = 0;
-  const car = $('classCarousel');
-  car.addEventListener('pointerdown', (e) => { sx = e.clientX; sy = e.clientY; }, { passive: true });
-  car.addEventListener('pointerup', (e) => {
-    if (sx === null) return;
-    const dx = e.clientX - sx, dy = e.clientY - sy;
-    sx = null;
-    if (Math.abs(dx) > 34 && Math.abs(dx) > Math.abs(dy) * 1.2) { step(dx < 0 ? 1 : -1); e.preventDefault(); }
-  });
-  car.addEventListener('pointercancel', () => { sx = null; });
-
-  let badgeSig = '';
-  function refreshBadges() {
-    const sig = classKeys().map((k) => M.classProgress(k).tier).join('') + settings.cls;
-    if (sig === badgeSig) return;
-    badgeSig = sig;
-    for (const sl of stage.children) {
-      const k = sl.dataset.cls;
-      const p = M.classProgress(k);
-      // Only the selected slide animates (Legend); the rest stay static to save work.
-      sl.querySelector('.car-sil').innerHTML = badgeSVG(k, p.tier, { size: 104, animated: k === settings.cls });
-      sl.querySelector('.car-tier').innerHTML = `<span class="tier-pill t${p.tier}">${p.name}</span>`;
-    }
-  }
-
-  function layoutCarousel() {
-    const ks = classKeys();
-    const n = ks.length;
-    const sel = ks.indexOf(settings.cls);
-    for (const sl of stage.children) {
-      const i = ks.indexOf(sl.dataset.cls);
-      let off = i - sel;
-      if (off > n / 2) off -= n;
-      if (off < -n / 2) off += n;
-      const a = Math.abs(off);
-      sl.style.setProperty('--off', off);
-      sl.style.setProperty('--abs', a);
-      sl.style.zIndex = String(10 - a);
-      sl.classList.toggle('sel', off === 0);
-      sl.classList.toggle('far', a >= 2);
-    }
-  }
-
-  function renderClasses() {
-    const ks = classKeys();
-    const idx = ks.indexOf(settings.cls);
-    const dir = idx > lastIdx ? 1 : idx < lastIdx ? -1 : 0;
-    lastIdx = idx;
-    const cc = $('classChoices');
-    cc.innerHTML = '';
-    for (const k of ks) {
-      const c = CLASSES[k];
-      const b = document.createElement('button');
-      b.className = 'class-tab' + (k === settings.cls ? ' sel' : '');
-      b.dataset.cls = k;
-      b.setAttribute('role', 'tab');
-      b.setAttribute('aria-selected', String(k === settings.cls));
-      b.innerHTML = `<span class="ct-sil">${badgeSVG(k, M.classProgress(k).tier, { size: 26, animated: false, title: false })}</span><b>${esc(c.name)}</b>`;
-      b.onclick = () => pick(k);
-      b.onpointerenter = () => onHover?.();
-      cc.appendChild(b);
-    }
-    $('classCount').textContent = `${idx + 1} / ${ks.length}`;
-    refreshBadges();
-    layoutCarousel();
-    const P = M.classProgress(settings.cls);
-    const c = CLASSES[settings.cls];
-    const info = CLASS_INFO[settings.cls] || { role: c.desc };
-    const abText = (key) => ({ ...(ABILITY_FALLBACK[key] || {}), ...((K?.ABILITY_TEXT || {})[key] || {}) });
-    const ab = info.ability ? abText(info.ability) : null;
-    const extra = info.extra ? abText(info.extra) : null;
-    const frags = K?.START_FRAGS?.[settings.cls] ?? (settings.cls === 'assault' ? 2 : 0);
-    const smokes = K?.START_SMOKES?.[settings.cls] ?? (settings.cls === 'recon' ? 1 : 0);
-    const kit = [
-      `<span class="kit">${ICON.medkit}1 Medkit</span>`,
-      frags ? `<span class="kit">${ICON.grenade}${frags} Frag${frags > 1 ? 's' : ''}</span>` : '',
-      smokes ? `<span class="kit">${ICON.smoke}${smokes} Smoke</span>` : '',
-    ].join('');
-    const det = $('classDetail');
-    det.innerHTML = `
-      <div class="cd-prestige t${P.tier}" title="Class prestige: earn XP by playing this class">
-        <span class="cdp-tier">${P.name}</span>
-        <span class="xpbar"><i style="--w:${Math.round(P.frac * 100)}%"></i></span>
-        <span class="cdp-xp">${P.next === null ? 'Max tier' : `${P.toNext.toLocaleString('en-US')} XP to ${M.TIER_NAMES[P.tier + 1]}`}</span>
-      </div>
-      <div class="cd-body">
-        <div class="cd-name">${esc(c.name)}<span>${esc(info.role || '')}</span></div>
-        <p class="cd-desc">${esc(c.desc || '')}</p>
-        <div class="stats">${statBars(c)}</div>
-      </div>
-      ${ab ? `<div class="cd-ability"><span class="ab-ic">${ICON[info.ability] || ''}</span><div><b>${esc(info.abilityName || ab.name)}</b><p>${esc(ab.desc)}</p></div></div>` : ''}
-      ${extra ? `<div class="cd-ability alt"><span class="ab-ic">${ICON[info.extra] || ''}</span><div><b>${esc(extra.name)}</b><p>${esc(extra.desc)}</p></div></div>` : ''}
-      <div class="cd-kit">${kit}<span class="kit dim">${ICON.hunker}Hunker</span></div>`;
-    det.classList.remove('from-l', 'from-r');
-    void det.offsetWidth;
-    if (dir) det.classList.add(dir > 0 ? 'from-r' : 'from-l');
   }
 
   // ---- stages
@@ -253,44 +183,13 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     $('shopDot').classList.toggle('hidden', !(M.salvage() >= cheapest));
   }
 
-  // ---- callsign
-  const cs = $('callsign');
   if (!settings.callsign) settings.callsign = randomCallsign(K);
-  cs.value = settings.callsign;
-  const commit = () => {
-    const v = cleanCallsign(cs.value) || randomCallsign(K);
-    settings.callsign = v;
-    cs.value = v;
-  };
-  cs.addEventListener('input', () => {
-    const pos = cs.selectionStart;
-    const v = cs.value.toUpperCase().replace(/[^A-Z0-9 ._-]/g, '');
-    if (v !== cs.value) { cs.value = v; try { cs.setSelectionRange(pos, pos); } catch { /* ignore */ } }
-  });
-  cs.addEventListener('change', commit);
-  cs.addEventListener('blur', commit);
-  cs.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); cs.blur(); } e.stopPropagation(); });
-  $('csDice').onclick = click(() => { settings.callsign = randomCallsign(K); cs.value = settings.callsign; cs.classList.remove('flash'); void cs.offsetWidth; cs.classList.add('flash'); });
-
-  // ---- career strip
-  function renderCareer() {
-    const c = career();
-    const tile = (ic, v, k, cls = '') => `<div class="cr ${cls}"><span class="cr-ic">${ICON[ic]}</span><b>${v}</b><small>${k}</small></div>`;
-    const winRate = c.matches ? Math.round((c.wins / c.matches) * 100) : 0;
-    $('career').innerHTML = [
-      tile('trophy', c.wins, c.wins === 1 ? 'Win' : 'Wins', c.wins ? 'hot' : ''),
-      tile('skull', c.kills, 'Kills'),
-      tile('squads', c.matches, c.matches === 1 ? 'Match' : 'Matches'),
-      tile('medal', c.best ? `#${c.best}` : '–', 'Best'),
-    ].join('') + (c.matches ? `<div class="cr-foot">${winRate}% win rate${c.streak > 1 ? ` · ${c.streak} win streak` : ''}${c.revives ? ` · ${c.revives} revive${c.revives === 1 ? '' : 's'}` : ''}</div>` : '<div class="cr-foot">No matches yet. Your record starts with the first drop.</div>');
-  }
 
   $('wolfBox').onchange = () => { onClick?.(); settings.loneWolf = $('wolfBox').checked; };
-  $('playBtn').onclick = click(() => onDeploy());
+  $('playBtn').onclick = () => { onClick?.('deploy'); onDeploy(); };
   $('howBtn').onclick = click(() => openSheet('howSheet'));
   $('setBtn').onclick = click(() => openSheet('settingsSheet'));
   $('howTut').onclick = click(() => { closeSheet('howSheet'); openTutorial(); });
-  $('inviteBtn').onclick = () => { onClick?.(); toastFn?.('Online lobbies with invite codes are coming in a later build.', 'info'); };
 
   // ---- splash
   const splash = $('splash');
@@ -324,18 +223,17 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     const m = $('menu');
     m.classList.remove('hidden');
     m.classList.toggle('intro', fromSplash);
-    renderCareer();
     renderWallet();
     renderStages();
+    setPage(page, { silent: true });
   }
 
   renderModes();
-  renderClasses();
-  renderCareer();
   renderWallet();
   renderStages();
+  renderPlay();
   buildHowTo();
-  initSettingsSheet({ onClick, qualityNow, onReplayTutorial: () => { closeSheet('settingsSheet'); openTutorial(); onReplayTutorial?.(); }, onResetCareer: renderCareer });
+  initSettingsSheet({ onClick, qualityNow, onReplayTutorial: () => { closeSheet('settingsSheet'); openTutorial(); onReplayTutorial?.(); }, onResetCareer: () => onPage?.(page, document.querySelector(`#hubPages .page[data-page="${page}"]`)), onTransfer });
   initTutorial(onClick);
   for (const el of document.querySelectorAll('[data-close]')) {
     el.addEventListener('click', () => { onClick?.(); closeSheet(el.closest('.sheet').id); });
@@ -345,8 +243,9 @@ export function initMenu({ CLASSES, MODES, K, onDeploy, onClick, onHover, onEnte
     sh.addEventListener('keydown', (e) => trapFocus(e, sh));
   }
   return {
-    renderModes, renderClasses, renderCareer, renderWallet, renderStages, showMenu, enter,
-    refreshMeta: () => { badgeSig = ''; renderClasses(); renderWallet(); },
+    renderModes, renderWallet, renderStages, renderPlay, showMenu, enter, setPage,
+    page: () => page,
+    refreshMeta: () => { renderWallet(); renderDailies(); onPage?.(page, document.querySelector(`#hubPages .page[data-page="${page}"]`), { refresh: true }); },
     splashOpen: () => !splash.classList.contains('hidden'),
     showSplash: () => { splash.classList.remove('hidden', 'leaving'); $('menu').classList.add('hidden'); },
   };
@@ -416,7 +315,17 @@ function seg(name, options, value) {
     `<button data-v="${v}" role="radio" aria-checked="${String(v) === String(value)}" class="${String(v) === String(value) ? 'on' : ''}">${label}</button>`).join('')}</div>`;
 }
 
-function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCareer }) {
+/** Text size, reduced motion and the colourblind palette, applied to the page. */
+export function applyAccessibility() {
+  const b = document.body;
+  b.dataset.text = settings.textSize || 'm';
+  const osReduced = matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  b.classList.toggle('reduce-motion', settings.motion === 'reduced' || (settings.motion === 'auto' && osReduced));
+  b.dataset.cb = settings.colorPreset || 'standard';
+  setColorPreset(settings.colorPreset);
+}
+
+function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCareer, onTransfer }) {
   const body = $('settingsBody');
   let confirmReset = 0;
   const render = () => {
@@ -435,7 +344,18 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
       <div class="set-group">Gameplay</div>
       ${row('Turn timer', 'How the 20s clock is shown', seg('timer', [['ring', 'Ring'], ['bar', 'Bar']], settings.timer))}
       ${row('Enemy turns', 'Playback speed of bot actions', seg('botSpeed', [['normal', 'Normal'], ['fast', 'Fast']], settings.botSpeed))}
+      ${row('Hitmarkers', 'Hit ticks, kill confirms and XP popups', seg('hitmarkers', [[true, 'On'], [false, 'Off']], settings.hitmarkers))}
+      <div class="set-group">Accessibility</div>
+      ${row('Squad colours', 'Colourblind-safe palettes. You stay amber, signals stay cyan', seg('colorPreset', [['standard', 'Std'], ['deutan', 'Deut'], ['protan', 'Prot'], ['tritan', 'Trit'], ['high', 'High']], settings.colorPreset), 'wide')}
+      <div class="cb-preview" aria-hidden="true">${cbSwatches()}</div>
+      ${row('Text size', 'Scales menus and the HUD', seg('textSize', [['s', 'S'], ['m', 'M'], ['l', 'L'], ['xl', 'XL']], settings.textSize))}
+      ${row('Reduced motion', 'Calmer transitions, no shake or sweeps', seg('motion', [['auto', 'Auto'], ['reduced', 'On'], ['full', 'Off']], settings.motion))}
       ${row('Haptics', hapticsSupported ? 'Vibrate on hits, kills and your turn' : 'Not supported on this device', seg('haptics', [[true, 'On'], [false, 'Off']], settings.haptics), hapticsSupported ? '' : 'na')}
+      <div class="set-group">Account</div>
+      <div class="set-xfer">
+        <div><b>Transfer</b><small>Move your level, items, loadouts and progress to another device with a code or QR.</small></div>
+        <div class="set-btns"><button id="setExport" class="btn ghost sm">${ICON.upload}Export</button><button id="setImport" class="btn ghost sm">${ICON.download}Import</button></div>
+      </div>
       <div class="set-group">Data</div>
       <div class="set-btns">
         <button id="setTut" class="btn ghost sm">${ICON.book}Replay tutorial</button>
@@ -448,6 +368,7 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
           const raw = b.dataset.v;
           settings[s.dataset.setting] = raw === 'true' ? true : raw === 'false' ? false : raw;
           if (s.dataset.setting === 'haptics' && settings.haptics) buzz('tap');
+          if (['textSize', 'motion', 'colorPreset'].includes(s.dataset.setting)) applyAccessibility();
           render();
           body.querySelector(`.seg[data-setting="${s.dataset.setting}"] button.on`)?.focus({ preventScroll: true });
         };
@@ -460,6 +381,8 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
     };
     $('setMute').onclick = () => { onClick?.(); settings.muted = !settings.muted; render(); $('setMute')?.focus({ preventScroll: true }); };
     $('setTut').onclick = () => { onClick?.(); onReplayTutorial?.(); };
+    $('setExport').onclick = () => { onClick?.(); onTransfer?.('export'); };
+    $('setImport').onclick = () => { onClick?.(); onTransfer?.('import'); };
     $('setReset').onclick = () => {
       onClick?.();
       if (Date.now() - confirmReset < 3000) { resetCareer(); confirmReset = 0; onResetCareer?.(); toastFn?.('Career stats wiped. Prestige, Salvage and items are kept', 'info'); } else confirmReset = Date.now();
@@ -473,12 +396,25 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
     .observe(sheet, { attributes: true, attributeFilter: ['class'] });
 }
 
+function cbSwatches() {
+  // Your squad, then the first 7 enemy squads as they'll look in-game.
+  const out = [`<i style="--c:#ffb000" title="You"></i>`];
+  for (let t = 1; t < 8; t++) out.push(`<i style="--c:${squadColorFor(t)}"></i>`);
+  return out.join('');
+}
+let squadColorFor = () => '#888';
+export function setSwatchSource(fn) { squadColorFor = fn; }
+
 // ------------------------------------------------------------------ how to play
 
 function buildHowTo() {
   const card = (ic, title, text, cls = '') => `<div class="how ${cls}"><span class="how-ic">${ICON[ic]}</span><div><b>${title}</b><p>${text}</p></div></div>`;
   $('howBody').innerHTML = [
-    card('clock', '20-second turns', 'Squads take turns. Your soldier has <b>2 AP</b>. When the clock runs out you go on overwatch automatically.'),
+    card('clock', 'Engagement turns', 'Squads that can see each other are <b>engaged</b> and take turns in order. Everyone else moves <b>at the same time</b>. Your soldier has <b>2 AP</b> and 20 seconds; when the clock runs out you go on overwatch.'),
+    card('rifle', 'Create-a-Class', 'In the <b>Barracks</b>, build 5 loadouts: class, primary with up to 5 <b>Gunsmith</b> attachments, secondary, lethal, tactical, 3 perks and 3 killstreaks. Every unlock is a sidegrade.'),
+    card('reload', 'Ammo, reload, swap', 'Every shot uses a round. <b>Reload</b> costs 1 AP and doesn\'t end your turn. <b>Swap</b> to your secondary once per turn for free. The sidearm never runs dry.'),
+    card('airstrike', 'Killstreaks', 'Earn kills to unlock your three streaks: UAV, Care Package, Counter-UAV, Airstrike, Sentry, Gunship. Tap a glowing streak to call it in: 0 AP, one per turn.'),
+    card('pit', 'The Pit', 'Your first death before round 8 sends you to the <b>Pit</b>: a 1v1 duel with pistols. Win it and you parachute back in.'),
     card('tap', 'Tap, then tap again', 'Tap a tile to preview the route and the cover you will have there. Tap it again, or press <b>Confirm</b>, to commit. Cyan tiles cost 1 AP; gold is a 2 AP dash. Walls and crates <b>fade</b> while you pick a move, leaving shield outlines on the ground.'),
     card('shield', 'Cover is life', 'Shields show half and full cover at your destination. Shots from an open side <b>flank</b> you for +10 aim.'),
     card('shoot', 'Shooting ends your turn', 'Pick <b>Shoot</b> and every target shows its hit chance. Tap one to see graze odds and damage, then fire. <b>Firing always ends your turn</b>, so move first. Near-misses graze for half damage.'),
@@ -503,6 +439,8 @@ function buildHowTo() {
 // ------------------------------------------------------------------ tutorial
 
 const TUT = [
+  { ic: 'clock', title: 'Engagement turns', art: 'tide', text: 'Squads that can see each other are <b>engaged</b> and take turns in order. Squads out of contact all move <b>at once</b>. The bar under the turn label shows who you\'re fighting.' },
+  { ic: 'airstrike', title: 'Loadouts and killstreaks', art: 'prestige', text: 'Build 5 classes in the <b>Barracks</b>. Kills unlock your 3 streaks: tap a glowing one on the streak bar to call in a UAV, care package, airstrike, sentry or gunship.' },
   { ic: 'tap', title: 'Tap, then tap again', art: 'move', text: 'Tap a tile to <b>preview</b> your route and the cover waiting there. Tap the same tile again to <b>commit</b>. Cover fades while you choose, so every tile stays readable.' },
   { ic: 'shield', title: 'Cover is life', art: 'cover', text: 'Full cover blocks 40 aim, half cover 20. Enemies on an open side <b>flank</b> you: +10 aim and extra damage. Hunker to double your cover.' },
   { ic: 'shoot', title: 'Firing ends your turn', art: 'shoot', text: 'You get <b>2 AP</b> and 20 seconds. Move first: <b>shooting always ends your turn</b>. Frags, smoke, Patch and Scan cost 1 AP and let you keep going.' },

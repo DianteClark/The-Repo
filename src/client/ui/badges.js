@@ -13,6 +13,8 @@ export const CLASS_BADGE = {
   breacher: { field: '#3a5f92', deep: '#111f38', accent: '#a9c6ff' },
   medic: { field: '#b13246', deep: '#4a0d18', accent: '#ffb3bf' },
   recon: { field: '#6c4ea3', deep: '#251648', accent: '#d2bcff' },
+  engineer: { field: '#b8862b', deep: '#3d2a06', accent: '#ffe0a0' },
+  gunner: { field: '#6b6f76', deep: '#1e2024', accent: '#ffd9a0' },
 };
 const FALLBACK = { field: '#55716f', deep: '#1b2a2a', accent: '#d8cfb6' };
 
@@ -45,6 +47,19 @@ const MOTIF = {
       <path d="M46 44 Q60 33 74 44" stroke-width="3.4"/>
       <path d="M52 37.5 Q60 32 68 37.5" stroke-width="3" opacity=".7"/></g>
       <circle cx="60" cy="63" r="8" fill="${c}"/><circle cx="62.6" cy="60.6" r="2.4" fill="#000" fill-opacity=".35"/>`,
+  // A barricade wall under a crossed wrench: builds cover where there is none.
+  engineer: (c) => `<g fill="${c}">
+      <path d="M38 70 H82 V82 H38 Z M38 74.5 H82 V76.5 H38 Z" fill-rule="evenodd"/>
+      <path d="M48 70 V82 M60 70 V82 M72 70 V82" stroke="#000" stroke-opacity=".35" stroke-width="1.6"/>
+      <path d="M71 34 C65.5 32.5 60 36.5 60.4 42.2 C60.5 43.6 61 45 61 45 L44.5 61.5 C42.8 63.2 42.8 66 44.5 67.6 C46.2 69.3 49 69.3 50.6 67.6 L67.1 51.1 C67.1 51.1 68.5 51.6 69.9 51.7 C75.6 52.1 79.6 46.6 78.1 41.1 L72.6 46.6 L67 45.1 L65.5 39.5 Z"/></g>`,
+  // Three heavy rounds over a belt link: the one who keeps them down.
+  gunner: (c) => `<g fill="${c}">
+      <path d="M45 48 Q45 36 50 33 Q55 36 55 48 V66 H45 Z"/>
+      <path d="M55 46 Q55 32 60 29 Q65 32 65 46 V66 H55 Z"/>
+      <path d="M65 48 Q65 36 70 33 Q75 36 75 48 V66 H65 Z"/>
+      <path d="M42 69 H78 V75 H42 Z"/>
+      <path d="M40 78 L46 85 H74 L80 78 Z" opacity=".75"/></g>
+      <path d="M45 52 H75" stroke="#000" stroke-opacity=".3" stroke-width="1.6"/>`,
 };
 
 // ------------------------------------------------------------------ shared shapes

@@ -10,23 +10,22 @@ const EMPTY = () => ({
   last: null,  // { place, total, mode, cls, kills, won, at }
 });
 
+export function sanitizeCareer(saved) {
+  const base = EMPTY();
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return base;
+  for (const k of Object.keys(base)) {
+    const v = saved[k], b = base[k];
+    if (typeof b === 'number') { if (Number.isFinite(v)) base[k] = Math.max(0, Math.floor(v)); }
+    else if (k === 'last') { if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v; }
+    else if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v;
+  }
+  for (const [m, r] of Object.entries(base.byMode)) if (!r || typeof r !== 'object') delete base.byMode[m];
+  return base;
+}
 let data = EMPTY();
 try {
   const raw = localStorage.getItem(KEY);
-  if (raw) {
-    const saved = JSON.parse(raw);
-    if (saved && typeof saved === 'object') {
-      const base = EMPTY();
-      for (const k of Object.keys(base)) {
-        const v = saved[k], b = base[k];
-        if (typeof b === 'number') { if (Number.isFinite(v)) base[k] = Math.max(0, v); }
-        else if (k === 'last') { if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v; }
-        else if (v && typeof v === 'object' && !Array.isArray(v)) base[k] = v;
-      }
-      for (const [m, r] of Object.entries(base.byMode)) if (!r || typeof r !== 'object') delete base.byMode[m];
-      data = base;
-    }
-  }
+  if (raw) data = sanitizeCareer(JSON.parse(raw));
 } catch { /* private mode etc. */ }
 
 function save() { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch { /* ignore */ } }

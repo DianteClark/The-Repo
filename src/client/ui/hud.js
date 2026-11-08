@@ -3,24 +3,25 @@
 import { ICON } from './icons.js';
 import { badgeCached } from './badges.js';
 import { squadColor } from './squads.js';
+import { perkByKey } from './arsenal.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // ---------- turn order strip ----------
 
-export function renderTurnStrip(state, { myTeam, activeTeam, alive }) {
+export function renderTurnStrip(state, { myTeam, activeTeam, activeTeams = null, alive }) {
   const el = $('turnStrip');
   if (!el) return;
-  const pos = state.turnPos;
+  const pos = state.turn ? Infinity : state.turnPos; // engagement turns: no single cursor
   const solo = state.teams.every((t) => t.members.length <= 1);
   const html = state.order.map((t, i) => {
     const team = state.teams[t];
     const out = !alive.has(t);
     const cls = ['ts'];
     if (t === myTeam) cls.push('mine');
-    if (t === activeTeam && state.winner === null) cls.push('cur');
-    else if (i < pos) cls.push('done');
+    if ((activeTeams ? activeTeams.includes(t) : t === activeTeam) && state.winner === null) cls.push('cur');
+    else if (state.turn ? state.turn.done?.includes(t) : i < pos) cls.push('done');
     if (out) cls.push('out');
     if (team.isLoneWolf) cls.push('wolf');
     const dots = solo ? '' : team.members.map((id) => { const m = state.units[id]; return `<i class="${!m.alive ? 'x' : m.downed ? 'dn' : ''}"></i>`; }).join('');
@@ -113,12 +114,13 @@ export function renderUnitCard(u, { CLASSES, myTurn, outside, nextOutside, weapo
   ].filter(Boolean).join('');
   const ws = weaponStats;
   const gear = [
-    `<span class="g wpn" title="${esc(c.weapon.name)}"><b>${esc(c.weapon.name)}</b> ${ws.range}t · ${ws.aim}% · ${ws.dmg[0]}–${ws.dmg[1]}</span>`,
-    u.mods.scope ? `<span class="g mod" title="Scope ×${u.mods.scope}">${ICON.scope}${u.mods.scope}</span>` : '',
-    u.mods.barrel ? `<span class="g mod" title="Heavy barrel ×${u.mods.barrel}">${ICON.barrel}${u.mods.barrel}</span>` : '',
+    `<span class="g wpn" title="${esc(u.weapon?.name || c?.weapon?.name || '')}"><b>${esc(u.weapon?.name || c?.weapon?.name || '')}</b> ${ws.range}t · ${ws.aim}% · ${ws.dmg[0]}–${ws.dmg[1]}</span>`,
+    ...(Array.isArray(u.perks) ? [`<span class="g perks" title="Perks">${u.perks.map((p, i) => `<i class="pt${i + 1}" title="${esc(perkByKey(p)?.name || p)}: ${esc(perkByKey(p)?.desc || '')}">${ICON.perk}</i>`).join('')}</span>`] : []),
+    u.mods?.scope ? `<span class="g mod" title="Scope ×${u.mods.scope}">${ICON.scope}${u.mods.scope}</span>` : '',
+    u.mods?.barrel ? `<span class="g mod" title="Heavy barrel ×${u.mods.barrel}">${ICON.barrel}${u.mods.barrel}</span>` : '',
     `<span class="g item${u.items.medkit ? '' : ' none'}" title="Medkits">${ICON.medkit}${u.items.medkit}</span>`,
-    (u.items.frag ?? 0) > 0 || u.cls === 'assault' ? `<span class="g item${u.items.frag ? '' : ' none'}" title="Frag grenades">${ICON.grenade}${u.items.frag ?? 0}</span>` : '',
-    (u.items.smoke ?? 0) > 0 || u.cls === 'recon' ? `<span class="g item${u.items.smoke ? '' : ' none'}" title="Smoke grenades">${ICON.smoke}${u.items.smoke ?? 0}</span>` : '',
+    !u.lethal && ((u.items.frag ?? 0) > 0 || u.cls === 'assault') ? `<span class="g item${u.items.frag ? '' : ' none'}" title="Frag grenades">${ICON.grenade}${u.items.frag ?? 0}</span>` : '',
+    !u.tactical && ((u.items.smoke ?? 0) > 0 || u.cls === 'recon') ? `<span class="g item${u.items.smoke ? '' : ' none'}" title="Smoke grenades">${ICON.smoke}${u.items.smoke ?? 0}</span>` : '',
     u.missStreak ? `<span class="g streak" title="Miss streak bonus">+${u.missStreak * 10}%</span>` : '',
   ].filter(Boolean).join('');
   const html = `<div class="uc${flared ? ' flared' : ''}">

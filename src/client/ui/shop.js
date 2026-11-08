@@ -6,13 +6,14 @@
 import { ICON } from './icons.js';
 import { settings } from './settings.js';
 import { badgeSVG } from './badges.js';
-import { openSheet, closeSheet, onSheetClose } from './menu.js';
 import * as M from './meta.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const RAR_LABEL = { common: 'Common', rare: 'Rare', epic: 'Epic', legendary: 'Legendary' };
-const SLOT_ICON = { skin: 'user', killFx: 'burst', dropIn: 'drop' };
+const SLOT_ICON = { skin: 'user', killFx: 'burst', dropIn: 'drop', emote: 'trophy', charm: 'charm', tracer: 'tracer', streakSkin: 'jet' };
+const PV_KIND = { skin: 'unit', killFx: 'killfx', dropIn: 'dropin', emote: 'emote', charm: 'charm', tracer: 'tracer', streakSkin: 'streak' };
+const slotIcon = (k) => ICON[SLOT_ICON[k] || M.SLOTS.find((x) => x.key === k)?.icon] || ICON.sparkle;
 
 export const coin = (n, cls = '') => `<span class="salv ${cls}">${ICON.coin}<b>${Number(n).toLocaleString('en-US')}</b></span>`;
 
@@ -26,13 +27,14 @@ function itemArt(it, cls) {
   const c2 = sw?.[1] || sw?.[0] || `hsl(${(h + 40) % 360} 55% 22%)`;
   const glyph = it.slot === 'skin'
     ? `<span class="ia-badge">${badgeSVG(cls, 0, { size: 44, title: false })}</span>`
-    : `<span class="ia-ic">${ICON[SLOT_ICON[it.slot]]}</span>`;
+    : `<span class="ia-ic">${slotIcon(it.slot)}</span>`;
   return `<span class="ia" style="--c1:${c1};--c2:${c2}">${it.isDefault ? '' : '<i class="ia-shine"></i>'}${glyph}</span>`;
 }
 
 export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
-  const sheet = $('shopSheet');
+  const sheet = $('pageStore');
   const body = $('shopBody');
+  const visible = () => sheet.classList.contains('on') && !$('menu').classList.contains('hidden');
   const ui = { view: 'shop', tab: 'skin', sel: null, confirmAt: 0, previewOn: null };
   const click = () => onClick?.();
 
@@ -60,8 +62,9 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
   const previewOpts = (it, cls) => {
     const lo = M.loadoutFor(cls);
     const o = { cls, skin: it.slot === 'skin' ? it.id : lo.skin };
-    if (it.slot === 'killFx') o.killFx = it.id;
-    if (it.slot === 'dropIn') o.dropIn = it.id;
+    if (it.slot !== 'skin') o[it.slot] = it.id;
+    o.kind = PV_KIND[it.slot] || 'unit';
+    if (it.slot === 'streakSkin') o.streak = it.streak && it.streak !== 'all' ? it.streak : 'gunship';
     return o;
   };
 
@@ -70,7 +73,7 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
     return `<div class="pv${big ? ' big' : ''} r-${it.rarity}">
       <div class="pv-fallback">${itemArt(it, cls)}<span class="pv-cls">${badgeSVG(cls, M.classProgress(cls).tier, { size: 34, title: false })}</span></div>
       <canvas class="pv-cv" aria-hidden="true"></canvas>
-      <span class="pv-tag">${ICON[SLOT_ICON[it.slot]]}${esc(M.SLOTS.find((s) => s.key === it.slot)?.one || '')}</span>
+      <span class="pv-tag">${slotIcon(it.slot)}${esc(M.SLOTS.find((s) => s.key === it.slot)?.one || '')}</span>
     </div>`;
   }
 
@@ -82,7 +85,7 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
       b.classList.toggle('on', on);
       b.setAttribute('aria-checked', String(on));
     });
-    sheet.querySelector('.sheet-card').dataset.view = ui.view;
+    sheet.dataset.view = ui.view;
   }
 
   function itemState(it, cls) {
@@ -125,6 +128,8 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
         <div class="dt-h"><span class="rar-pill">${RAR_LABEL[it.rarity]}</span>${s.feat && !s.owned ? `<span class="rar-pill deal">Featured -${Math.round(M.FEATURED_DISCOUNT * 100)}%</span>` : ''}</div>
         <b class="dt-name">${esc(it.name)}</b>
         <p class="dt-desc">${esc(it.desc || '')}${classes ? `<em> ${esc(classes)} only.</em>` : ''}</p>
+        ${it.operator ? `<div class="dt-op"><small>Operator · ${esc(it.operator.callsign || '')}</small><b>${esc(it.operator.name || '')}</b><p>${esc(it.operator.bio || '')}</p></div>` : ''}
+        ${it.streak && it.streak !== 'all' ? `<p class="dt-desc"><em>Applies to: ${esc(it.streak)}</em></p>` : ''}
         <div class="dt-btns">${btn}</div>
       </div>
     </div>`;
@@ -137,22 +142,35 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
     if (!ui.sel) ui.sel = feat[0] || cat.skin[1] || cat.skin[0];
     const it = M.itemById(ui.sel.slot, ui.sel.id) || cat.skin[0];
     const h = Math.floor(M.msToReset() / 3600000), mi = Math.floor((M.msToReset() % 3600000) / 60000);
-    const list = cat[ui.tab];
+    const list = cat[ui.tab] || [];
+    const bundles = M.BUNDLES;
+    const bundleCard = (b) => {
+      const price = M.bundlePrice(b);
+      const all = b.items.every((x) => M.owns(x.slot, x.id));
+      const n = b.items.filter((x) => !M.owns(x.slot, x.id)).length;
+      return `<div class="bd r-${b.rarity}${all ? ' owned' : ''}">
+        <div class="bd-art">${b.items.slice(0, 5).map((x, i) => { const item = M.itemById(x.slot, x.id); return item ? `<span style="--i:${i}">${itemArt(item, cls)}</span>` : ''; }).join('')}</div>
+        <div class="bd-t"><span class="rar-pill">${RAR_LABEL[b.rarity]} bundle</span><b>${esc(b.name)}</b><small>${esc(b.desc)}</small>
+          <span class="bd-items">${b.items.map((x) => { const item = M.itemById(x.slot, x.id); return item ? `<i class="${M.owns(x.slot, x.id) ? 'got' : ''}">${slotIcon(x.slot)}${esc(item.name)}</i>` : ''; }).join('')}</span></div>
+        <div class="bd-buy">${all ? `<span class="ic-own">${ICON.check}Owned</span>` : `${b.full > price ? `<s>${b.full.toLocaleString('en-US')}</s>` : ''}<button class="btn primary sm" data-bundle="${esc(b.id)}">${ui.bundleArm === b.id ? 'Confirm' : `${n} item${n === 1 ? '' : 's'}`}${coin(price)}</button>`}</div>
+      </div>`;
+    };
     body.innerHTML = `
       <div class="shop-grid">
         <div class="shop-detail">${detail(it, cls)}</div>
         <div class="shop-main">
           <div class="shop-sec"><span>${ICON.star}Featured</span><small>New picks in ${h}h ${mi}m</small></div>
           <div class="feat-row">${feat.map((f) => card(f, cls, true)).join('')}</div>
-          <div class="shop-tabs" role="tablist">${M.SLOTS.map((s) => `<button role="tab" data-tab="${s.key}" class="${ui.tab === s.key ? 'on' : ''}" aria-selected="${ui.tab === s.key}">${ICON[SLOT_ICON[s.key]]}${s.name}<small>${cat[s.key].filter((x) => M.owns(s.key, x.id)).length}/${cat[s.key].length}</small></button>`).join('')}</div>
+          ${bundles.length ? `<div class="shop-sec"><span>${ICON.sparkle}Bundles</span><small>Cheaper by what you already own</small></div><div class="bd-row h-scroll">${bundles.map(bundleCard).join('')}</div>` : ''}
+          <div class="shop-tabs h-scroll" role="tablist">${M.SLOTS.map((s) => `<button role="tab" data-tab="${s.key}" class="${ui.tab === s.key ? 'on' : ''}" aria-selected="${ui.tab === s.key}">${slotIcon(s.key)}${s.name}<small>${cat[s.key].filter((x) => M.owns(s.key, x.id)).length}/${cat[s.key].length}</small></button>`).join('')}</div>
           <div class="it-grid">${list.map((x) => card(x, cls)).join('')}</div>
-          <p class="shop-foot">${ICON.coin}Salvage is earned in matches: placement, kills and wins. No real money, ever.</p>
+          <p class="shop-foot">${ICON.coin}Salvage is earned in matches: placement, kills, medals and daily challenges. No real money, ever.</p>
         </div>
       </div>`;
     wire();
     M.markSeen(it.slot, it.id);
     const cv = body.querySelector('.shop-detail canvas');
-    requestAnimationFrame(() => { if (ui.view === 'shop' && !sheet.classList.contains('hidden')) startPreview(cv, previewOpts(it, cls)); });
+    requestAnimationFrame(() => { if (ui.view === 'shop' && visible()) startPreview(cv, previewOpts(it, cls)); });
   }
 
   function renderLocker() {
@@ -165,7 +183,7 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
     const owned = cat[slot].filter((x) => M.owns(slot, x.id));
     const locked = cat[slot].filter((x) => !M.owns(slot, x.id)).length;
     body.innerHTML = `
-      <div class="lk-classes" role="tablist">${M.CLASS_KEYS.filter((k) => CLASSES[k]).map((k) => { const p = M.classProgress(k); return `<button role="tab" data-cls="${k}" class="${k === cls ? 'on' : ''}" aria-selected="${k === cls}">${badgeSVG(k, p.tier, { size: 40, animated: false, title: false })}<b>${esc(CLASSES[k].name)}</b><small>${p.name}</small></button>`; }).join('')}</div>
+      <div class="lk-classes h-scroll" role="tablist">${M.CLASS_KEYS.filter((k) => CLASSES[k]).map((k) => { const p = M.classProgress(k); return `<button role="tab" data-cls="${k}" class="${k === cls ? 'on' : ''}" aria-selected="${k === cls}">${badgeSVG(k, p.tier, { size: 40, animated: false, title: false })}<b>${esc(CLASSES[k].name)}</b><small>${p.name}</small></button>`; }).join('')}</div>
       <div class="lk-grid">
         <div class="lk-prestige panel-in">
           <div class="lk-badge">${badgeSVG(cls, P.tier, { size: 132, animated: true })}</div>
@@ -180,14 +198,14 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
         </div>
         <div class="lk-loadout">
           ${previewBox(M.itemById('skin', lo.skin) || cat.skin[0], cls)}
-          <div class="lk-slots">${M.SLOTS.map((s) => { const it = M.itemById(s.key, lo[s.key]); return `<button class="lk-slot r-${it?.rarity || 'common'}${slot === s.key ? ' on' : ''}" data-slot="${s.key}"><span class="ls-ic">${ICON[SLOT_ICON[s.key]]}</span><span><small>${s.one}</small><b>${esc(it?.name || 'Default')}</b></span></button>`; }).join('')}</div>
+          <div class="lk-slots">${M.SLOTS.map((s) => { const it = M.itemById(s.key, lo[s.key]); return `<button class="lk-slot r-${it?.rarity || 'common'}${slot === s.key ? ' on' : ''}" data-slot="${s.key}"><span class="ls-ic">${slotIcon(s.key)}</span><span><small>${s.one}</small><b>${esc(it?.name || 'Default')}</b></span></button>`; }).join('')}</div>
           <div class="lk-owned">${owned.map((x) => { const eq = lo[slot] === x.id; const fits = M.fitsClass(x, cls); return `<button class="own r-${x.rarity}${eq ? ' eq' : ''}" data-slot="${slot}" data-id="${esc(x.id)}" ${fits ? '' : 'disabled'}>${itemArt(x, cls)}<b>${esc(x.name)}</b>${eq ? `<span class="own-eq">${ICON.check}</span>` : ''}</button>`; }).join('')}
             ${locked ? `<button class="own more" data-goshop="${slot}">${ICON.shop}<b>${locked} more in the Shop</b></button>` : ''}</div>
         </div>
       </div>`;
     wire();
     const cv = body.querySelector('.lk-loadout canvas');
-    requestAnimationFrame(() => { if (ui.view === 'locker' && !sheet.classList.contains('hidden')) startPreview(cv, slot === 'skin' ? { cls, skin: lo.skin } : slot === 'killFx' ? { cls, skin: lo.skin, killFx: lo.killFx } : { cls, skin: lo.skin, dropIn: lo.dropIn }); });
+    requestAnimationFrame(() => { if (ui.view === 'locker' && visible()) startPreview(cv, slot === 'skin' ? { kind: 'unit', cls, skin: lo.skin, charm: lo.charm } : { kind: PV_KIND[slot] || 'unit', cls, skin: lo.skin, [slot]: lo[slot], ...(slot === 'streakSkin' ? { streak: M.itemById(slot, lo[slot])?.streak && M.itemById(slot, lo[slot]).streak !== 'all' ? M.itemById(slot, lo[slot]).streak : 'gunship' } : {}) }); });
   }
 
   function render() {
@@ -208,6 +226,18 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
       };
     });
     body.querySelectorAll('.shop-tabs button').forEach((b) => { b.onclick = () => { click(); ui.tab = b.dataset.tab; render(); }; });
+    body.querySelectorAll('[data-bundle]').forEach((b) => {
+      b.onclick = () => {
+        const id = b.dataset.bundle;
+        if (ui.bundleArm !== id) { click(); ui.bundleArm = id; render(); return; }
+        ui.bundleArm = null;
+        const r = M.buyBundle(id);
+        if (!r.ok) { onClick?.('error'); toast?.(r.error, 'error'); render(); return; }
+        onBuy?.({ bundle: id });
+        toast?.(`${M.BUNDLES.find((x) => x.id === id)?.name || 'Bundle'} unlocked`, 'loot', 'sparkle');
+        onChange?.(); render();
+      };
+    });
     const act = body.querySelector('.dt-btns [data-act]');
     if (act) {
       act.onclick = () => {
@@ -246,27 +276,26 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
         onChange?.(); render();
       };
     });
-    body.querySelectorAll('[data-goshop]').forEach((b) => { b.onclick = () => { click(); ui.view = 'shop'; ui.tab = b.dataset.goshop; ui.sel = null; render(); body.scrollTop = 0; sheet.querySelector('.sheet-card').scrollTop = 0; }; });
+    body.querySelectorAll('[data-goshop]').forEach((b) => { b.onclick = () => { click(); ui.view = 'shop'; ui.tab = b.dataset.goshop; ui.sel = null; render(); sheet.scrollTop = 0; }; });
   }
 
   sheet.querySelectorAll('.shop-switch button').forEach((b) => {
-    b.onclick = () => { click(); ui.view = b.dataset.view; ui.confirmAt = 0; render(); sheet.querySelector('.sheet-card').scrollTop = 0; };
+    b.onclick = () => { click(); ui.view = b.dataset.view; ui.confirmAt = 0; render(); sheet.scrollTop = 0; };
   });
-  onSheetClose('shopSheet', () => { stopPreview(); ui.confirmAt = 0; onChange?.(); });
-  M.onMetaChange(() => { if (!sheet.classList.contains('hidden')) header(); });
+  M.onMetaChange(() => { if (visible()) header(); });
 
   return {
-    open(view = 'shop', opts = {}) {
-      ui.view = view;
+    /** Render into the Store page (the hub calls this when the page opens). */
+    show(view, opts = {}) {
+      if (view) ui.view = view;
       ui.confirmAt = 0;
       if (opts.tab) ui.tab = opts.tab;
       if (opts.sel) ui.sel = opts.sel;
-      openSheet('shopSheet');
       render();
-      sheet.querySelector('.sheet-card').scrollTop = 0;
     },
-    close() { closeSheet('shopSheet'); },
-    isOpen: () => !sheet.classList.contains('hidden'),
+    render,
+    isOpen: visible,
     stopPreview,
+    view: () => ui.view,
   };
 }

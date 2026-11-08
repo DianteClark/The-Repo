@@ -1,6 +1,9 @@
 import {
-  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED, SMOKE, KELP,
+  SIGHT, COVER_PENALTY, FLANK_BONUS, MISS_STREAK_BONUS, REACTION_PENALTY, HUNKER_MULT, AIMED, SMOKE, KELP, SUPPRESS,
 } from './constants.js';
+import { EQUIPMENT, hasSpecial } from './weapons.js';
+
+const perk = (u, k) => !!u.perks && u.perks.includes(k);
 
 export const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -132,8 +135,11 @@ export function smokeAt(state, x, y) {
 }
 
 export function weaponRange(u) {
-  return u.weapon.range + u.mods.scope * 2;
+  return u.weapon.range + (u.mods?.scope || 0) * 2;
 }
+
+/** Movement per AP this turn (Undertow slows). */
+export const moveOf = (u) => Math.max(1, u.move - (u.slow || 0));
 
 export function inRangeAndLos(state, shooter, target) {
   return dist(shooter.x, shooter.y, target.x, target.y) <= weaponRange(shooter)
@@ -157,9 +163,18 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
   if (d > range) return { chance: 0, cover: 0, flank: false, hunkered: false, smoke: false, kelp: false, notes: ['Out of range'] };
   const w = shooter.weapon;
   const notes = [];
-  let aim = w.aim + shooter.mods.scope * 5;
-  if (shooter.mods.scope) notes.push('Scope +' + shooter.mods.scope * 5);
-  const cover = coverVs(state.map, target.x, target.y, shooter.x, shooter.y);
+  const scope = shooter.mods?.scope || 0;
+  let aim = w.aim + scope * 5;
+  if (scope) notes.push('Scope +' + scope * 5);
+  if (w.close && d <= 4) { aim += w.close; notes.push((w.close > 0 ? 'Close quarters +' : 'Close quarters ') + w.close); }
+  if (hasSpecial(w, 'hipfire') && d <= 3) { aim += 10; notes.push('Hip fire +10'); }
+  if (!shooter.moved && !reaction) {
+    if (w.steady) { aim += w.steady; notes.push('Braced +' + w.steady); }
+    if (perk(shooter, 'steady')) { aim += 10; notes.push('Steady Aim +10'); }
+  }
+  let cover = coverVs(state.map, target.x, target.y, shooter.x, shooter.y);
+  if (target.vehicle != null && cover < 1) { cover = 1; notes.push('Aboard a boat'); } // 5.0: boats give half cover
+  if (cover && hasSpecial(w, 'railPierce')) { cover--; notes.push('Rail rounds: cover -1'); }
   const flank = cover === 0 && isFlanked(state.map, target.x, target.y, shooter.x, shooter.y);
   const hunkered = !!target.hunkered && cover > 0;
   if (cover) {
@@ -168,30 +183,37 @@ export function hitChance(state, shooter, target, { reaction = false, ability } 
     notes.push((cover === 2 ? 'Full' : 'Half') + ' cover' + (hunkered ? ' (hunkered)' : '') + ' -' + p);
   } else if (flank) { aim += FLANK_BONUS; notes.push('Flanked +' + FLANK_BONUS); }
   else notes.push('Exposed');
-  if (w.falloff) {
-    const p = Math.max(0, Math.round(d) - 2) * 7;
+  if (w.falloff || hasSpecial(w, 'falloff')) {
+    let p = Math.max(0, Math.round(d) - 2) * 7;
+    if (hasSpecial(w, 'slug')) p = Math.round(p / 2);
     if (p) { aim -= p; notes.push('Shotgun falloff -' + p); }
   }
-  if (w.closePenalty && d < 4) { aim -= 15; notes.push('Too close -15'); }
+  if ((w.closePenalty || hasSpecial(w, 'closePenalty')) && d < 4) { aim -= 15; notes.push('Too close -15'); }
   const longP = Math.max(0, Math.round((d - range * 0.6) * 2));
   if (longP) { aim -= longP; notes.push('Long range -' + longP); }
+  const ignoreSmoke = !!w.thermal || perk(shooter, 'mask');
   const tSmoke = !!smokeAt(state, target.x, target.y);
-  if (tSmoke) { aim -= SMOKE.aimIn; notes.push('Target in smoke -' + SMOKE.aimIn); }
-  if (smokeAt(state, shooter.x, shooter.y)) { aim -= SMOKE.aimOut; notes.push('Firing from smoke -' + SMOKE.aimOut); }
+  if (tSmoke && !ignoreSmoke) { aim -= SMOKE.aimIn; notes.push('Target in smoke -' + SMOKE.aimIn); }
+  if (smokeAt(state, shooter.x, shooter.y) && !ignoreSmoke) { aim -= SMOKE.aimOut; notes.push('Firing from smoke -' + SMOKE.aimOut); }
   const kelp = isKelp(state.map, target.x, target.y);
-  if (kelp) { aim -= KELP.aim; notes.push('Kelp -' + KELP.aim); }
+  if (kelp && !w.thermal) { aim -= KELP.aim; notes.push('Kelp -' + KELP.aim); }
+  if (shooter.flash) { aim -= EQUIPMENT.flashbang.aim; notes.push('Flashed -' + EQUIPMENT.flashbang.aim); }
+  if (shooter.suppressed) { aim -= SUPPRESS.aim; notes.push('Suppressed -' + SUPPRESS.aim); }
   if (shooter.missStreak) {
     const b = shooter.missStreak * MISS_STREAK_BONUS;
     aim += b; notes.push('Miss streak +' + b);
   }
   if (ability === 'aimed') { aim += AIMED.aim; notes.push('Aimed +' + AIMED.aim); }
-  if (reaction) { aim -= REACTION_PENALTY; notes.push('Reaction -' + REACTION_PENALTY); }
+  if (reaction) {
+    aim -= REACTION_PENALTY; notes.push('Reaction -' + REACTION_PENALTY);
+    if (w.owAim) { aim += w.owAim; notes.push('Overwatch ' + (w.owAim > 0 ? '+' : '') + w.owAim); }
+  }
   const chance = Math.max(5, Math.min(95, Math.round(aim)));
   return { chance, cover, flank, hunkered, smoke: tSmoke, kelp, notes };
 }
 
 /** Movement cost of stepping onto a tile: shallow water costs 2, everything else 1. */
-export const stepCost = (map, k) => (map.terrain && map.terrain[k] === 2 ? 2 : 1);
+export const stepCost = (map, k, u) => (map.terrain && map.terrain[k] === 2 && !(u && perk(u, 'amphibious')) ? 2 : 1);
 
 /**
  * Cheapest paths over 8 directions without cutting corners, up to `maxSteps`
@@ -202,6 +224,8 @@ export function reachable(state, u, maxSteps) {
   const S = map.size;
   const occ = new Set();
   for (const o of state.units) if (o.alive && o.id !== u.id) occ.add(o.y * S + o.x);
+  for (const t of state.sentries || []) occ.add(t.y * S + t.x);
+  for (const b of state.blockers || []) occ.add(b); // extension point (SIM-2): extra impassable tiles
   const start = u.y * S + u.x;
   const res = new Map([[start, { d: 0, prev: -1 }]]);
   // Bucket queue: costs are small integers.
@@ -218,7 +242,7 @@ export function reachable(state, u, maxSteps) {
         const nk = ny * S + nx;
         if (map.cover[nk] > 0 || occ.has(nk)) continue;
         if (dx && dy && (map.cover[y * S + nx] > 0 || map.cover[ny * S + x] > 0)) continue;
-        const nd = d + stepCost(map, nk);
+        const nd = d + stepCost(map, nk, u);
         if (nd > maxSteps) continue;
         const prev = res.get(nk);
         if (prev && prev.d <= nd) continue;

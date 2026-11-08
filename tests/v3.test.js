@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createGame, act, endTeamTurn, currentTeamId, shotPreview, moveOptions, insideZone, insideNextZone,
+  createGame, act, endTeamTurn, currentTeamId, isTeamActive, shotPreview, moveOptions, insideZone, insideNextZone,
   barrelTargets, barrelPreview, grenadePreview, aliveTeams,
 } from '../src/sim/game.js';
 import { botTakeTurn } from '../src/sim/ai.js';
@@ -375,7 +375,13 @@ test('bot-only matches end with one winner on every stage × mode', () => {
         assert.notEqual(state.winner, null, `${stage}/${mode}/${seed} never ended`);
         assert.equal(aliveTeams(state).length, 1);
         assert.ok(state.round <= 24, `${stage}/${mode}/${seed} dragged to round ${state.round}`);
-        for (const e of log) seen[`${stage}:${e.type}`] = true;
+        let lastWeapon = null;
+        for (const e of log) {
+          if (e.type === 'shot') lastWeapon = e.weapon;
+          // The Lantern legendary flares what it hits on any stage (5.0): not a night flare.
+          if (e.type === 'flare' && lastWeapon === 'lantern') continue;
+          seen[`${stage}:${e.type}`] = true;
+        }
       }
     }
   }
@@ -384,12 +390,13 @@ test('bot-only matches end with one winner on every stage × mode', () => {
   assert.ok(!seen['harbor:flare'] && !seen['harbor:barrel'], 'no twists leak into the harbor');
 });
 
-test('human squad still gets the most isolated spawn and acts in the first quarter of round 1', () => {
+test('human squad still gets the most isolated spawn and acts in the first step of round 1', () => {
   for (const stage of STAGE_KEYS) {
     for (const mode of Object.keys(MODES)) {
       const s = createGame({ seed: 8, stage, mode });
       const pos = s.order.indexOf(s.playerTeam);
-      assert.ok(pos < Math.ceil(s.order.length / 4), `${stage}/${mode}: human acts at position ${pos}`);
+      assert.ok(pos < Math.ceil(s.order.length / 4), `${stage}/${mode}: human at order position ${pos}`);
+      assert.ok(isTeamActive(s, s.playerTeam), `${stage}/${mode}: human squad active from the start`);
       const me = s.units.find((u) => u.isPlayer);
       const gap = (team) => Math.min(...s.units.filter((o) => o.team !== team).map((o) => Math.hypot(o.x - s.units[s.teams[team].members[0]].x, o.y - s.units[s.teams[team].members[0]].y)));
       const myGap = gap(me.team);

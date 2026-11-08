@@ -134,6 +134,16 @@ export class Score {
     setTimeout(() => { try { n.out.disconnect(); n.send.disconnect(); } catch { /* gone */ } }, (fade + 0.3) * 1000);
   }
 
+  /** Smoothly trim the score's level (1 = normal), e.g. under the Pit theme. */
+  setLevel(v, tc = 0.8) {
+    const n = this.nodes, ctx = this.eng.ctx;
+    if (!n || !ctx) return;
+    const t = ctx.currentTime, g = n.out.gain;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.setTargetAtTime(Math.max(0, Number(v) || 0), t, tc);
+  }
+
   /** Schedule notes up to `horizon` (defaults to now + 0.25s). */
   pump(horizon) {
     const e = this.eng, ctx = e.ctx;

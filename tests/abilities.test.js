@@ -10,12 +10,14 @@ import { CLASSES, CRATE_LABEL, FRAG_CAP, MOD_CAP, COVER_PENALTY } from '../src/s
 import { arena, S, setCover, coverAt } from './helpers.js';
 
 
-test('new unit fields: frags, cooldowns, hunkered', () => {
+test('new unit fields: kit, cooldowns, hunkered', () => {
   const s = createGame({ seed: 5, mode: 'solos' });
   for (const u of s.units) {
-    assert.equal(u.items.frag, u.cls === 'assault' ? 2 : 0);
-    assert.deepEqual(u.cooldowns, { aimed: 0, breach: 0, patch: 0, scan: 0 });
-    assert.equal(u.items.smoke, u.cls === 'recon' ? 1 : 0);
+    // Assault is the frag specialist: +1 on whatever lethal it carries.
+    const lethalN = { frag: 1, semtex: 1, claymore: 1, knife: 2 }[u.lethal] + (u.cls === 'assault' ? 1 : 0);
+    assert.equal(u.items[u.lethal] - (u.lethal === 'claymore' && u.perks.includes('trapper') ? 1 : 0), lethalN, u.cls + ' ' + u.lethal);
+    assert.equal(u.items[u.tactical], 1);
+    assert.deepEqual(u.cooldowns, { aimed: 0, breach: 0, patch: 0, scan: 0, deploy_cover: 0, suppress: 0, run_gun: 0 });
     assert.equal(u.downed, false);
     assert.equal(u.hunkered, false);
   }
@@ -189,6 +191,7 @@ test('hunker: ends turn, doubles cover, no grazes, clears on own next turn', () 
   assert.equal(p.graze, 0);
   for (let i = 0; i < 40 && a.alive; i++) {
     es[0].ap = 2;
+    es[0].ammo = 9;
     const shot = act(s, es[0].id, { type: 'shoot', targetId: a.id }).events.find((e) => e.type === 'shot');
     assert.notEqual(shot.result, 'graze');
     a.hp = a.maxHp;
@@ -238,7 +241,7 @@ test('frag crates add a grenade, up to the cap', () => {
 test('abilityInfo reports readiness, charges, cooldowns and reasons', () => {
   const { s, a } = arena({ me: [5, 5, 'marksman'], foes: [[20, 20]] });
   let info = abilityInfo(a);
-  assert.deepEqual(info.map((x) => x.key), ['grenade', 'smoke', 'aimed', 'revive', 'hunker']);
+  assert.deepEqual(info.map((x) => x.key), ['grenade', 'smoke', 'aimed', 'revive', 'reload', 'swap', 'hunker']);
   const g = info.find((x) => x.key === 'grenade');
   assert.equal(g.ready, false);
   assert.equal(g.reason, 'No grenades');
@@ -253,7 +256,7 @@ test('abilityInfo reports readiness, charges, cooldowns and reasons', () => {
   a.ap = 0;
   assert.equal(abilityInfo(a).find((x) => x.key === 'hunker').reason, 'No AP');
   const { a: br } = arena({ me: [5, 5, 'breacher'] });
-  assert.deepEqual(abilityInfo(br).map((x) => x.key), ['grenade', 'smoke', 'breach', 'revive', 'hunker']);
+  assert.deepEqual(abilityInfo(br).map((x) => x.key), ['grenade', 'smoke', 'breach', 'revive', 'reload', 'swap', 'hunker']);
   const solo = createGame({ seed: 3, mode: 'solos' });
   assert.ok(!abilityInfo(solo.units[0], solo).some((x) => x.key === 'revive'), 'no revive in solos');
 });

@@ -34,16 +34,18 @@
 
   <canvas id="menuFx" aria-hidden="true"></canvas>
 
-  <!-- ============ SPLASH ============ -->
+  <!-- ============ SPLASH (animated title) ============ -->
   <div id="splash" class="screen" role="button" tabindex="0" aria-label="Tidefall. Tap to start">
     <div class="sp-rays" aria-hidden="true"></div>
+    <div class="sp-streaks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
     <div class="sp-center">
       <div class="kicker sp-kick"><span>16 players</span><span>Turn-based</span><span>Battle royale</span></div>
-      <h1 class="logo big" aria-label="Tidefall 3.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>3.0</b></span></h1>
-      <p class="tagline">The tide takes everyone eventually. Be the last squad above it.</p>
+      <h1 class="logo big" aria-label="Tidefall 5.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>5.0</b></span></h1>
+      <p class="tagline">Tactics. Loadouts. Killstreaks. The tide takes everyone eventually.</p>
+      <div class="sp-pillars" aria-hidden="true"><span>Engagement turns</span><span>Create-a-Class</span><span>Killstreaks</span><span>Online squads</span></div>
       <div class="sp-start"><span class="sp-ring"></span><span id="spStartTxt">Tap to start</span></div>
     </div>
-    <div class="sp-foot"><span class="dot"></span><span>Offline vs 15 bots</span><span class="sep"></span><span>Five stages</span><span class="sep"></span><span>v3.0</span></div>
+    <div class="sp-foot"><span class="dot"></span><span>Solo vs bots · Online with friends</span><span class="sep"></span><span>Seven classes</span><span class="sep"></span><span>v5.0</span></div>
     <svg class="waves" viewBox="0 0 1200 200" preserveAspectRatio="none" aria-hidden="true">
       <path class="w1" d="M0 120 C150 90 300 150 450 120 S750 90 900 120 S1100 150 1200 120 V200 H0Z" />
       <path class="w2" d="M0 140 C150 115 300 165 450 140 S750 115 900 140 S1100 165 1200 140 V200 H0Z" />
@@ -51,61 +53,74 @@
     </svg>
   </div>
 
-  <!-- ============ MENU ============ -->
-  <div id="menu" class="screen hidden">
+  <!-- ============ HUB ============ -->
+  <div id="menu" class="screen hidden" data-page="play">
     <div class="menu-fx" aria-hidden="true"><div class="scan"></div></div>
-
-    <header class="brand">
-      <div class="brand-top">
-        <h1 class="logo" aria-label="Tidefall 3.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>3.0</b></span></h1>
-        <div class="brand-btns">
-          <button id="howBtn" class="icon-btn" title="How to play" aria-label="How to play"></button>
-          <button id="setBtn" class="icon-btn" title="Settings" aria-label="Settings"></button>
-        </div>
-      </div>
-      <p class="tagline">The tide takes everyone eventually. Be the last squad above it.</p>
-      <div class="profile panel">
-        <label class="callsign"><span class="cs-ic"></span><span class="cs-l">Callsign</span>
-          <input id="callsign" type="text" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done" aria-label="Callsign" />
-          <button id="csDice" class="cs-dice" type="button" title="Random callsign" aria-label="Random callsign"></button>
-        </label>
-        <div id="career" class="career" aria-label="Career stats"></div>
-        <div class="meta-row">
-          <span id="menuSalvage" class="wallet" title="Salvage: earned in matches, spent in the Shop"></span>
-          <button id="shopBtn" class="btn ghost sm meta-btn"><span class="mb-ic"></span><span>Shop</span><i id="shopDot" class="dot hidden"></i></button>
-          <button id="lockerBtn" class="btn ghost sm meta-btn"><span class="mb-ic"></span><span>Locker</span></button>
-        </div>
+    <header id="hubTop">
+      <h1 class="logo hub-logo" aria-label="Tidefall 5.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span></h1>
+      <button id="profileBtn" class="ht-profile" aria-label="Your profile"></button>
+      <div class="ht-right">
+        <span id="menuSalvage" class="wallet" title="Salvage: earned in matches, spent in the Store"></span>
+        <button id="howBtn" class="icon-btn" title="How to play" aria-label="How to play"></button>
+        <button id="setBtn" class="icon-btn" title="Settings" aria-label="Settings"></button>
       </div>
     </header>
-
-    <section class="loadout panel" aria-label="Loadout">
-      <div class="sec-h"><span class="n">01</span>Mode<small id="modeDesc"></small></div>
-      <div id="modeChoices" class="mode-grid"></div>
-      <label id="wolfRow" class="wolf collapsed">
-        <input type="checkbox" id="wolfBox" />
-        <span class="switch"><i></i></span>
-        <span class="wolf-txt"><b>Volunteer as Lone Wolf</b><small>Drop solo with +1 AP, +50% HP and +1 armor</small></span>
-      </label>
-
-      <div class="sec-h"><span class="n">02</span>Stage<small id="stageDesc"></small></div>
-      <div id="stageChoices" class="stage-row" role="radiogroup" aria-label="Stage"></div>
-      <div id="stageDetail" class="stage-detail" aria-live="polite"></div>
-
-      <div class="sec-h"><span class="n">03</span>Class<small id="classCount"></small></div>
-      <div id="classCarousel" class="carousel" aria-hidden="true">
-        <div class="car-stage"></div>
-        <button class="car-nav prev" tabindex="-1" aria-label="Previous class"></button>
-        <button class="car-nav next" tabindex="-1" aria-label="Next class"></button>
-      </div>
-      <div id="classChoices" class="class-tabs" role="tablist" aria-label="Class"></div>
-      <div id="classDetail" class="class-detail" aria-live="polite"></div>
-
-      <button id="playBtn" class="btn primary xl"><span>Deploy</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
-      <button id="inviteBtn" class="btn ghost invite" aria-disabled="true">
-        <span>Join with invite code</span><span class="soon">Coming next</span>
-      </button>
-    </section>
+    <nav id="hubNav" role="tablist" aria-label="Main menu">
+      <button role="tab" data-page="play"><span class="hn-ic"></span><b>Play</b></button>
+      <button role="tab" data-page="barracks"><span class="hn-ic"></span><b>Barracks</b></button>
+      <button role="tab" data-page="armory"><span class="hn-ic"></span><b>Armory</b><i class="hn-dot hidden"></i></button>
+      <button role="tab" data-page="store"><span class="hn-ic"></span><b>Store</b><i id="shopDot" class="hn-dot hidden"></i></button>
+      <button role="tab" data-page="career"><span class="hn-ic"></span><b>Career</b><i class="hn-dot hidden"></i></button>
+      <i class="hn-ink" aria-hidden="true"></i>
+    </nav>
+    <main id="hubPages">
+      <section class="page" id="pagePlay" data-page="play" aria-label="Play">
+        <div class="play-grid">
+          <div class="play-modes">
+            <button id="playSolo" class="pm-card pm-hero sel" data-play="solo">
+              <span class="pm-art" aria-hidden="true"></span>
+              <span class="pm-k">Offline · instant</span><b>Solo vs Bots</b><small>You and your squad against the archipelago</small>
+            </button>
+            <div class="pm-row">
+              <button id="playHost" class="pm-card" data-play="host"><span class="pm-ic"></span><b>Host Online</b><small>Invite friends with a code</small></button>
+              <button id="playJoin" class="pm-card" data-play="join"><span class="pm-ic"></span><b>Join with Code</b><small>Six letters from your host</small></button>
+            </div>
+          </div>
+          <div class="play-setup">
+            <div class="sec-h"><span class="n">01</span>Squad size<small id="modeDesc"></small></div>
+            <div id="modeChoices" class="mode-grid"></div>
+            <label id="wolfRow" class="wolf collapsed">
+              <input type="checkbox" id="wolfBox" />
+              <span class="switch"><i></i></span>
+              <span class="wolf-txt"><b>Volunteer as Lone Wolf</b><small>Drop solo with +1 AP, +50% HP and +1 armor</small></span>
+            </label>
+            <div class="sec-h"><span class="n">02</span>Stage<small id="stageDesc"></small></div>
+            <div id="stageChoices" class="stage-row" role="radiogroup" aria-label="Stage"></div>
+            <div id="stageDetail" class="stage-detail" aria-live="polite"></div>
+            <div class="sec-h"><span class="n">03</span>Today<small id="dailyReset"></small></div>
+            <div id="playDailies" class="daily-mini"></div>
+          </div>
+        </div>
+      </section>
+      <section class="page" id="pageBarracks" data-page="barracks" aria-label="Barracks"></section>
+      <section class="page" id="pageArmory" data-page="armory" aria-label="Armory"></section>
+      <section class="page" id="pageStore" data-page="store" aria-label="Store">
+        <div class="store-h">
+          <div class="seg shop-switch" role="radiogroup" aria-label="Store or locker"><button data-view="shop" role="radio">Store</button><button data-view="locker" role="radio">Locker</button></div>
+          <span id="shopSalvage" class="wallet"></span>
+        </div>
+        <div id="shopBody"></div>
+      </section>
+      <section class="page" id="pageCareer" data-page="career" aria-label="Career"></section>
+    </main>
+    <footer id="deployBar">
+      <button id="loadoutChip" class="lo-chip" aria-label="Change loadout"></button>
+      <button id="playBtn" class="btn primary xl deploy"><span>Deploy</span><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </footer>
   </div>
+
+  <!-- NET's lobby UI mounts here (src/client/online/lobby.js) -->
+  <div id="onlineRoot" class="screen hidden" aria-live="polite"></div>
 
   <!-- ============ TRANSITION WIPE ============ -->
   <div id="wipe" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -125,6 +140,7 @@
       <div id="topMid">
         <div id="turnInfo" class="turn-label"></div>
         <div id="turnStrip"></div>
+        <div id="engageInfo" class="engage hidden" aria-live="polite"></div>
       </div>
       <button id="pauseBtn" class="icon-btn" title="Menu [Esc]"></button>
     </div>
@@ -140,7 +156,12 @@
       </div>
     </div>
 
+    <div id="netStatus" class="net-status hidden" aria-live="polite"></div>
     <div id="dmgDir" aria-hidden="true"></div>
+    <div id="hitmarker" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <div id="xpPops" aria-hidden="true"></div>
+    <div id="medalStack" aria-live="polite"></div>
+    <div id="killConfirm" aria-hidden="true"></div>
     <div id="edgeGlow" aria-hidden="true"></div>
     <div id="feed"></div>
     <div id="squadAlert" class="hidden" aria-live="assertive"></div>
@@ -156,15 +177,26 @@
     </div>
 
     <div id="specBar" class="panel hidden">
-      <span class="spec-l"><i class="live"></i><span id="specText">Spectating</span></span>
-      <button id="speedBtn" class="btn ghost sm">2×</button>
-      <button id="skipBtn" class="btn primary sm">Skip to results</button>
+      <div class="spec-top">
+        <span class="spec-l"><i class="live"></i><span id="specText">Spectating</span></span>
+        <div class="spec-speed seg" role="radiogroup" aria-label="Playback speed"><button data-speed="1" role="radio">1×</button><button data-speed="2" role="radio">2×</button><button data-speed="4" role="radio">4×</button></div>
+      </div>
+      <div class="spec-cycle">
+        <button id="specPrev" class="icon-btn sm" aria-label="Previous player"></button>
+        <div id="specWho" class="spec-who"></div>
+        <button id="specNext" class="icon-btn sm" aria-label="Next player"></button>
+        <button id="skipBtn" class="btn primary sm">Skip to results</button>
+      </div>
     </div>
+
+    <div id="targetHint" class="target-hint hidden" aria-live="polite"></div>
 
     <div id="dock" class="panel">
       <div id="unitCard"></div>
+      <div id="wpnBar" class="wpn-bar hidden"></div>
       <button id="endBtn" class="act end off"></button>
       <div id="actions"></div>
+      <div id="streakBar" class="streak-bar hidden"></div>
     </div>
   </div>
 
@@ -184,20 +216,53 @@
   <!-- ============ END ============ -->
   <div id="endScreen" class="screen hidden">
     <div class="end-card panel">
+      <div id="endBanner" class="end-banner"></div>
       <div id="endKicker" class="kicker"></div>
-      <div id="endPlace" class="end-place"></div>
-      <h1 id="endTitle"></h1>
-      <p id="endSub" class="end-sub"></p>
-      <div id="endStats" class="end-stats"></div>
-      <div id="endPrestige" class="end-prestige"></div>
-      <div id="endCareer" class="end-career"></div>
-      <div class="end-btns">
-        <button id="againBtn" class="btn primary xl"><span>Play again</span></button>
-        <div class="end-btns2">
-          <button id="endShopBtn" class="btn ghost"><span class="mb-ic"></span><span>Shop</span><span id="endShopSalv"></span></button>
-          <button id="loadoutBtn" class="btn ghost">Change loadout</button>
+      <div class="end-hero">
+        <div id="endPlace" class="end-place"></div>
+        <div class="end-hero-t">
+          <h1 id="endTitle"></h1>
+          <p id="endSub" class="end-sub"></p>
         </div>
       </div>
+      <div id="endStats" class="end-stats"></div>
+      <div id="endMedals" class="end-medals"></div>
+      <div id="endXp" class="end-xp"></div>
+      <div id="endPrestige" class="end-prestige"></div>
+      <div id="endChallenges" class="end-ch"></div>
+      <div id="endCareer" class="end-career"></div>
+    </div>
+    <div class="end-btns">
+      <button id="againBtn" class="btn primary xl"><span>Play again</span></button>
+      <div class="end-btns2">
+        <button id="endShopBtn" class="btn ghost"><span class="mb-ic"></span><span>Store</span><span id="endShopSalv"></span></button>
+        <button id="loadoutBtn" class="btn ghost">Back to hub</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ THE PIT ============ -->
+  <div id="pitScreen" class="screen hidden" role="dialog" aria-label="The Pit">
+    <div class="pit-bg" aria-hidden="true"></div>
+    <div class="pit-card">
+      <div class="kicker pit-kick"><span>Second chance</span><span id="pitRound"></span></div>
+      <h1 class="pit-title">THE PIT</h1>
+      <div id="pitVs" class="pit-vs"></div>
+      <p id="pitSub" class="pit-sub"></p>
+      <button id="pitOk" class="btn primary">Fight</button>
+    </div>
+  </div>
+
+  <!-- ============ LEVEL UP ============ -->
+  <div id="levelUp" class="screen hidden" role="dialog" aria-modal="true" aria-label="Level up">
+    <div class="tu-rays" aria-hidden="true"></div>
+    <div class="tu-card lu-card">
+      <div class="kicker tu-kick"><span id="luKick">Level up</span></div>
+      <div id="luBadge" class="lu-badge"></div>
+      <h1 id="luName" class="tu-name"></h1>
+      <p id="luSub" class="tu-sub"></p>
+      <div id="luRewards" class="lu-rewards"></div>
+      <button id="luOk" class="btn primary">Continue</button>
     </div>
   </div>
 
@@ -214,14 +279,16 @@
   </div>
 
   <!-- ============ SHEETS ============ -->
-  <div id="shopSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Armory">
-    <div class="sheet-card panel wide shop-card">
-      <div class="sheet-h shop-h">
-        <div class="seg shop-switch" role="radiogroup" aria-label="Shop or locker"><button data-view="shop" role="radio">Shop</button><button data-view="locker" role="radio">Locker</button></div>
-        <span id="shopSalvage" class="wallet"></span>
-        <button class="icon-btn" data-close aria-label="Close"></button>
-      </div>
-      <div id="shopBody"></div>
+  <div id="pickSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Choose">
+    <div class="sheet-card panel wide pick-card">
+      <div class="sheet-h"><h2 id="pickTitle">Choose</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <div id="pickBody"></div>
+    </div>
+  </div>
+  <div id="transferSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Transfer">
+    <div class="sheet-card panel">
+      <div class="sheet-h"><h2>Transfer</h2><button class="icon-btn" data-close aria-label="Close"></button></div>
+      <div id="transferBody"></div>
     </div>
   </div>
   <div id="settingsSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-label="Settings">

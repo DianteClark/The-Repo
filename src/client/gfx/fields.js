@@ -2,8 +2,10 @@
 //  - fogTex  (S×S, linear):  R = visibility to my team (animated), G = next-tide warning.
 //  - tideTex ((S+2P)², linear): signed distance to the waterline in tiles,
 //    R = previous field, G = new field; uTideMix animates between them.
+//  - aoTex   (4S×4S): baked contact occlusion from cover props on the ground
+//    (5.0: soft AO pools at the foot of every wall, crate and barrier).
 // Plus `patchWorld(material)` which injects fog-of-war shading into stock
-// three.js materials via onBeforeCompile.
+// three.js materials via onBeforeCompile (and, 5.0, rain-wet sheen).
 
 import * as THREE from 'three';
 
@@ -41,7 +43,20 @@ export class WorldFields {
     this.noiseTex.generateMipmaps = true;
     this.noiseTex.needsUpdate = true;
 
+    // baked contact AO, 4 texels per tile
+    const AR = (this.AR = S * 4);
+    this.aoData = new Uint8Array(AR * AR);
+    this.aoTex = new THREE.DataTexture(this.aoData, AR, AR, THREE.RedFormat);
+    this.aoTex.magFilter = this.aoTex.minFilter = THREE.LinearFilter;
+    this.aoTex.needsUpdate = true;
+
     this.uniforms = {
+      uAOTex: { value: this.aoTex },
+      uWet: { value: 0 }, // rain wetness 0..1 (puddles, darker albedo, glossy)
+      uHigh: { value: 1 }, // quality flag for optional shader detail (caustics, sparkle)
+      uSkyTop: { value: new THREE.Color(0.35, 0.55, 0.7) },
+      uSkyHor: { value: new THREE.Color(0.7, 0.8, 0.85) },
+      uCaustic: { value: 1 },
       uNoise: { value: this.noiseTex },
       uFogTex: { value: this.fogTex },
       uTideTex: { value: this.tideTex },
@@ -63,7 +78,38 @@ export class WorldFields {
     this.fogAnimating = false;
   }
 
-  dispose() { this.fogTex.dispose(); this.tideTex.dispose(); this.noiseTex.dispose(); }
+  dispose() { this.fogTex.dispose(); this.tideTex.dispose(); this.noiseTex.dispose(); this.aoTex.dispose(); }
+
+  /**
+   * Bake contact occlusion from cover levels (0/1/2) into aoTex: a soft
+   * falloff around each prop's footprint, stronger and wider for full cover.
+   * ~30k texels × ≤25 neighbours: a few ms, re-run when cover changes.
+   */
+  setOcclusion(cover) {
+    const S = this.S, AR = this.AR, d = this.aoData;
+    const HS = [0, 0.38, 0.44], K = [0, 3.4, 2.3], W = [0, 0.55, 0.9];
+    for (let ty = 0; ty < AR; ty++) {
+      const py = (ty + 0.5) / 4;
+      const cy = Math.floor(py);
+      for (let tx = 0; tx < AR; tx++) {
+        const px = (tx + 0.5) / 4;
+        const cx = Math.floor(px);
+        let occ = 0;
+        for (let y = Math.max(0, cy - 2); y <= Math.min(S - 1, cy + 2); y++) {
+          for (let x = Math.max(0, cx - 2); x <= Math.min(S - 1, cx + 2); x++) {
+            const c = cover[y * S + x];
+            if (!c) continue;
+            const h = HS[c];
+            const dx = Math.max(0, Math.abs(px - (x + 0.5)) - h), dy = Math.max(0, Math.abs(py - (y + 0.5)) - h);
+            const dd = Math.sqrt(dx * dx + dy * dy);
+            occ += W[c] * Math.exp(-dd * K[c]) * (dd > 0 ? 1 : 1.4);
+          }
+        }
+        d[ty * AR + tx] = Math.min(255, (1 - Math.exp(-occ * 1.15)) * 255) | 0;
+      }
+    }
+    this.aoTex.needsUpdate = true;
+  }
 
   /** vis: Uint8Array S*S of 0/1. */
   setFog(vis, instant) {
@@ -79,6 +125,13 @@ export class WorldFields {
   setWarn(warn) {
     const n = this.S * this.S;
     for (let k = 0; k < n; k++) this.fogData[k * 4 + 1] = warn[k] ? 255 : 0;
+    this.fogTex.needsUpdate = true;
+  }
+
+  /** Hazard mask (B channel of fogTex): red tide band / stage-event tiles, 0..1 per tile. */
+  setMask(mask) {
+    const n = this.S * this.S;
+    for (let k = 0; k < n; k++) this.fogData[k * 4 + 2] = mask ? Math.round(Math.max(0, Math.min(1, mask[k])) * 255) : 0;
     this.fogTex.needsUpdate = true;
   }
 
@@ -181,7 +234,38 @@ uniform float uStorm;
 uniform float uFogDark;
 uniform float uGridOff;
 uniform float uCloud;
+uniform sampler2D uAOTex;
+uniform float uWet;
+uniform float uHigh;
+uniform vec3 uSkyTop;
+uniform vec3 uSkyHor;
+uniform float uCaustic;
+uniform vec3 uSunCol;
+uniform vec3 uSunDir;
 varying vec3 vWPos;
+float contactAO(vec2 p) {
+  vec2 uv = (p - uMapMin) / uMapExt;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
+  return texture2D(uAOTex, uv).r;
+}
+// cheap animated caustic web (two drifting noise fields interfering)
+float caustic(vec2 p, float t) {
+  float a = texture2D(uNoise, p * 0.0095 + vec2(t * 0.0021, t * 0.0013)).r;
+  float b = texture2D(uNoise, p * 0.0112 - vec2(t * 0.0016, -t * 0.0022) + 0.37).g;
+  float c = 1.0 - abs(a - b) * 3.4;
+  float a2 = texture2D(uNoise, p * 0.017 + vec2(-t * 0.003, t * 0.0024) + 0.61).b;
+  float b2 = texture2D(uNoise, p * 0.0205 + vec2(t * 0.0027, t * 0.0019) + 0.19).r;
+  float c2 = 1.0 - abs(a2 - b2) * 3.8;
+  return pow(clamp(c, 0.0, 1.0), 7.0) * 0.8 + pow(clamp(c2, 0.0, 1.0), 9.0) * 0.45;
+}
+// rain puddle mask: low spots fill first as wetness rises
+float puddleMask(vec2 p) {
+  float n = texture2D(uNoise, p * 0.0027 + 0.21).r * 0.7 + texture2D(uNoise, p * 0.0105 + 0.5).g * 0.3;
+  return smoothstep(0.71 - uWet * 0.1, 0.74 - uWet * 0.1, n) * smoothstep(0.15, 0.6, uWet);
+}
+vec3 skyColor(vec3 r) {
+  return mix(uSkyHor, uSkyTop, smoothstep(0.0, 0.85, r.y));
+}
 float tideSD(vec2 p) {
   vec2 uv = (p - uTideMin) / uTideExt;
   vec2 s = texture2D(uTideTex, uv).rg;
@@ -209,6 +293,11 @@ float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.3
 float vnoise(vec2 p) { return texture2D(uNoise, (p + 0.5) * (1.0 / 256.0)).r; }
 `;
 
+// rain: everything soaks darker (tops more than walls, which shed water)
+const WET_COLOR = /* glsl */`
+  diffuseColor.rgb *= 1.0 - uWet * 0.17;
+`;
+
 const WPOS_VERT = /* glsl */`
   {
     vec4 wpP = vec4(transformed, 1.0);
@@ -232,7 +321,8 @@ export function patchWorld(mat, fields, key, extra = {}) {
       .replace('#include <project_vertex>', '#include <project_vertex>\n' + WPOS_VERT + (extra.vert || ''));
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FIELDS_GLSL + (extra.fragDecl || ''))
-      .replace('#include <color_fragment>', '#include <color_fragment>\n' + (extra.colorFrag || ''))
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' + (extra.colorFrag || '') + (extra.noWet ? '' : WET_COLOR))
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n' + (extra.noWet ? '' : 'roughnessFactor = mix(roughnessFactor, 0.32, uWet * 0.65);\n'))
       .replace('#include <opaque_fragment>', (extra.preOut || '') + '\noutgoingLight *= cloudShade(vWPos.xz);\noutgoingLight = applyFog(outgoingLight, vWPos.xz);\n#include <opaque_fragment>');
   };
   mat.customProgramCacheKey = () => 'tf-' + key;

@@ -19,18 +19,37 @@ const DEFAULTS = {
   callsign: '',        // shown on squad cards and the end screen
   stage: 'random',     // stage key or 'random'
   coverFade: true,     // fade cover props while picking a move
+  // 5.0
+  colorPreset: 'standard', // squad colours: 'standard' | 'deutan' | 'protan' | 'tritan' | 'high'
+  textSize: 'm',       // 's' | 'm' | 'l' | 'xl'
+  motion: 'auto',      // reduced motion: 'auto' (follow the OS) | 'reduced' | 'full'
+  hitmarkers: true,    // hitmarker + XP popups
+  playMode: 'solo',    // last hub play choice: 'solo' | 'host' | 'join'
 };
 
+const ENUMS = {
+  quality: ['auto', 'high', 'low'], timer: ['ring', 'bar'], botSpeed: ['normal', 'fast'],
+  colorPreset: ['standard', 'deutan', 'protan', 'tritan', 'high'], textSize: ['s', 'm', 'l', 'xl'], motion: ['auto', 'reduced', 'full'],
+  playMode: ['solo', 'host', 'join'],
+};
+/** Only keep known keys with the right type and range, so a corrupt or old save can't break the UI. */
+export function sanitizeSettings(saved) {
+  const out = { ...DEFAULTS };
+  if (!saved || typeof saved !== 'object') return out;
+  for (const k of Object.keys(DEFAULTS)) {
+    const v = saved[k];
+    if (typeof v !== typeof DEFAULTS[k]) continue;
+    if (ENUMS[k] && !ENUMS[k].includes(v)) continue;
+    if (k === 'volume' && !(v >= 0 && v <= 1)) continue;
+    if (typeof v === 'string' && v.length > 40) continue;
+    out[k] = v;
+  }
+  return out;
+}
 let data = { ...DEFAULTS };
 try {
   const raw = localStorage.getItem(KEY);
-  if (raw) {
-    const saved = JSON.parse(raw);
-    // Only keep known keys with the right type, so a corrupt or old save can't break the UI.
-    for (const k of Object.keys(DEFAULTS)) {
-      if (saved && typeof saved[k] === typeof DEFAULTS[k]) data[k] = saved[k];
-    }
-  }
+  if (raw) data = sanitizeSettings(JSON.parse(raw));
 } catch { /* private mode etc. */ }
 
 const listeners = new Set();

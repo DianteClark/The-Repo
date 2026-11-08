@@ -1,28 +1,100 @@
 // Authoritative game state + actions. Pure logic: no DOM, no rendering.
 // Every function that changes state returns a list of events the client animates.
+//
+// Module map (5.0):
+//   game.js      createGame, act() dispatch, previews / queries (this file; re-exports the rest)
+//   turns.js     Engagement Turns: activeTeams / endTeamTurn / engagements, round + step flow
+//   core.js      damage, downing, death, explosions, shots, crates (shared primitives)
+//   equipment.js lethal + tactical equipment
+//   streaks.js   killstreaks
+//   loadout.js   validateLoadout / bot loadouts / applying a loadout to a unit
+//   weapons.js   data: WEAPONS, ATTACHMENTS, LEGENDARIES, EQUIPMENT, PERKS, STREAKS, progression tables
+//   vehicles.js  (SIM-2) boats: board / disembark / boat_move / repair / shoot, hull damage
+//   stageevents.js (SIM-2) stage events ("Levolution") + building collapse
+//   pit.js       (SIM-2) The Pit: second-chance 1v1 duels, Pit Warden, redeploy
+//
+// Extension points for SIM-2 (boats, stage events, collapse, The Pit):
+//   ACTIONS[type] = (state, unit, action) => ({events} | {error})   new act() types (e.g. boat_move, repair)
+//   TURN_HOOKS (turns.js) roundStart / stepStart / teamStart / teamEnd
+//   HOOKS (core.js) onDeath / onDamage / onCoverChange
+//   state.blockers (Set-able array of tile keys that block movement), unit.tideImmune (no zone damage)
+//   CREATE_HOOKS: (state, opts) => void, run at the end of createGame before round 1 starts
 
 import {
-  TOTAL_PLAYERS, MAP_SIZE, BASE_AP, CLASSES, MODES, LONE_WOLF, GRAZE_BAND,
-  MISS_STREAK_CAP, MEDKIT_HEAL, ZONE, CRATE_COUNT, CRATE_TABLE, MOD_CAP, CALLSIGNS,
-  FRAG, FRAG_CAP, AIMED, BREACH, START_FRAGS, SUPPLY_DROP_ROUNDS, ABILITY_TEXT, FLANK_DMG,
-  START_SMOKES, SMOKE, SMOKE_CAP, PATCH, SCAN, REVIVE_HP, BLEED_TURNS,
-  STAGES, STAGE_KEYS, BARREL,
+  TOTAL_PLAYERS, MAP_SIZE, CLASSES, MODES, LONE_WOLF, GRAZE_BAND, MEDKIT_HEAL, ZONE, CRATE_COUNT, CRATE_TABLE,
+  CALLSIGNS, FRAG, AIMED, BREACH, ABILITY_TEXT, SMOKE, PATCH, SCAN, REVIVE_HP, STAGES, STAGE_KEYS, BARREL,
+  DEPLOY_COVER, SUPPRESS, RUN_GUN, BASE_AP,
 } from './constants.js';
 import { generateMap } from './map.js';
-import { makeRng, roll } from './rng.js';
+import { makeRng, roll, hash32 } from './rng.js';
 import {
   reachable, pathTo, hitChance, inRangeAndLos, teamSeesUnit, teamSeesTile, dist, los, inBounds, DIRS8, standing,
-  weaponRange, isBarrel,
+  weaponRange, isBarrel, moveOf,
 } from './rules.js';
+import { ATTACHMENTS, EQUIPMENT, hasSpecial } from './weapons.js';
+import { applyLoadout, randomLoadout, validateLoadout, defaultLoadout, hasPerk } from './loadout.js';
+import {
+  teamAlive, aliveTeams, nextRoll, resolveShot, detonate, planExplosions, summarisePlan, setCover, pickupCrate,
+  reviveUnit, flare, noise, hasAmmo, spendAmmo, isInfinite, hiddenFromIntel, chebyshev, shotDamage, grazeBand, blastRadius,
+} from './core.js';
+import {
+  activeTeams, isTeamActive, currentTeamId, engagements, freeTeams, endTeamTurn, settle, startFirstRound, TURN_HOOKS,
+  computeContacts,
+} from './turns.js';
+import {
+  actEquipment, equipmentTargets, equipmentPreview, claymoreReact, throwTileOk, ACTION_ITEM, canUse,
+} from './equipment.js';
+import {
+  actStreak, streakInfo, streakTargets, streakPreview, sentryReact, shootSentry, airstrikeLine,
+} from './streaks.js';
+import { addPoints, streakPoints, STREAK_POINTS } from './core.js';
+import {
+  VEHICLE_ACTIONS, BOAT, placeBoats, embark, disembark, vehicleAt, vehicleById, vehicleOf, driverOf, boardError,
+  boardTargets, boatReach, boatMoveTargets, repairTargets, vehicleShotPreview, shootVehicle, navigable,
+} from './vehicles.js';
+import { planStageEvent, dangerTiles, STAGE_EVENT, COLLAPSE, knockback } from './stageevents.js';
+import { initPit, pitDuels, resolvePitBots, settlePit, duelUnitFor, createDuelState, playDuel, PIT } from './pit.js';
+
+export {
+  activeTeams, isTeamActive, currentTeamId, engagements, freeTeams, endTeamTurn, TURN_HOOKS, computeContacts,
+  startFirstRound, teamAlive, aliveTeams, validateLoadout, defaultLoadout, randomLoadout,
+  equipmentTargets, equipmentPreview, streakInfo, streakTargets, streakPreview, airstrikeLine,
+};
+export { HOOKS } from './core.js';
+// 5.0 battlefield layer (SIM-2): boats, stage events, building collapse, the Pit, streak points.
+export {
+  BOAT, vehicleAt, vehicleById, vehicleOf, driverOf, boardError, boardTargets, boatReach, boatMoveTargets, repairTargets,
+  vehicleShotPreview, navigable, STAGE_EVENT, COLLAPSE, dangerTiles, knockback, pitDuels, resolvePitBots, settlePit,
+  duelUnitFor, createDuelState, playDuel, PIT, streakPoints, STREAK_POINTS,
+};
 
 const CLASS_KEYS = Object.keys(CLASSES);
+export const ACTIONS = { ...VEHICLE_ACTIONS };
+export const CREATE_HOOKS = [
+  (state) => placeBoats(state),
+  (state) => planStageEvent(state),
+  (state, opts) => initPit(state, opts),
+];
 
+/**
+ * opts: { seed, mode, stage, noHuman, playerClass, loadout, volunteerLoneWolf,
+ *         players:[{name, loadout, isHuman:true, squad?}], pit? (false: no Pit second chance) }
+ * `players` lists the humans (one entry each). Without it, one human ('You') plays
+ * `loadout` or `playerClass` unless noHuman. Humans with the same `squad` number share a squad.
+ */
 export function createGame(opts = {}) {
   const seed = (opts.seed ?? Math.floor(Math.random() * 2 ** 32)) >>> 0;
   const mode = MODES[opts.mode] ? opts.mode : 'solos';
   const playerClass = CLASSES[opts.playerClass] ? opts.playerClass : 'assault';
-  const humanCount = opts.noHuman ? 0 : 1;
+  let humans = [];
+  if (Array.isArray(opts.players) && opts.players.length) {
+    humans = opts.players.filter((p) => p && p.isHuman !== false).slice(0, TOTAL_PLAYERS)
+      .map((p, i) => ({ name: p.name || `Player ${i + 1}`, loadout: validateLoadout(p.loadout || { cls: p.cls }), squad: p.squad }));
+  } else if (!opts.noHuman) {
+    humans = [{ name: opts.callsign || 'You', loadout: validateLoadout(opts.loadout || { cls: playerClass }) }];
+  }
   const rng = makeRng(seed ^ 0x51ed270b);
+  const kitRng = makeRng(seed ^ 0x10ad0a7); // bot loadouts: own stream, so maps and spawns don't shift
   // Stage: a key, 'random' (picked from the seed), or harbor by default.
   const stage = STAGES[opts.stage] ? opts.stage
     : opts.stage === 'random' ? STAGE_KEYS[Math.floor(roll(seed, 0x57a6e) * STAGE_KEYS.length)]
@@ -39,21 +111,43 @@ export function createGame(opts = {}) {
   const rem = TOTAL_PLAYERS - full * teamSize;
   if (rem > 0) sizes.push(rem);
   const loneWolfTeam = loneWolf && rem === 1 ? sizes.length - 1 : -1;
-  const playerTeam = humanCount ? (opts.volunteerLoneWolf && loneWolfTeam >= 0 ? loneWolfTeam : 0) : -1;
+
+  // Seat the humans: grouped by squad number, otherwise one squad each.
+  const seats = sizes.map(() => []);
+  const fits = (t) => seats[t].length < sizes[t];
+  const squadTeam = new Map();
+  humans.forEach((h, i) => {
+    let t = -1;
+    if (i === 0 && opts.volunteerLoneWolf && loneWolfTeam >= 0) t = loneWolfTeam;
+    else if (Number.isInteger(h.squad) && squadTeam.has(h.squad) && fits(squadTeam.get(h.squad))) t = squadTeam.get(h.squad);
+    else {
+      for (let k = 0; k < sizes.length; k++) {
+        if (seats[k].length === 0 && k !== loneWolfTeam) { t = k; break; }
+      }
+      if (t < 0) for (let k = 0; k < sizes.length; k++) if (fits(k)) { t = k; break; }
+    }
+    if (t < 0) return;
+    if (Number.isInteger(h.squad) && !squadTeam.has(h.squad)) squadTeam.set(h.squad, t);
+    seats[t].push(h);
+  });
+  const humanTeams = seats.map((s, t) => (s.length ? t : -1)).filter((t) => t >= 0);
+  const playerTeam = humans.length ? humanTeams.find((t) => seats[t].includes(humans[0])) : -1;
 
   const names = [...CALLSIGNS];
   const units = [];
   const teams = sizes.map((n, t) => {
     const members = [];
     for (let i = 0; i < n; i++) {
-      const isPlayer = t === playerTeam && i === 0;
-      const cls = isPlayer ? playerClass : CLASS_KEYS[Math.floor(rng() * CLASS_KEYS.length)];
-      const name = isPlayer ? 'You' : names.splice(Math.floor(rng() * names.length), 1)[0] || 'Bot' + units.length;
-      const u = makeUnit(units.length, t, cls, name, isPlayer, t === loneWolfTeam);
+      const h = seats[t][i];
+      // (no rng draws for human seats: keeps the legacy spawn stream)
+      const cls = h ? h.loadout.cls : CLASS_KEYS[Math.floor(rng() * CLASS_KEYS.length)];
+      const name = h ? h.name : names.splice(Math.floor(rng() * names.length), 1)[0] || 'Bot' + units.length;
+      const loadout = h ? h.loadout : randomLoadout(kitRng, cls);
+      const u = makeUnit(units.length, t, loadout, name, !!h, t === loneWolfTeam);
       units.push(u);
       members.push(u.id);
     }
-    return { id: t, members, isLoneWolf: t === loneWolfTeam };
+    return { id: t, members, isLoneWolf: t === loneWolfTeam, human: seats[t].length > 0 };
   });
 
   // Spawns: squads scattered across the map, kept apart; teammates packed together.
@@ -72,18 +166,18 @@ export function createGame(opts = {}) {
     }
     anchors.push([best.x, best.y]);
   }
-  // The human's squad gets the most isolated open spot once everyone else is placed
+  // Human squads get the most isolated open spots once everyone else is placed
   // (deterministic scan, no rng draw), so they rarely get gunned down before their first turn.
-  if (playerTeam >= 0) {
+  for (const ht of humanTeams) {
     let best = null;
     for (let y = 2; y < S - 2; y++) {
       for (let x = 2; x < S - 2; x++) {
         if (map.cover[y * S + x]) continue;
-        const gap = Math.min(99, ...anchors.filter((_, i) => i !== playerTeam).map((a) => dist(a[0], a[1], x, y)));
+        const gap = Math.min(99, ...anchors.filter((_, i) => i !== ht).map((a) => dist(a[0], a[1], x, y)));
         if (!best || gap > best.gap) best = { x, y, gap };
       }
     }
-    if (best) anchors[playerTeam] = [best.x, best.y];
+    if (best) anchors[ht] = [best.x, best.y];
   }
   teams.forEach((team, t) => {
     const [ax, ay] = anchors[t];
@@ -96,6 +190,7 @@ export function createGame(opts = {}) {
 
   // Crates
   const crates = [];
+  const attKeys = Object.keys(ATTACHMENTS);
   let guard = 0;
   while (crates.length < CRATE_COUNT && guard++ < 5000) {
     const x = Math.floor(rng() * S), y = Math.floor(rng() * S);
@@ -103,7 +198,9 @@ export function createGame(opts = {}) {
     if (map.cover[k] || occupied.has(k)) continue;
     if (units.some((u) => dist(u.x, u.y, x, y) < 4)) continue;
     if (crates.some((cr) => dist(cr.x, cr.y, x, y) < 3)) continue;
-    crates.push({ id: crates.length, x, y, type: weighted(rng, CRATE_TABLE), taken: false });
+    const crate = { id: crates.length, x, y, type: weighted(rng, CRATE_TABLE), taken: false };
+    if (crate.type === 'attachment') crate.attachment = attKeys[hash32(seed, 0xa77, crate.id) % attKeys.length];
+    crates.push(crate);
     occupied.add(k);
   }
 
@@ -138,9 +235,7 @@ export function createGame(opts = {}) {
   const zone = { x: zx, y: zy, r: r0, next: zonePlan[1].r, nx: zonePlan[1].x, ny: zonePlan[1].y, stage: 0 };
 
   const order = teams.map((t) => t.id);
-  // Rotate the start so the human isn't always first.
-  // The human still lands somewhere in the first quarter of round 1, so they get
-  // to act before most of the lobby has had a shot at them.
+  // Rotate the start so the human isn't always first (they still land in the first quarter).
   let startShift = Math.floor(rng() * order.length);
   if (playerTeam >= 0) {
     const q = Math.max(1, Math.ceil(order.length / 4));
@@ -150,39 +245,45 @@ export function createGame(opts = {}) {
 
   const state = {
     seed, mode, stage, map, units, teams, crates, zone, zonePlan, order,
-    playerTeam, loneWolfTeam,
+    playerTeam, humanTeams, loneWolfTeam, night: !!stageDef.night,
     round: 1, turnPos: 0, rollCounter: 0,
     eliminated: [], // team ids in elimination order
     winner: null,
     smokes: [], // [{id, x, y, radius, team, expiresRound, expiresTeam}]
-    reveals: [], // active scans: [{team, x, y, radius, ids}]
+    reveals: [], // [{team, kind:'scan'|'uav'|'tracker', x, y, radius, ids}]
     nextSmokeId: 0,
-    turnSerial: 0, // increments every team turn
-    flares: [], // night: units that fired, visible to all: [{id, team}]
+    turnSerial: 0, // increments every step
+    flares: [], // units visible to all (night muzzle flash, Lantern): [{id, team}]
+    turn: null, // engagement-turn bookkeeping (turns.js)
+    // 5.0
+    noises: [], claymores: [], decoys: [], nextEquipId: 0,
+    cuav: [], drops: [], airstrikes: [], sentries: [], gunships: [], nextStreakId: 0,
+    blockers: [],
   };
-  state.startEvents = startTeamTurn(state);
+  for (const h of CREATE_HOOKS) h(state, opts);
+  state.startEvents = startFirstRound(state);
   return state;
 }
 
-function makeUnit(id, team, cls, name, isPlayer, isLoneWolf) {
-  const c = CLASSES[cls];
-  let maxHp = c.hp, armor = c.armor, maxAp = BASE_AP;
-  if (isLoneWolf) {
-    maxHp = Math.round(maxHp * LONE_WOLF.hpMult);
-    armor += LONE_WOLF.armor;
-    maxAp += LONE_WOLF.ap;
-  }
-  return {
-    id, team, cls, name, isPlayer, isLoneWolf,
-    x: 0, y: 0, hp: maxHp, maxHp, armor, maxAp, ap: 0, move: c.move,
+function makeUnit(id, team, loadout, name, isPlayer, isLoneWolf) {
+  const u = {
+    id, team, cls: loadout.cls, name, isPlayer, isHuman: isPlayer, isLoneWolf,
+    x: 0, y: 0, hp: 0, maxHp: 0, armor: 0, maxAp: BASE_AP, ap: 0, move: 0,
     alive: true, overwatch: false, missStreak: 0, kills: 0,
-    weapon: { ...c.weapon, dmg: [...c.weapon.dmg] },
     mods: { scope: 0, barrel: 0, armor: 0 },
-    items: { medkit: 1, frag: START_FRAGS[cls] || 0, smoke: START_SMOKES[cls] || 0 },
-    cooldowns: { aimed: 0, breach: 0, patch: 0, scan: 0 },
+    cooldowns: { aimed: 0, breach: 0, patch: 0, scan: 0, deploy_cover: 0, suppress: 0, run_gun: 0 },
     hunkered: false,
     downed: false, bleed: 0, downedBy: null, downedAt: -1,
+    streakUsed: {}, moved: false, swapped: false,
   };
+  applyLoadout(u, loadout);
+  if (isLoneWolf) {
+    u.maxHp = Math.round(u.maxHp * LONE_WOLF.hpMult);
+    u.hp = u.maxHp;
+    u.armor += LONE_WOLF.armor;
+    u.maxAp += LONE_WOLF.ap;
+  }
+  return u;
 }
 
 function weighted(rng, table) {
@@ -210,10 +311,6 @@ function nearestFree(map, occupied, x0, y0) {
 
 // ---------- queries ----------
 
-export const currentTeamId = (state) => state.order[state.turnPos];
-/** A team is in the match while at least one member is standing (downed members don't count). */
-export const teamAlive = (state, t) => state.teams[t].members.some((id) => standing(state.units[id]));
-export const aliveTeams = (state) => state.teams.filter((t) => teamAlive(state, t.id)).map((t) => t.id);
 /**
  * Is (x,y) inside the safe zone? Pass `r = state.zone.next` to ask about the next
  * ring: on drifting stages that is measured from the next ring's own centre.
@@ -228,33 +325,33 @@ export const insideNextZone = (state, x, y) => dist(x, y, state.zone.nx ?? state
 /** The stage definition for this match. */
 export const stageOf = (state) => STAGES[state.stage] || STAGES.harbor;
 export const zoneDamage = (state) => ZONE.damage + Math.floor(state.round / 5);
-export const roundsUntilShrink = (state) => {
-  return ZONE.shrinkEvery - ((state.round - 1) % ZONE.shrinkEvery);
-};
+export const roundsUntilShrink = (state) => ZONE.shrinkEvery - ((state.round - 1) % ZONE.shrinkEvery);
 
 export function moveOptions(state, u) {
-  const steps = u.move * Math.min(2, u.ap);
+  const steps = moveOf(u) * Math.min(2, u.ap);
   return reachable(state, u, steps);
 }
 
-/** Damage range of a shot, after barrel, ability, flank and armor. */
-function shotDamage(shooter, target, hc, ability) {
-  const bonus = shooter.mods.barrel + (ability === 'aimed' ? AIMED.dmg : 0) + (hc.flank ? FLANK_DMG : 0);
-  const [mn, mx] = shooter.weapon.dmg;
-  return [Math.max(1, mn + bonus - target.armor), Math.max(1, mx + bonus - target.armor)];
-}
+const isLauncher = (u) => hasSpecial(u.weapon, 'explosive');
+/** Can this unit fire its weapon right now (AP or Run & Gun, ammo)? */
+const canFire = (u) => standing(u) && !u.moveOnly && (u.ap >= 1 || u.runGun) && hasAmmo(u);
 
 /**
- * Shot preview against a target, or null if there is no legal shot.
- * { chance, cover, flank, hunkered, notes, graze, dmg:[min,max] }
+ * Shot preview against a target, or null if there is no legal shot (geometry/visibility).
+ * { chance, cover, flank, hunkered, notes, graze, dmg:[min,max], needsReload, burst }
+ * Launchers have no unit shot preview: use launchPreview.
  */
 export function shotPreview(state, shooter, target, { ability } = {}) {
   if (!target || !target.alive || target.team === shooter.team) return null;
+  if (isLauncher(shooter)) return null;
   if (!teamSeesUnit(state, shooter.team, target)) return null;
   if (!inRangeAndLos(state, shooter, target)) return null;
   const hc = hitChance(state, shooter, target, { ability });
-  const graze = hc.hunkered ? 0 : Math.max(0, Math.min(GRAZE_BAND, 100 - hc.chance));
-  return { ...hc, graze, dmg: shotDamage(shooter, target, hc, ability) };
+  const graze = hc.hunkered ? 0 : Math.max(0, Math.min(grazeBand(shooter.weapon), 100 - hc.chance));
+  return {
+    ...hc, graze, dmg: shotDamage(shooter, target, hc, ability),
+    needsReload: !hasAmmo(shooter), burst: hasSpecial(shooter.weapon, 'burst'),
+  };
 }
 
 /** Same shape as shotPreview with the aimed-shot modifiers applied (null if not usable). */
@@ -263,147 +360,47 @@ export function aimedPreview(state, u, target) {
   return shotPreview(state, u, target, { ability: 'aimed' });
 }
 
-const blastTiles = (map, x, y, r) => {
-  const out = [];
-  const R = Math.ceil(r);
-  for (let dy = -R; dy <= R; dy++) {
-    for (let dx = -R; dx <= R; dx++) {
-      if (Math.hypot(dx, dy) <= r && inBounds(map, x + dx, y + dy)) out.push([x + dx, y + dy]);
-    }
-  }
-  return out;
-};
+/** Rocket tile rules: weapon range, line of sight, a tile your squad can see. */
+const launchTileOk = (state, u, x, y) => inBounds(state.map, x, y) && dist(u.x, u.y, x, y) <= weaponRange(u)
+  && teamSeesTile(state, u.team, x, y) && los(state.map, u.x, u.y, x, y);
 
-function grenadeTileOk(state, u, x, y) {
-  return inBounds(state.map, x, y)
-    && dist(u.x, u.y, x, y) <= FRAG.range
-    && teamSeesTile(state, u.team, x, y)
-    && los(state.map, u.x, u.y, x, y);
-}
-
-const canGrenade = (u) => standing(u) && u.ap >= 1 && u.items.frag > 0;
-
-/** Valid grenade target tiles (Set of y*size+x). Empty if the unit can't throw right now. */
-export function grenadeTargets(state, u) {
+/** Launcher: valid tiles (Set) and preview. Preview shape as grenadePreview. */
+export function launchTargets(state, u) {
   const out = new Set();
-  if (!canGrenade(u)) return out;
-  const S = state.map.size;
-  const R = FRAG.range;
+  if (!isLauncher(u) || !canFire(u)) return out;
+  const S = state.map.size, R = Math.ceil(weaponRange(u));
   for (let y = Math.max(0, u.y - R); y <= Math.min(S - 1, u.y + R); y++) {
-    for (let x = Math.max(0, u.x - R); x <= Math.min(S - 1, u.x + R); x++) {
-      if (grenadeTileOk(state, u, x, y)) out.add(y * S + x);
-    }
+    for (let x = Math.max(0, u.x - R); x <= Math.min(S - 1, u.x + R); x++) if (launchTileOk(state, u, x, y)) out.add(y * S + x);
   }
   return out;
 }
+export function launchPreview(state, u, x, y) {
+  const valid = isLauncher(u) && canFire(u) && launchTileOk(state, u, x, y);
+  const res = inBounds(state.map, x, y)
+    ? summarisePlan(state, u, planExplosions(state, u, { kind: 'rocket', x, y, dmg: u.weapon.dmg[0] }))
+    : { units: [], cover: [], barrels: [] };
+  return { valid, x, y, radius: blastRadius('rocket'), ...res };
+}
+
+const grenadeTileOk = (state, u, x, y) => throwTileOk(state, u, x, y, FRAG.range);
+
+/** Valid grenade (frag) target tiles (Set of y*size+x). Empty if the unit can't throw right now. */
+export const grenadeTargets = (state, u) => equipmentTargets(state, u, 'frag');
 
 /**
- * Plan an explosion and everything it sets off, without touching state.
- * first = {kind:'frag'|'breach'|'barrel', x, y}. Returns the steps in order:
- * [{kind, x, y, victims:[unitId], dmg, cover:[{x,y,from,to}], barrel?:true}]
- * Frags and barrels hit everyone within 1.5 and knock cover down a level;
- * breaches only open their own tile and hit enemies of `attacker` within 1.
- * Any barrel within 1.5 of a blast detonates too (each one once), and chains.
- */
-function planExplosions(state, attacker, first) {
-  const { map } = state;
-  const S = map.size;
-  const cover = Uint8Array.from(map.cover);
-  const boomed = new Set();
-  const steps = [];
-  const queue = [first];
-  if (first.kind === 'barrel') boomed.add(first.y * S + first.x);
-  while (queue.length) {
-    const b = queue.shift();
-    const step = { kind: b.kind, x: b.x, y: b.y, victims: [], dmg: 0, cover: [] };
-    const change = (x, y, to) => {
-      const k = y * S + x;
-      if (cover[k] === to) return;
-      step.cover.push({ x, y, from: cover[k], to });
-      cover[k] = to;
-    };
-    if (b.kind === 'breach') {
-      step.dmg = BREACH.dmg;
-      step.victims = state.units.filter((o) => o.alive && o.team !== attacker.team
-        && Math.max(Math.abs(o.x - b.x), Math.abs(o.y - b.y)) <= BREACH.radius).map((o) => o.id);
-      const k0 = b.y * S + b.x;
-      if (map.explosive && map.explosive[k0] && cover[k0] > 0 && !boomed.has(k0)) {
-        boomed.add(k0);
-        queue.push({ kind: 'barrel', x: b.x, y: b.y }); // blowing open a fuel drum
-      }
-      change(b.x, b.y, 0);
-    } else {
-      const r = b.kind === 'barrel' ? BARREL.radius : FRAG.radius;
-      step.dmg = b.kind === 'barrel' ? BARREL.dmg : FRAG.dmg;
-      step.victims = state.units.filter((o) => o.alive && dist(o.x, o.y, b.x, b.y) <= r).map((o) => o.id);
-      if (b.kind === 'barrel') change(b.x, b.y, 0);
-    }
-    const r = b.kind === 'barrel' ? BARREL.radius : FRAG.radius;
-    for (const [tx, ty] of blastTiles(map, b.x, b.y, r)) {
-      const k = ty * S + tx;
-      if (tx === b.x && ty === b.y && b.kind !== 'frag') continue; // handled above
-      if (map.explosive && map.explosive[k] && cover[k] > 0 && !boomed.has(k)) {
-        boomed.add(k);
-        queue.push({ kind: 'barrel', x: tx, y: ty });
-      } else if (b.kind !== 'breach' && cover[k] > 0 && !boomed.has(k)) {
-        change(tx, ty, cover[k] - 1);
-      }
-    }
-    steps.push(step);
-  }
-  return steps;
-}
-
-/** Sum a plan into a preview: visible units only. */
-function summarisePlan(state, u, steps) {
-  const dmg = new Map();
-  for (const st of steps) {
-    for (const id of st.victims) {
-      const o = state.units[id];
-      dmg.set(id, (dmg.get(id) || 0) + Math.max(1, st.dmg - o.armor));
-    }
-  }
-  const units = [];
-  for (const [id, d] of dmg) {
-    const o = state.units[id];
-    if (!teamSeesUnit(state, u.team, o)) continue;
-    units.push({ id, dmg: d, lethal: o.downed || d >= o.hp, ally: o.team === u.team, downed: !!o.downed });
-  }
-  const cover = steps.flatMap((st) => st.cover);
-  const barrels = steps.filter((st) => st.kind === 'barrel').map((st) => ({ x: st.x, y: st.y }));
-  return { units, cover, barrels };
-}
-
-/** Run a planned chain: emits barrel / damage / cover_change events in order. */
-function detonate(state, attacker, first, events) {
-  const S = state.map.size;
-  const source = { frag: 'explosion', breach: 'breach', barrel: 'barrel' };
-  for (const st of planExplosions(state, attacker, first)) {
-    if (st.kind === 'barrel') {
-      events.push({ type: 'barrel', x: st.x, y: st.y });
-      state.map.explosive[st.y * S + st.x] = 0;
-    }
-    const victims = st.victims.map((id) => state.units[id]);
-    const applyCover = () => { for (const c of st.cover) setCover(state, c.x, c.y, c.to, events); };
-    if (st.kind === 'breach') { applyCover(); blastDamage(state, attacker, victims, st.dmg, source[st.kind], events); }
-    else { blastDamage(state, attacker, victims, st.dmg, source[st.kind], events); applyCover(); }
-  }
-}
-
-/**
- * What a grenade at (x,y) would do, barrel chains included. Only lists units the
+ * What a frag at (x,y) would do, barrel chains included. Only lists units the
  * thrower's team can see; dmg is the total across the chain.
  * { valid, x, y, radius, units:[{id, dmg, lethal, ally, downed}], cover:[{x,y,from,to}], barrels:[{x,y}] }
  */
 export function grenadePreview(state, u, x, y) {
-  const valid = canGrenade(u) && grenadeTileOk(state, u, x, y);
+  const valid = canUse(u, 'frag') && grenadeTileOk(state, u, x, y);
   const res = inBounds(state.map, x, y)
     ? summarisePlan(state, u, planExplosions(state, u, { kind: 'frag', x, y }))
     : { units: [], cover: [], barrels: [] };
   return { valid, x, y, radius: FRAG.radius, ...res };
 }
 
-const canShootBarrel = (u) => standing(u) && u.ap >= 1;
+const canShootBarrel = (u) => canFire(u) && !isLauncher(u);
 const barrelShotOk = (state, u, x, y) => Number.isInteger(x) && Number.isInteger(y) && isBarrel(state.map, x, y)
   && dist(u.x, u.y, x, y) <= weaponRange(u) && los(state.map, u.x, u.y, x, y);
 
@@ -428,7 +425,7 @@ export function barrelPreview(state, u, x, y) {
   return { valid, x, y, radius: BARREL.radius, ...res };
 }
 
-const canBreach = (u) => standing(u) && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0;
+const canBreach = (u) => standing(u) && u.cls === 'breacher' && u.ap >= 1 && u.cooldowns.breach <= 0 && !u.moveOnly;
 
 /** Adjacent (8-way) tiles with cover the Breacher can blow open. Empty if not usable now. */
 export function breachTargets(state, u) {
@@ -451,28 +448,14 @@ export function breachPreview(state, u, x, y) {
   return { valid, ...res };
 }
 
-// ---------- 2.0 helpers: smoke, patch, scan, revive ----------
+// ---------- class abilities: smoke, patch, scan, revive, deploy cover, suppress ----------
 
-const chebyshev = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 const hasSquadmates = (state, u) => state.teams[u.team].members.length > 1;
 
-const canSmoke = (u) => standing(u) && u.ap >= 1 && u.items.smoke > 0;
-
 /** Valid smoke target tiles (same reach and LOS rules as a frag). Empty if the unit can't throw. */
-export function smokeTargets(state, u) {
-  const out = new Set();
-  if (!canSmoke(u)) return out;
-  const S = state.map.size;
-  const R = SMOKE.range;
-  for (let y = Math.max(0, u.y - R); y <= Math.min(S - 1, u.y + R); y++) {
-    for (let x = Math.max(0, u.x - R); x <= Math.min(S - 1, u.x + R); x++) {
-      if (grenadeTileOk(state, u, x, y)) out.add(y * S + x);
-    }
-  }
-  return out;
-}
+export const smokeTargets = (state, u) => equipmentTargets(state, u, 'smoke');
 
-const canPatch = (u) => standing(u) && u.cls === 'medic' && u.ap >= 1 && u.cooldowns.patch <= 0;
+const canPatch = (u) => standing(u) && u.cls === 'medic' && u.ap >= 1 && u.cooldowns.patch <= 0 && !u.moveOnly;
 const patchable = (u, t) => t.alive && t.team === u.team && chebyshev(u, t) <= 1
   && (t.downed || t.hp < t.maxHp);
 
@@ -484,7 +467,7 @@ export function patchTargets(state, u) {
   return out;
 }
 
-const canRevive = (u) => standing(u) && u.ap >= 1;
+const canRevive = (u) => standing(u) && u.ap >= 1 && !u.moveOnly;
 const revivable = (u, t) => t.alive && t.downed && t.team === u.team && t.id !== u.id && chebyshev(u, t) <= 1;
 
 /** Tiles of adjacent downed squadmates this unit can revive. */
@@ -495,7 +478,7 @@ export function reviveTargets(state, u) {
   return out;
 }
 
-const canScan = (u) => standing(u) && u.cls === 'recon' && u.ap >= 1 && u.cooldowns.scan <= 0;
+const canScan = (u) => standing(u) && u.cls === 'recon' && u.ap >= 1 && u.cooldowns.scan <= 0 && !u.moveOnly;
 const scanTileOk = (state, u, x, y) => Number.isInteger(x) && Number.isInteger(y)
   && inBounds(state.map, x, y) && dist(u.x, u.y, x, y) <= SCAN.range;
 
@@ -513,19 +496,59 @@ export function scanPreview(state, u, x, y) {
   return { valid, x, y, radius: SCAN.radius, units };
 }
 
-/** Units patch / revive / smoke would affect. Squadmates: always known. */
+/** Units a smoke cloud at (x,y) would cover. Squadmates: always known. */
 export function smokePreview(state, u, x, y) {
-  const valid = canSmoke(u) && grenadeTileOk(state, u, x, y);
+  const valid = canUse(u, 'smoke') && grenadeTileOk(state, u, x, y);
   const units = state.units.filter((o) => o.alive && dist(o.x, o.y, x, y) <= SMOKE.radius
     && teamSeesUnit(state, u.team, o)).map((o) => ({ id: o.id, ally: o.team === u.team }));
   return { valid, x, y, radius: SMOKE.radius, units };
 }
 
+const canDeploy = (u) => standing(u) && u.cls === 'engineer' && u.ap >= 1 && u.cooldowns.deploy_cover <= 0 && !u.moveOnly;
+const deployTileOk = (state, u, x, y) => Number.isInteger(x) && Number.isInteger(y) && inBounds(state.map, x, y)
+  && chebyshev(u, { x, y }) === 1 && state.map.cover[y * state.map.size + x] === 0
+  && !state.units.some((o) => o.alive && o.x === x && o.y === y)
+  && !state.crates.some((c) => !c.taken && c.x === x && c.y === y)
+  && !state.claymores.some((c) => c.x === x && c.y === y)
+  && !state.sentries.some((c) => c.x === x && c.y === y)
+  && !(state.blockers || []).includes(y * state.map.size + x);
+
+/** Engineer: adjacent open tiles that can take a barricade (Set). */
+export function deployCoverTargets(state, u) {
+  const out = new Set();
+  if (!canDeploy(u)) return out;
+  for (const [dx, dy] of DIRS8) if (deployTileOk(state, u, u.x + dx, u.y + dy)) out.add((u.y + dy) * state.map.size + u.x + dx);
+  return out;
+}
+
+const canSuppress = (u) => standing(u) && u.cls === 'gunner' && u.ap >= 1 && u.cooldowns.suppress <= 0
+  && !u.moveOnly && hasAmmo(u, SUPPRESS.ammo) && !isLauncher(u);
+/** Gunner: suppress preview against a target, or null. { aim: -25, target } */
+export function suppressPreview(state, u, t) {
+  if (!canSuppress(u) || !t || !t.alive || t.downed || t.team === u.team) return null;
+  if (!teamSeesUnit(state, u.team, t) || !inRangeAndLos(state, u, t)) return null;
+  return { target: t.id, aim: -SUPPRESS.aim, ammo: SUPPRESS.ammo };
+}
+
+/** Weapon panel data: { active, slot, weapon, ammo, mag, spare, canReload, canSwap, other } */
+export function weaponInfo(u) {
+  const other = u.weapons ? u.weapons[1 - (u.slot || 0)] : null;
+  const w = u.weapon;
+  const canReload = standing(u) && !isInfinite(w) && !hasSpecial(w, 'explosive') && (u.ammo ?? 0) < w.mag
+    && (w.spare ?? 0) > 0 && (u.ap >= 1 || (w.freeReload && !u.freeReloaded));
+  return {
+    slot: u.slot || 0, weapon: w, ammo: isInfinite(w) ? Infinity : u.ammo, mag: w.mag, spare: w.spare ?? 0,
+    infinite: isInfinite(w), canReload, canSwap: standing(u) && !!other && !u.swapped, other,
+    empty: !hasAmmo(u),
+  };
+}
+
 /**
  * Ability buttons for a unit. Pass state as well to also check for targets
  * (e.g. "No cover adjacent"); without it only AP / charges / cooldowns are checked.
- * Keys: grenade, smoke, aimed (marksman), breach (breacher), patch (medic),
- * scan (recon), revive (team modes), hunker.
+ * Keys: the carried lethal / tactical (grenade, semtex, claymore, knife, smoke, flashbang,
+ * stim, decoy), the class ability (aimed, breach, patch, scan, deploy_cover, suppress, run_gun),
+ * revive (team modes), reload, swap, hunker.
  */
 export function abilityInfo(u, state) {
   const out = [];
@@ -534,22 +557,20 @@ export function abilityInfo(u, state) {
     if (!ready && reason) e.reason = reason;
     out.push(e);
   };
-  const apReason = !u.alive ? 'Down' : u.downed ? 'Downed' : u.ap < 1 ? 'No AP' : null;
+  const apReason = !u.alive ? 'Down' : u.downed ? 'Downed' : u.ap < 1 ? 'No AP' : u.moveOnly ? 'Move only' : null;
   const cdReason = (cd) => (cd > 0 ? `Cooldown ${cd}` : apReason);
-  {
-    let reason = apReason || (u.items.frag < 1 ? 'No grenades' : null);
-    if (!reason && state && grenadeTargets(state, u).size === 0) reason = 'No target';
-    entry('grenade', !reason, reason, { charges: u.items.frag });
-  }
-  {
-    const n = u.items.smoke || 0;
-    let reason = apReason || (n < 1 ? 'No smoke' : null);
-    if (!reason && state && smokeTargets(state, u).size === 0) reason = 'No target';
-    entry('smoke', !reason, reason, { charges: n });
+  for (const key of Object.keys(EQUIPMENT)) {
+    const n = (u.items && u.items[key]) || 0;
+    const carried = key === u.lethal || key === u.tactical || (!u.lethal && (key === 'frag' || key === 'smoke'));
+    if (!carried && n < 1) continue;
+    const action = EQUIPMENT[key].action;
+    let reason = apReason || (n < 1 ? (key === 'frag' ? 'No grenades' : key === 'smoke' ? 'No smoke' : 'None left') : null);
+    if (!reason && state && key !== 'stim' && equipmentTargets(state, u, key).size === 0) reason = 'No target';
+    entry(action, !reason, reason, { charges: n, item: key, slot: EQUIPMENT[key].slot, ...(ABILITY_TEXT[action] ? {} : { name: EQUIPMENT[key].name, desc: EQUIPMENT[key].desc }) });
   }
   if (u.cls === 'marksman') {
     const cd = u.cooldowns.aimed;
-    let reason = cdReason(cd);
+    let reason = cdReason(cd) || (!hasAmmo(u) ? 'Reload' : null);
     if (!reason && state && !state.units.some((t) => aimedPreview(state, u, t))) reason = 'No target';
     entry('aimed', !reason, reason, { cooldown: cd });
   }
@@ -569,287 +590,51 @@ export function abilityInfo(u, state) {
     const cd = u.cooldowns.scan;
     entry('scan', !cdReason(cd), cdReason(cd), { cooldown: cd });
   }
+  if (u.cls === 'engineer') {
+    const cd = u.cooldowns.deploy_cover;
+    let reason = cdReason(cd);
+    if (!reason && state && deployCoverTargets(state, u).size === 0) reason = 'No open tile adjacent';
+    entry('deploy_cover', !reason, reason, { cooldown: cd });
+  }
+  if (u.cls === 'gunner') {
+    const cd = u.cooldowns.suppress;
+    let reason = cdReason(cd) || (!hasAmmo(u, SUPPRESS.ammo) ? 'Needs 3 ammo' : null);
+    if (!reason && state && !state.units.some((t) => suppressPreview(state, u, t))) reason = 'No target';
+    entry('suppress', !reason, reason, { cooldown: cd });
+  }
+  if (u.cls === 'assault') {
+    const cd = u.cooldowns.run_gun;
+    entry('run_gun', cd <= 0, cd > 0 ? `Cooldown ${cd}` : null, { cooldown: cd, passive: true, active: !!u.runGun });
+  }
   if (!state || hasSquadmates(state, u)) {
     let reason = apReason;
     if (!reason && state && reviveTargets(state, u).size === 0) reason = 'No downed squadmate adjacent';
     if (!reason && !state) reason = 'No downed squadmate adjacent';
     entry('revive', !reason, reason, {});
   }
+  {
+    const wi = weaponInfo(u);
+    let reason = !standing(u) ? apReason : wi.infinite ? 'Never needs it' : hasSpecial(u.weapon, 'explosive') ? 'No reload'
+      : (u.ammo ?? 0) >= u.weapon.mag ? 'Full' : (u.weapon.spare ?? 0) <= 0 ? 'No spare ammo' : !wi.canReload ? 'No AP' : null;
+    entry('reload', !reason, reason, { ammo: u.ammo, mag: u.weapon.mag, spare: u.weapon.spare ?? 0, free: !!u.weapon.freeReload });
+    const sreason = !standing(u) ? apReason : !wi.other ? 'No secondary' : u.swapped ? 'Once per turn' : null;
+    entry('swap', !sreason, sreason, {});
+  }
   entry('hunker', !apReason, apReason, {});
+  // 5.0 boats
+  if (state && state.vehicles && state.vehicles.length) {
+    const v = vehicleOf(state, u);
+    if (v && driverOf(state, v) === u) {
+      const reason = apReason || (v.fuel < 1 ? 'No fuel' : boatMoveTargets(state, u).size === 0 ? 'No water to sail' : null);
+      entry('boat_move', !reason, reason, { vehicle: v.id, fuel: v.fuel, hp: v.hp });
+    }
+    if (!v && boardTargets(state, u).size) entry('board', !apReason, apReason, {});
+    if (u.cls === 'engineer') {
+      const reason = apReason || (repairTargets(state, u).size === 0 ? 'No damaged boat adjacent' : null);
+      entry('repair', !reason, reason, {});
+    }
+  }
   return out;
-}
-
-// ---------- turn flow ----------
-
-function startTeamTurn(state) {
-  const t = currentTeamId(state);
-  const events = [];
-  state.turnSerial++;
-  // This team's scans and smoke clouds run out as its turn begins.
-  if (state.reveals.some((r) => r.team === t)) {
-    state.reveals = state.reveals.filter((r) => r.team !== t);
-    events.push({ type: 'reveal_end', team: t });
-  }
-  clearSmokes(state, events, (c) => c.expiresTeam === t && c.expiresRound <= state.round);
-  // Night: muzzle flares fade as the shooter's squad starts its next turn.
-  for (const f of state.flares.filter((f) => f.team === t)) events.push({ type: 'flare_end', id: f.id });
-  state.flares = state.flares.filter((f) => f.team !== t);
-  for (const id of state.teams[t].members) {
-    const u = state.units[id];
-    if (!u.alive) continue;
-    u.overwatch = false;
-    u.hunkered = false;
-    u.ap = u.downed ? 0 : u.maxAp;
-    for (const k of Object.keys(u.cooldowns)) if (u.cooldowns[k] > 0) u.cooldowns[k]--;
-  }
-  events.push({ type: 'turn_start', team: t, round: state.round });
-  return events;
-}
-
-function clearSmokes(state, events, pred) {
-  if (!state.smokes.some(pred)) return;
-  state.smokes = state.smokes.filter((c) => {
-    if (!pred(c)) return true;
-    events.push({ type: 'smoke_clear', smokeId: c.id });
-    return false;
-  });
-}
-
-export function endTeamTurn(state) {
-  if (state.winner !== null) return [];
-  const events = [];
-  const t = currentTeamId(state);
-  const members = state.teams[t].members.map((id) => state.units[id]);
-  // Downed squadmates bleed out at the end of their own team's turn.
-  for (const u of members) {
-    if (!u.alive || !u.downed) continue;
-    if (u.downedAt === state.turnSerial) continue; // went down this very turn: the clock starts next turn
-    u.bleed--;
-    if (u.bleed <= 0) {
-      events.push({ type: 'bleed_out', id: u.id });
-      kill(state, u, u.downedBy !== null ? state.units[u.downedBy] : null, events);
-      if (state.winner !== null) return events;
-    }
-  }
-  // The tide hurts anyone caught outside at the end of their turn (and finishes the downed).
-  for (const u of members) {
-    if (!u.alive) continue;
-    u.ap = 0;
-    if (!insideZone(state, u.x, u.y)) {
-      const dmg = zoneDamage(state);
-      u.hp -= dmg;
-      const ev = { type: 'zone_damage', id: u.id, dmg, downed: false };
-      events.push(ev);
-      if (u.hp <= 0) ev.downed = dropUnit(state, u, null, events) === 'downed';
-      if (state.winner !== null) return events;
-    }
-  }
-
-  // Advance to the next living team.
-  let pos = state.turnPos + 1;
-  while (pos < state.order.length && !teamAlive(state, state.order[pos])) pos++;
-  if (pos >= state.order.length) {
-    state.round++;
-    state.order = state.order.filter((id) => teamAlive(state, id));
-    state.order.push(state.order.shift()); // rotate who goes first each round
-    pos = 0;
-    events.push({ type: 'round_start', round: state.round });
-    // Smoke from a squad that has since been wiped never gets its expiry turn.
-    clearSmokes(state, events, (c) => c.expiresRound < state.round);
-    if ((state.round - 1) % ZONE.shrinkEvery === 0) {
-      // Step through the planned schedule: down to the final ring, hold it once, then flood.
-      const z = state.zone;
-      const plan = state.zonePlan;
-      z.stage = Math.min(plan.length - 1, z.stage + 1);
-      const cur = plan[z.stage], nxt = plan[Math.min(plan.length - 1, z.stage + 1)];
-      z.r = cur.r; z.x = cur.x; z.y = cur.y;
-      z.next = nxt.r; z.nx = nxt.x; z.ny = nxt.y;
-      events.push({ type: 'zone_shrink', r: z.r, next: z.next, x: z.x, y: z.y, nx: z.nx, ny: z.ny });
-    }
-    if (SUPPLY_DROP_ROUNDS.includes(state.round)) supplyDrop(state, events);
-  }
-  state.turnPos = pos;
-  events.push(...startTeamTurn(state));
-  return events;
-}
-
-/** A cache lands on a random free open tile inside the next safe zone. */
-function supplyDrop(state, events) {
-  const { map, zone } = state;
-  const S = map.size;
-  const busy = new Set();
-  for (const o of state.units) if (o.alive) busy.add(o.y * S + o.x);
-  for (const c of state.crates) if (!c.taken) busy.add(c.y * S + c.x);
-  let spots = [];
-  const rings = [[zone.next, zone.nx ?? zone.x, zone.ny ?? zone.y], [zone.r, zone.x, zone.y], [Infinity, zone.x, zone.y]];
-  for (const [r, cx, cy] of rings) {
-    spots = [];
-    for (let k = 0; k < S * S; k++) {
-      if (map.cover[k] || busy.has(k)) continue;
-      if (dist(k % S, (k / S) | 0, cx, cy) <= r) spots.push(k);
-    }
-    if (spots.length) break;
-  }
-  if (!spots.length) return;
-  const k = spots[Math.floor(roll(state.seed, state.rollCounter++) * spots.length)];
-  const crate = { id: state.crates.length, x: k % S, y: (k / S) | 0, type: 'cache', taken: false, dropped: true };
-  state.crates.push(crate);
-  events.push({ type: 'supply_drop', crate: { ...crate } });
-}
-
-/**
- * A unit has hit 0 HP. Downed if a squadmate is still standing (team modes),
- * otherwise dead; a downed unit hit again dies. Returns 'downed' | 'dead'.
- */
-function dropUnit(state, u, by, events) {
-  if (!u.alive) return 'dead';
-  const mateUp = !u.downed && state.teams[u.team].members.some((id) => id !== u.id && standing(state.units[id]));
-  if (mateUp) {
-    u.hp = 0;
-    u.downed = true;
-    u.bleed = BLEED_TURNS;
-    u.downedBy = by ? by.id : null;
-    u.downedAt = state.turnSerial;
-    u.ap = 0;
-    u.overwatch = false;
-    u.hunkered = false;
-    events.push({ type: 'downed', id: u.id, by: by ? by.id : null });
-    return 'downed';
-  }
-  kill(state, u, by, events);
-  return 'dead';
-}
-
-function markDead(state, u, killer, events) {
-  u.hp = 0;
-  u.alive = false;
-  u.downed = false;
-  u.bleed = 0;
-  u.ap = 0;
-  u.overwatch = false;
-  u.hunkered = false;
-  if (killer && killer.team !== u.team) killer.kills++;
-  events.push({ type: 'death', id: u.id, by: killer ? killer.id : null });
-  if (state.flares.some((f) => f.id === u.id)) {
-    state.flares = state.flares.filter((f) => f.id !== u.id);
-    events.push({ type: 'flare_end', id: u.id });
-  }
-  // Leftover medkits (or failing that, grenades / smoke) drop as a crate.
-  const drop = u.items.medkit > 0 ? 'medkit' : u.items.frag > 0 ? 'frag' : u.items.smoke > 0 ? 'smoke' : null;
-  if (drop && !state.crates.some((c) => !c.taken && c.x === u.x && c.y === u.y)) {
-    const crate = { id: state.crates.length, x: u.x, y: u.y, type: drop, taken: false, dropped: true };
-    state.crates.push(crate);
-    events.push({ type: 'crate_drop', crate: { ...crate } });
-  }
-}
-
-function kill(state, u, killer, events) {
-  if (!u.alive) return;
-  markDead(state, u, killer, events);
-  if (!teamAlive(state, u.team) && !state.eliminated.includes(u.team)) {
-    // Squad wipe: nobody left to revive the downed.
-    for (const id of state.teams[u.team].members) {
-      const m = state.units[id];
-      if (m.alive) markDead(state, m, m.downedBy !== null ? state.units[m.downedBy] : killer, events);
-    }
-    state.eliminated.push(u.team);
-    if (state.reveals.some((r) => r.team === u.team)) {
-      state.reveals = state.reveals.filter((r) => r.team !== u.team);
-      events.push({ type: 'reveal_end', team: u.team });
-    }
-    events.push({ type: 'team_out', team: u.team, place: state.teams.length - state.eliminated.length + 1 });
-  }
-  const alive = aliveTeams(state);
-  if (alive.length <= 1 && state.winner === null) {
-    // If the last squads fall together, the last one eliminated takes the win.
-    state.winner = alive.length ? alive[0] : state.eliminated[state.eliminated.length - 1];
-    events.push({ type: 'game_over', winner: state.winner });
-  }
-}
-
-function resolveShot(state, s, t, { reaction = false, ability } = {}) {
-  const events = [];
-  const hc = hitChance(state, s, t, { reaction, ability });
-  const { chance, cover, flank } = hc;
-  const r = roll(state.seed, state.rollCounter++) * 100;
-  let result = 'miss';
-  if (r < chance) result = 'hit';
-  else if (!hc.hunkered && r < chance + GRAZE_BAND) result = 'graze';
-  let dmg = 0;
-  if (result !== 'miss') {
-    const [mn, mx] = s.weapon.dmg;
-    const bonus = s.mods.barrel + (ability === 'aimed' ? AIMED.dmg : 0) + (flank ? FLANK_DMG : 0);
-    let base = mn + Math.floor(roll(state.seed, state.rollCounter++) * (mx - mn + 1)) + bonus;
-    if (result === 'graze') base = Math.ceil(base / 2);
-    dmg = Math.max(1, base - t.armor);
-    t.hp -= dmg;
-  }
-  s.missStreak = result === 'hit' ? 0 : Math.min(MISS_STREAK_CAP, s.missStreak + 1);
-  const ev = { type: 'shot', from: s.id, to: t.id, result, dmg, chance, reaction, ability, cover, flank, downed: false };
-  events.push(ev);
-  flare(state, s, events);
-  if (result !== 'miss' && (t.hp <= 0 || t.downed)) ev.downed = dropUnit(state, t, s, events) === 'downed';
-  return events;
-}
-
-/** Night stages: firing lights the shooter up for every squad until its team's next turn. */
-function flare(state, u, events) {
-  if (!stageOf(state).night || !u.alive) return;
-  if (state.flares.some((f) => f.id === u.id)) return;
-  state.flares.push({ id: u.id, team: u.team });
-  events.push({ type: 'flare', id: u.id });
-}
-
-/** Explosive damage (ignores cover). Emits damage (+downed/death) events. Stops once the match is decided. */
-function blastDamage(state, attacker, victims, base, source, events) {
-  // Enemies first, so a blast that also catches the thrower's squad settles the match in the thrower's favour.
-  const order = [...victims].sort((a, b) => (a.team === attacker.team) - (b.team === attacker.team));
-  for (const o of order) {
-    if (!o.alive || state.winner !== null) continue;
-    const dmg = Math.max(1, base - o.armor);
-    o.hp -= dmg;
-    const ev = { type: 'damage', id: o.id, dmg, source, by: attacker.id, downed: false };
-    events.push(ev);
-    if (o.hp <= 0 || o.downed) ev.downed = dropUnit(state, o, attacker, events) === 'downed';
-  }
-}
-
-function setCover(state, x, y, to, events) {
-  const S = state.map.size;
-  const from = state.map.cover[y * S + x];
-  if (from === to) return;
-  state.map.cover[y * S + x] = to;
-  events.push({ type: 'cover_change', x, y, from, to });
-}
-
-function pickupCrate(state, u, events) {
-  const crate = state.crates.find((c) => !c.taken && c.x === u.x && c.y === u.y);
-  if (!crate) return;
-  crate.taken = true;
-  let type = crate.type;
-  if (type === 'cache') {
-    if (u.mods.scope < MOD_CAP) u.mods.scope++;
-    if (u.mods.barrel < MOD_CAP) u.mods.barrel++;
-    if (u.items.frag < FRAG_CAP) u.items.frag++;
-  } else {
-    if ((type === 'scope' || type === 'barrel' || type === 'armor') && u.mods[type] >= MOD_CAP) type = 'medkit';
-    if (type === 'frag' && u.items.frag >= FRAG_CAP) type = 'medkit';
-    if (type === 'smoke' && u.items.smoke >= SMOKE_CAP) type = 'medkit';
-    if (type === 'medkit') u.items.medkit++;
-    else if (type === 'frag') u.items.frag++;
-    else if (type === 'smoke') u.items.smoke++;
-    else if (type === 'armor') { u.mods.armor++; u.armor++; }
-    else u.mods[type]++;
-  }
-  events.push({ type: 'crate', id: u.id, crate: crate.id, item: type });
-}
-
-function reviveUnit(t, hp) {
-  t.downed = false;
-  t.bleed = 0;
-  t.downedBy = null;
-  t.hp = Math.min(t.maxHp, hp);
-  t.ap = 0; // back up, but acts next turn
 }
 
 // ---------- actions ----------
@@ -857,58 +642,186 @@ function reviveUnit(t, hp) {
 const fail = (error) => ({ ok: false, error, events: [] });
 const intXY = (a) => Number.isInteger(a.x) && Number.isInteger(a.y);
 
+/** Overwatch, suppression, claymores and sentries react to one step of a move. */
+function stepReactions(state, u, events, first) {
+  if (!u.silentMove) {
+    for (const e of state.units) {
+      if (!standing(e) || !e.overwatch || e.team === u.team) continue;
+      if (!teamSeesUnit(state, e.team, u) || !inRangeAndLos(state, e, u) || !hasAmmo(e) || hasSpecial(e.weapon, 'explosive')) continue;
+      e.overwatch = false;
+      spendAmmo(e);
+      events.push({ type: 'overwatch_trigger', id: e.id, target: u.id });
+      events.push(...resolveShot(state, e, u, { reaction: true }));
+      if (!standing(u) || state.winner !== null) return false;
+    }
+  }
+  if (first && u.suppressed && !u.suppressed.fired) {
+    const g = state.units[u.suppressed.by];
+    u.suppressed.fired = true;
+    if (g && standing(g) && hasAmmo(g) && teamSeesUnit(state, g.team, u) && inRangeAndLos(state, g, u)) {
+      spendAmmo(g);
+      events.push({ type: 'suppress_trigger', id: g.id, target: u.id });
+      events.push(...resolveShot(state, g, u, { reaction: true }));
+      if (!standing(u) || state.winner !== null) return false;
+    }
+  }
+  claymoreReact(state, u, events);
+  if (!standing(u) || state.winner !== null) return false;
+  if (!u.silentMove) sentryReact(state, u, events);
+  return standing(u) && state.winner === null;
+}
+
+/**
+ * Perform an action for a unit. Returns { ok, error?, events }.
+ * The unit's squad must be active (isTeamActive).
+ */
 export function act(state, unitId, action) {
   const u = state.units[unitId];
   if (state.winner !== null) return fail('Game over');
   if (!u || !u.alive) return fail('Unit is down');
   if (u.downed) return fail('Unit is downed');
-  if (u.team !== currentTeamId(state)) return fail('Not your turn');
+  if (!isTeamActive(state, u.team)) return fail('Not your turn');
   if (!action || typeof action.type !== 'string') return fail('Unknown action');
-  const events = [];
+  if (u.moveOnly && !['move', 'hold', 'swap', 'reload', 'streak'].includes(action.type)) return fail('Move only');
+  const r = dispatch(state, u, action);
+  if (r.ok) settle(state, r.events); // a wiped last active squad moves the match on
+  return r;
+}
 
+function dispatch(state, u, action) {
+  const events = [];
+  if (ACTION_ITEM[action.type]) {
+    const r = actEquipment(state, u, action);
+    return r.error ? fail(r.error) : { ok: true, events: r.events };
+  }
+  if (ACTIONS[action.type]) {
+    const r = ACTIONS[action.type](state, u, action) || {};
+    return r.error ? fail(r.error) : { ok: true, events: r.events || [] };
+  }
   switch (action.type) {
     case 'move': {
       if (u.ap < 1) return fail('No AP');
       if (!intXY(action)) return fail('Unreachable');
+      // Moving onto an adjacent boat boards it.
+      const boat = u.vehicle == null ? vehicleAt(state, action.x, action.y) : null;
+      if (boat) {
+        const err = boardError(state, u, boat);
+        if (err) return fail(err);
+        u.ap--;
+        u.moved = true;
+        if (u.moveOnly) { u.moveOnly = false; u.ap = 0; }
+        embark(state, u, boat, events);
+        return { ok: true, events };
+      }
       const S = state.map.size;
       const reach = moveOptions(state, u);
       const key = action.y * S + action.x;
       const node = reach.get(key);
       if (!node || node.d === 0) return fail('Unreachable');
-      const cost = node.d <= u.move ? 1 : 2;
+      const cost = node.d <= moveOf(u) ? 1 : 2;
       if (cost > u.ap) return fail('Not enough AP');
       u.ap -= cost;
+      u.moved = true;
+      if (u.moveOnly) { u.moveOnly = false; u.ap = 0; }
+      if (cost === 2 && u.cls === 'assault' && u.cooldowns.run_gun <= 0) {
+        u.runGun = true;
+        events.push({ type: 'run_gun_ready', id: u.id });
+      }
+      if (u.vehicle != null) disembark(state, u, events); // stepping off a boat
       const path = pathTo(reach, S, key);
       let leg = [path[0]];
-      outer: for (const [px, py] of path.slice(1)) {
+      let first = true;
+      for (const [px, py] of path.slice(1)) {
         u.x = px; u.y = py;
         leg.push([px, py]);
-        for (const e of state.units) {
-          if (!standing(e) || !e.overwatch || e.team === u.team) continue;
-          if (!teamSeesUnit(state, e.team, u) || !inRangeAndLos(state, e, u)) continue;
+        const probe = [];
+        const ok = stepReactions(state, u, probe, first);
+        first = false;
+        if (probe.length) {
           events.push({ type: 'move', id: u.id, path: leg });
           leg = [[px, py]];
-          e.overwatch = false;
-          events.push({ type: 'overwatch_trigger', id: e.id, target: u.id });
-          events.push(...resolveShot(state, e, u, { reaction: true }));
-          if (!standing(u) || state.winner !== null) break outer;
+          events.push(...probe);
         }
+        if (!ok) break;
       }
+      u.silentMove = false;
       if (leg.length > 1) events.push({ type: 'move', id: u.id, path: leg });
       if (standing(u)) pickupCrate(state, u, events);
-      else u.ap = 0;
+      else { u.ap = 0; u.runGun = false; }
       return { ok: true, events };
     }
     case 'shoot': {
-      if (u.ap < 1) return fail('No AP');
+      if (!(u.ap >= 1 || u.runGun)) return fail('No AP');
+      if (!hasAmmo(u)) return fail('Reload');
+      if (action.vehicleId !== undefined) {
+        const v = vehicleById(state, action.vehicleId);
+        if (!v || isLauncher(u) || !vehicleShotPreview(state, u, v)) return fail('No shot');
+        useShot(u);
+        spendAmmo(u);
+        shootVehicle(state, u, v, events);
+        return { ok: true, events };
+      }
+      if (action.sentryId !== undefined) {
+        const t = state.sentries.find((s) => s.id === action.sentryId);
+        if (!t || t.team === u.team || dist(u.x, u.y, t.x, t.y) > weaponRange(u) || !los(state.map, u.x, u.y, t.x, t.y)
+          || !teamSeesTile(state, u.team, t.x, t.y) || isLauncher(u)) return fail('No shot');
+        useShot(u);
+        spendAmmo(u);
+        shootSentry(state, u, t, events);
+        flare(state, u, events); noise(state, u, events);
+        return { ok: true, events };
+      }
+      if (isLauncher(u)) {
+        const t = action.targetId !== undefined ? state.units[action.targetId] : null;
+        const x = t ? t.x : action.x, y = t ? t.y : action.y;
+        if (t && !teamSeesUnit(state, u.team, t)) return fail('No shot');
+        if (!Number.isInteger(x) || !Number.isInteger(y) || !launchTileOk(state, u, x, y)) return fail('No shot');
+        useShot(u);
+        spendAmmo(u);
+        events.push({ type: 'rocket', id: u.id, x, y, radius: blastRadius('rocket'), weapon: u.weapon.id });
+        flare(state, u, events); noise(state, u, events);
+        detonate(state, u, { kind: 'rocket', x, y, dmg: u.weapon.dmg[0] }, events);
+        return { ok: true, events };
+      }
       const t = state.units[action.targetId];
       if (!t || !shotPreview(state, u, t)) return fail('No shot');
-      u.ap = 0; // firing ends your turn, XCOM-style
+      useShot(u);
+      spendAmmo(u);
       events.push(...resolveShot(state, u, t));
+      return { ok: true, events };
+    }
+    case 'reload': {
+      const w = u.weapon;
+      if (isInfinite(w)) return fail('Never needs reloading');
+      if (hasSpecial(w, 'explosive')) return fail('No reload');
+      if ((u.ammo ?? 0) >= w.mag) return fail('Full');
+      if ((w.spare ?? 0) <= 0) return fail('No spare ammo');
+      const free = w.freeReload && !u.freeReloaded;
+      if (!free && u.ap < 1) return fail('No AP');
+      if (free) u.freeReloaded = true; else u.ap--;
+      const n = Math.min(w.mag - (u.ammo ?? 0), w.spare);
+      u.ammo = (u.ammo ?? 0) + n;
+      w.spare -= n;
+      w.ammo = u.ammo;
+      events.push({ type: 'reload', id: u.id, weapon: w.id, ammo: u.ammo, spare: w.spare, free });
+      return { ok: true, events };
+    }
+    case 'swap': {
+      if (!u.weapons || !u.weapons[1 - (u.slot || 0)]) return fail('No secondary');
+      if (u.swapped) return fail('Once per turn');
+      u.weapon.ammo = u.ammo;
+      u.weapons[u.slot || 0] = u.weapon;
+      u.slot = 1 - (u.slot || 0);
+      u.weapon = u.weapons[u.slot];
+      u.ammo = u.weapon.ammo ?? u.weapon.mag;
+      u.swapped = true;
+      events.push({ type: 'swap', id: u.id, slot: u.slot, weapon: u.weapon.id, ammo: u.ammo });
       return { ok: true, events };
     }
     case 'overwatch': {
       if (u.ap < 1) return fail('No AP');
+      if (!hasAmmo(u)) return fail('Reload');
+      if (isLauncher(u)) return fail('Not with a launcher');
       u.ap = 0;
       u.overwatch = true;
       events.push({ type: 'overwatch', id: u.id });
@@ -929,38 +842,13 @@ export function act(state, unitId, action) {
       if (u.cls !== 'marksman') return fail('Marksman only');
       if (u.cooldowns.aimed > 0) return fail('Cooldown');
       if (u.ap < 1) return fail('No AP');
+      if (!hasAmmo(u)) return fail('Reload');
       const t = state.units[action.targetId];
       if (!t || !aimedPreview(state, u, t)) return fail('No shot');
-      u.ap = 0;
+      useShot(u);
+      spendAmmo(u);
       u.cooldowns.aimed = AIMED.cooldown;
       events.push(...resolveShot(state, u, t, { ability: 'aimed' }));
-      return { ok: true, events };
-    }
-    case 'grenade': {
-      if (u.ap < 1) return fail('No AP');
-      if (u.items.frag < 1) return fail('No grenades');
-      const { x, y } = action;
-      if (!intXY(action) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
-      u.ap--;
-      u.items.frag--;
-      events.push({ type: 'grenade', id: u.id, x, y, radius: FRAG.radius });
-      detonate(state, u, { kind: 'frag', x, y }, events);
-      if (!standing(u)) u.ap = 0;
-      return { ok: true, events };
-    }
-    case 'smoke': {
-      if (u.ap < 1) return fail('No AP');
-      if ((u.items.smoke || 0) < 1) return fail('No smoke');
-      const { x, y } = action;
-      if (!intXY(action) || !grenadeTileOk(state, u, x, y)) return fail('Bad target');
-      u.ap--;
-      u.items.smoke--;
-      const cloud = {
-        id: state.nextSmokeId++, x, y, radius: SMOKE.radius, team: u.team,
-        expiresRound: state.round + 1, expiresTeam: u.team,
-      };
-      state.smokes.push(cloud);
-      events.push({ type: 'smoke', id: u.id, x, y, radius: SMOKE.radius, smokeId: cloud.id });
       return { ok: true, events };
     }
     case 'breach': {
@@ -977,13 +865,16 @@ export function act(state, unitId, action) {
       return { ok: true, events };
     }
     case 'shoot_barrel': {
-      if (u.ap < 1) return fail('No AP');
+      if (!(u.ap >= 1 || u.runGun)) return fail('No AP');
+      if (!hasAmmo(u)) return fail('Reload');
       const { x, y } = action;
-      if (!barrelShotOk(state, u, x, y)) return fail('No shot');
-      u.ap = 0; // a shot is a shot: ends the turn
+      if (isLauncher(u) || !barrelShotOk(state, u, x, y)) return fail('No shot');
+      useShot(u);
+      spendAmmo(u);
       events.push({ type: 'barrel_shot', id: u.id, x, y });
       flare(state, u, events);
       detonate(state, u, { kind: 'barrel', x, y }, events);
+      noise(state, u, events);
       return { ok: true, events };
     }
     case 'patch': {
@@ -998,6 +889,8 @@ export function act(state, unitId, action) {
         reviveUnit(t, PATCH.reviveHp);
         events.push({ type: 'patch', id: u.id, target: t.id, amount: t.hp });
         events.push({ type: 'revive', id: t.id, by: u.id, hp: t.hp });
+        addPoints(state, u, 'revive', events);
+        quickFixHeal(u, events);
       } else {
         const amount = Math.min(PATCH.heal, t.maxHp - t.hp);
         t.hp += amount;
@@ -1012,6 +905,8 @@ export function act(state, unitId, action) {
       u.ap--;
       reviveUnit(t, REVIVE_HP);
       events.push({ type: 'revive', id: t.id, by: u.id, hp: t.hp });
+      addPoints(state, u, 'revive', events);
+      quickFixHeal(u, events);
       return { ok: true, events };
     }
     case 'scan': {
@@ -1022,10 +917,43 @@ export function act(state, unitId, action) {
       if (!scanTileOk(state, u, x, y)) return fail('Bad target');
       u.ap--;
       u.cooldowns.scan = SCAN.cooldown;
-      const ids = state.units.filter((o) => o.alive && o.team !== u.team && dist(o.x, o.y, x, y) <= SCAN.radius).map((o) => o.id);
-      state.reveals.push({ team: u.team, x, y, radius: SCAN.radius, ids });
+      const ids = state.units.filter((o) => o.alive && o.team !== u.team && dist(o.x, o.y, x, y) <= SCAN.radius
+        && !hiddenFromIntel(state, o)).map((o) => o.id);
+      state.reveals.push({ team: u.team, kind: 'scan', x, y, radius: SCAN.radius, ids });
       events.push({ type: 'scan', id: u.id, x, y, radius: SCAN.radius, revealed: [...ids] });
       return { ok: true, events };
+    }
+    case 'deploy_cover': {
+      if (u.cls !== 'engineer') return fail('Engineer only');
+      if (u.cooldowns.deploy_cover > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      const { x, y } = action;
+      if (!deployTileOk(state, u, x, y)) return fail('Bad target');
+      u.ap--;
+      u.cooldowns.deploy_cover = DEPLOY_COVER.cooldown;
+      events.push({ type: 'deploy_cover', id: u.id, x, y });
+      setCover(state, x, y, 2, events);
+      return { ok: true, events };
+    }
+    case 'suppress': {
+      if (u.cls !== 'gunner') return fail('Gunner only');
+      if (u.cooldowns.suppress > 0) return fail('Cooldown');
+      if (u.ap < 1) return fail('No AP');
+      if (!hasAmmo(u, SUPPRESS.ammo)) return fail('Needs 3 ammo');
+      const t = state.units[action.targetId];
+      if (!suppressPreview(state, u, t)) return fail('No target');
+      u.ap = 0;
+      spendAmmo(u, SUPPRESS.ammo);
+      u.cooldowns.suppress = SUPPRESS.cooldown;
+      t.suppressed = { by: u.id, pending: isTeamActive(state, t.team), fired: false };
+      events.push({ type: 'suppress', id: u.id, target: t.id });
+      flare(state, u, events);
+      noise(state, u, events);
+      return { ok: true, events };
+    }
+    case 'streak': {
+      const r = actStreak(state, u, action);
+      return r.error ? fail(r.error) : { ok: true, events: r.events };
     }
     case 'hunker': {
       if (u.ap < 1) return fail('No AP');
@@ -1037,9 +965,28 @@ export function act(state, unitId, action) {
     }
     case 'hold': {
       u.ap = 0;
+      u.runGun = false;
+      u.moveOnly = false;
       return { ok: true, events };
     }
     default:
       return fail('Unknown action');
   }
 }
+
+/** Firing ends your turn (XCOM rule). A Run & Gun shot spends the passive. */
+function useShot(u) {
+  if (u.ap < 1 && u.runGun) u.cooldowns.run_gun = RUN_GUN.cooldown;
+  u.ap = 0;
+  u.runGun = false;
+}
+
+function quickFixHeal(u, events) {
+  if (!hasPerk(u, 'quickfix') || u.hp >= u.maxHp) return;
+  const amount = Math.min(3, u.maxHp - u.hp);
+  u.hp += amount;
+  events.push({ type: 'heal', id: u.id, amount, source: 'quickfix' });
+}
+
+// Keep a few legacy helpers reachable for UI code that imported them from here.
+export { grazeBand, GRAZE_BAND };

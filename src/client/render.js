@@ -32,7 +32,7 @@ import { CosmeticFx } from './gfx/cosmeticfx.js';
 import { renderPreview as _renderPreview, stopPreview as _stopPreview, stopAllPreviews } from './gfx/preview.js';
 import { rng as makeRng } from './gfx/util.js';
 import { WorldFields } from './gfx/fields.js';
-import { classifyTiles, buildTerrain, tileTop } from './gfx/terrain.js';
+import { classifyTiles, buildTerrain, tileTop, T_SAND, T_CONCRETE, T_DECK, T_SHALLOW } from './gfx/terrain.js';
 import { buildWater } from './gfx/water.js';
 import { PropField, buildDecor } from './gfx/props.js';
 import { SoldierView, updateUnitShared, XRAY_LAYER } from './gfx/units.js';
@@ -41,18 +41,23 @@ import { Overlays, Label } from './gfx/overlays.js';
 import { makeCrate, makeChute, updatePickupShared, buildScenery } from './gfx/pickups.js';
 import { Ambient } from './gfx/ambient.js';
 import { loadPostModules, createComposer } from './gfx/post.js';
+import { SkyBackdrop, LightShafts } from './gfx/sky.js';
+import { Battlefield, BF_EVENTS } from './gfx/battlefield.js';
 import { clamp, damp, compass, easeInOutCubic, easeOutCubic, lerp } from './gfx/util.js';
 
 const VIEW_MIN = 5.5, VIEW_MAX = 34;
 const ELEV = 0.68; // ~39°
 const CAM_D = 60;
 const TEXT = { hit: '#ff6a55', graze: '#ffd9a0', miss: '#c9d2d0', heal: '#7fe9ff', tide: '#6fd6e8', info: '#efe7d4', signal: '#7fe9ff', kill: '#ffffff', down: '#efe7d4' };
-const HOLD = { select: Infinity, shot: 3, kill: 6, blast: 3.2, supply: 4.5, scan: 3.6, revive: 2.5 };
+const HOLD = { select: Infinity, shot: 3, kill: 6, blast: 3.2, supply: 4.5, scan: 3.6, revive: 2.5, setpiece: 9, streak: 4, boat: 6 };
+// 5.0: tactical-equipment throws that may arrive as `grenade {kind}` instead of their own event type
+const BLAST_SRC = new Set(['explosion', 'barrel', 'grenade', 'frag', 'semtex', 'rocket', 'airstrike', 'claymore', 'gunship', 'boat', 'stage', 'collapse']);
+const KIND_EVENT = { semtex: 'semtex', flash: 'flashbang', flashbang: 'flashbang', knife: 'knife', throwing_knife: 'knife', claymore: 'claymore', decoy: 'decoy', stim: 'stim' };
 
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
 const _ndc = new THREE.Vector2();
 const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-const _col = new THREE.Color();
+const _col = new THREE.Color(), _c2 = new THREE.Color();
 const _lv = new THREE.Vector3(), _lm = new THREE.Matrix4(), _li = new THREE.Matrix4();
 
 /** Shop / locker previews (one shared offscreen WebGL context for every card). */
@@ -84,6 +89,20 @@ export class Renderer {
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.025;
     this.scene.add(this.hemi, this.sun, this.sun.target);
+    // 5.0 atmosphere: gradient sky / horizon backdrop behind everything
+    this.skyBg = new SkyBackdrop();
+    this.scene.add(this.skyBg.mesh);
+    this.wet = 0;
+    // flashbang white-out: full-screen quad drawn last (works without post, i.e. on low too)
+    this._white = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+      uniforms: { uA: { value: 0 } },
+      vertexShader: 'void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: 'uniform float uA; void main(){ gl_FragColor = vec4(vec3(1.0, 0.99, 0.96), uA); }',
+      transparent: true, depthTest: false, depthWrite: false, toneMapped: false,
+    }));
+    this._white.frustumCulled = false; this._white.renderOrder = 1000; this._white.visible = false;
+    this._white.material.userData.shared = true; this._white.geometry.userData.shared = true;
+    this._whiteK = 0;
 
     // camera state
     this.target = new THREE.Vector3();
@@ -96,11 +115,12 @@ export class Renderer {
     this.camStack = [];
     this.userCamT = 0;
 
-    this.speed = 1;
+    this._speed = 1;
+    this.playT = 0; // playback clock: real time × spectator speed (camera holds, hit-stop)
     this.cinematic = true;
     this.showcase = false;
     this.timeScale = 1; this.slowGoal = 1; this.hitStop = 0;
-    this.time = 0; this.realTime = 0;
+    this.time = 0; this.realTime = 0; this.worldT = 0; this.pdt = 0;
     this.anims = [];
     this.gen = 0;
     this.world = null;
@@ -184,12 +204,16 @@ export class Renderer {
     }
     this.fx?.setScale(high ? 1 : 0.6);
     this.ambient?.setQuality(high);
+    this.shafts?.setEnabled(high);
+    this.skyBg.mesh.visible = high; // low tier: plain clear colour (no extra full-screen fill)
+    if (this.fields) this.fields.uniforms.uHigh.value = high ? 1 : 0;
     this.sun.shadow.camera.userData.ext = 0; // refit
     if (high) {
       const want = (this._postReq = (this._postReq || 0) + 1);
       loadPostModules().then((M) => {
         if (!M || this.quality !== 'high' || want !== this._postReq) return;
-        if (!this.post) this.post = createComposer(M, this.gl, this.scene, this.camera, { samples: this.mobile ? 2 : 4 });
+        // SSAO only on high quality desktops (phones keep the baked contact AO)
+        if (!this.post) this.post = createComposer(M, this.gl, this.scene, this.camera, { samples: this.mobile ? 2 : 4, ao: !this.mobile && !this.noSSAO });
         this.resize();
       });
     } else {
@@ -222,7 +246,13 @@ export class Renderer {
     if (fps < 48) p.bad++; else p.bad = 0;
     if (p.bad < 2) return;
     p.bad = 0; p.warm = 0;
-    if (this.quality === 'high') {
+    if (this.quality === 'high' && this.post?.ao && !this.noSSAO) {
+      // first step down on desktops: drop SSAO, keep everything else
+      this.noSSAO = true;
+      this.post.composer.removePass(this.post.ao);
+      this.post.ao.dispose?.();
+      this.post.ao = null;
+    } else if (this.quality === 'high') {
       if (this.pixelRatio > 1.25) { p.prCap = 1.25; this.setQuality('high', true); } else this.setQuality('low', true);
     } else if (fps < 36 && p.lowCap > 0.75) {
       p.lowCap = p.lowCap > 1 ? 1 : p.lowCap > 0.85 ? 0.85 : 0.75;
@@ -232,6 +262,18 @@ export class Renderer {
 
   setCinematic(on) { this.cinematic = !!on; }
   get _cine() { return this.cinematic && !this.showcase && !this._fast; }
+
+  /**
+   * Playback speed (spectator 1×/2×/4×, bot pacing). 5.0: scales EVERYTHING on
+   * the gameplay clock — tweens, unit animation, particles, timed effects,
+   * vehicles, camera moves and holds, hit-stop and the delays inside every
+   * event. Ambient world motion (water, clouds, gulls, rain) stays real-time.
+   */
+  get speed() { return this._speed; }
+  set speed(v) { v = Number(v); this._speed = Number.isFinite(v) && v > 0 ? Math.min(16, Math.max(0.1, v)) : 1; }
+  setSpeed(x) { this.speed = x; }
+  /** Resolve after `ms` of playback time (scaled by speed, never hangs; for the match controller's inter-event gaps). */
+  wait(ms) { return this._wait(ms); }
 
   // ---------- setup ----------
 
@@ -256,9 +298,11 @@ export class Renderer {
     this._flash = 0; this._flash2 = -1; this.lightningT = 8;
     const S = (this.S = state.map.size);
     const seed = state.seed || 1;
-    this.look = stageLook(state.stage);
+    // 5.0: Pit duels (tiny arena state) get their own look
+    this.look = stageLook(state.isPit || state.pitDuel || state.stage === 'pit' || (state.map.size <= 12) ? 'pit' : state.stage);
     this.dzone = { ...state.zone };
     this.r0 = state.zone.r;
+    this.dterr = state.map.terrain ? Uint8Array.from(state.map.terrain) : null; // displayed terrain (stage events)
     this.world = new THREE.Group();
     this.scene.add(this.world);
     this.fields = new WorldFields(S);
@@ -284,11 +328,20 @@ export class Renderer {
     this.stageScenery = buildStageScenery(this.look, S, seed, this.fields);
     if (this.stageScenery) this.world.add(this.stageScenery.group);
     this.ambient = new Ambient(this.world, S, seed, this.quality === 'high', this.look);
+    this.fields.setOcclusion(this.props.cover);
+    this._aoVer = this.props.version;
+    this.fields.uniforms.uHigh.value = this.quality === 'high' ? 1 : 0;
+    this.fields.uniforms.uCaustic.value = this.look.caustic ?? 1;
+    this.shafts = new LightShafts(this.world);
+    this.shafts.setEnabled(this.quality === 'high');
+    this.wet = this.look.rain > 0.3 ? 0.8 : 0;
 
     this.fx = new Fx(this.world, this.overlay, { scale: this.quality === 'high' ? 1 : 0.6 });
     this.fx.floodedAt = (x, z) => this._floodedWorld(x, z);
     this.cfx = new CosmeticFx(this.fx, this.world, { flash: (k) => { this._flash = Math.max(this._flash, k); } });
     this.ov = new Overlays(this.world, this.overlay, wx, wz, S);
+    this.overlay.add(this._white);
+    this._whiteK = 0;
 
     // shadow camera covers the whole map
     const sc = this.sun.shadow.camera;
@@ -316,7 +369,7 @@ export class Renderer {
     this.dsmokes = (state.smokes || []).map((c) => ({ ...c }));
     this.dflares = (state.flares || []).map((f) => ({ ...f }));
     this.views = state.units.map((u) => {
-      const v = new SoldierView(u, { color: squadColorHex(u.team, myTeam), skin: this.cos[u.id].skin });
+      const v = new SoldierView(u, { color: squadColorHex(u.team, myTeam), skin: this.cos[u.id].skin, cos: this.cos[u.id] });
       v.root.position.set(this.wx(u.x), this._groundY(u.x, u.y), this.wz(u.y));
       v.root.rotation.y = Math.atan2(this.wx(S / 2) - v.root.position.x, this.wz(S / 2) - v.root.position.z);
       if (u.hunkered) v.hunk = 1;
@@ -339,6 +392,8 @@ export class Renderer {
     this.selTarget = null; this.targets = null; this.reviveIds = null;
     this._vsObj = null;
     this.beacons = new Map();
+    this.bf = new Battlefield(this);
+    this.bf.sync(state);
     this._syncSmokes();
     this._syncFlares();
     this._syncReveals();
@@ -354,6 +409,7 @@ export class Renderer {
   }
 
   _teardown() {
+    this.bf?.dispose(); this.bf = null;
     this.fx?.clear();
     this.cfx?.clear();
     this.scene.remove(this.world);
@@ -376,6 +432,7 @@ export class Renderer {
     this.props?.dispose();
     this.fields?.dispose?.();
     this.ambient = null;
+    this.shafts = null;
     this.kelp = null; this.spill = null; this.stageScenery = null;
     this.beacons = new Map();
     this.world = null;
@@ -383,7 +440,9 @@ export class Renderer {
 
   wx(x) { return x - this.S / 2 + 0.5; }
   wz(y) { return y - this.S / 2 + 0.5; }
-  _groundY(x, y) { return tileTop(this.cls.type[y * this.S + x]); }
+  _groundY(x, y) { return x >= 0 && y >= 0 && x < this.S && y < this.S ? tileTop(this.cls.type[y * this.S + x]) : 0; }
+  /** NET client mirrors park unseen enemies off-map (x = y = -99, hidden: true). */
+  _parked(id) { const u = this.state.units[id], d = this.disp?.[id]; return !!u?.hidden || (!!d && (d.x < 0 || d.y < 0 || d.x >= this.S || d.y >= this.S)); }
   /** Squad colour (#rrggbb) of a team as this player sees it. */
   teamColor(team) { return squadColor(team, this.myTeam); }
   _floodedWorld(px, pz) {
@@ -406,12 +465,14 @@ export class Renderer {
     }
     return g;
   }
+  _makeChute() { return makeChute(); }
   _removeCrate(id) {
     const g = this.crateMeshes.get(id);
     if (!g) return;
     this.world.remove(g); this.crateMeshes.delete(id);
     const i = this.crateList.indexOf(g); if (i >= 0) this.crateList.splice(i, 1);
     if (g.userData.chute) { g.userData.chute.material.dispose(); g.userData.chute = null; }
+    if (g.userData.cp) g.traverse((o) => { if (o.material && !o.material.userData?.shared) o.material.dispose(); if (o.geometry && !o.geometry.userData?.shared) o.geometry.dispose(); });
   }
 
   // ---------- labels ----------
@@ -473,6 +534,7 @@ export class Renderer {
   /** Would my squad see unit `id` right now (displayed state)? */
   _unitSeen(id, vs = this._vs()) {
     const u = this.state.units[id];
+    if (u.team !== this.myTeam && this._parked(id)) return false;
     if (this.spectator || u.team === this.myTeam) return true;
     const d = this.disp[id];
     if (!d.alive) return this.fogMask?.[d.y * this.S + d.x] === 1;
@@ -618,9 +680,9 @@ export class Renderer {
   /** Tide from the displayed zone: current ring at (x,y), next ring at (nx,ny) (drifting on Surge Point). */
   _updateZone(instant) {
     const S = this.S, z = this.dzone || this.state.zone;
-    const T = this.state.map.terrain;
-    // flooded = outside the safe circle, or a shallow-water tile (terrain 2)
-    this.fields.setTide((x, y) => Math.hypot(x - z.x, y - z.y) > z.r || (!!T && T[y * S + x] === 2), instant);
+    const T = this.dterr || this.state.map.terrain;
+    // flooded = outside the safe circle, or a shallow / deep water tile (terrain ≥ 2)
+    this.fields.setTide((x, y) => Math.hypot(x - z.x, y - z.y) > z.r || (!!T && T[y * S + x] >= 2), instant);
     const nx = z.nx ?? z.x, ny = z.ny ?? z.y;
     const warn = new Uint8Array(S * S);
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
@@ -689,6 +751,9 @@ export class Renderer {
     const S = this.S;
     for (let k = 0; k < S * S; k++) if (this.props.cover[k] !== st.map.cover[k]) this.props.setCover(k % S, (k / S) | 0, st.map.cover[k]);
     if (st.map.explosive) for (let k = 0; k < S * S; k++) if (this.props.explosive[k] && !st.map.explosive[k]) this.props.detonate(k % S, (k / S) | 0);
+    // terrain changed by stage events while fast-forwarding
+    if (st.map.terrain && this.dterr) for (let k = 0; k < S * S; k++) if (this.dterr[k] !== st.map.terrain[k]) this.setTileTerrain(k % S, (k / S) | 0, st.map.terrain[k], true);
+    this.bf.sync(st);
     this._syncSmokes();
     this._syncFlares();
     this._syncReveals();
@@ -696,6 +761,35 @@ export class Renderer {
     this.refreshFog(true);
     this.ov.setRevive(this.reviveIds);
   }
+
+  // ---------- 5.0: terrain changes / screen effects ----------
+
+  /**
+   * Displayed terrain change (stage events): to = 0 ground | 1 kelp | 2 shallow
+   * water | 3 deep water (or 'water' / 'deep' / 'ground' / 'rubble'). Retypes
+   * the ground slab, re-floods the tide field, re-seats props on the tile.
+   */
+  setTileTerrain(x, y, to, instant = false) {
+    if (!this.state || x < 0 || y < 0 || x >= this.S || y >= this.S) return;
+    const S = this.S, k = y * S + x;
+    let code = typeof to === 'number' ? to : /deep/.test(to) ? 3 : /water|sea|shallow/.test(to) ? 2 : /kelp/.test(to) ? 1 : 0;
+    if (!this.dterr) this.dterr = new Uint8Array(S * S);
+    this.dterr[k] = code;
+    const type = code >= 2 ? T_SHALLOW : this.look.deck ? T_DECK : this.cls.type[k] === T_SHALLOW ? T_CONCRETE : this.cls.type[k] === T_SAND ? T_SAND : T_CONCRETE;
+    this.terrain.setTile(k, type, code === 3 ? 0.9 : 0);
+    this.props.refreshTile?.(x, y);
+    this._updateZone(instant);
+  }
+
+  /** Collapse animation for a ground slab: t 0..1 sinks + tilts it (setTileTerrain makes it permanent). */
+  dropTile(x, y, t) {
+    if (!this.state || x < 0 || y < 0 || x >= this.S || y >= this.S) return;
+    const k = y * this.S + x;
+    this.terrain.setTile(k, this.cls.type[k], t * t * 1.4, t * 0.5 * (((x + y) & 1) ? 1 : -1));
+  }
+
+  /** Flashbang white-out (k 0..1): full-screen flash that fades over ~1.5 s of playback. */
+  whiteout(k) { this._whiteK = Math.max(this._whiteK, clamp(k, 0, 1)); }
 
   // ---------- camera ----------
 
@@ -712,7 +806,7 @@ export class Renderer {
   /** Push a tagged camera hold; it auto-releases after HOLD[tag] seconds. */
   _camPush(tag) {
     this.camStack.push({
-      tag, until: performance.now() / 1000 + (HOLD[tag] ?? 3) / Math.max(0.5, Math.min(1, this.speed || 1)),
+      tag, until: this.playT + (HOLD[tag] ?? 3),
       goal: this.goal.clone(), view: this.viewGoal, elev: this.elevGoal, follow: this.followId, userT: this.userCamT,
     });
   }
@@ -744,7 +838,7 @@ export class Renderer {
       if (!held) this.slowGoal = 1;
     }
     const s = this.camStack[this.camStack.length - 1];
-    if (s && performance.now() / 1000 > s.until) {
+    if (s && this.playT > s.until) {
       this.camStack.pop(); this._restore(s);
       if (s.tag === 'kill' || s.tag === 'shot') this.slowGoal = 1;
     }
@@ -764,7 +858,7 @@ export class Renderer {
     this._updateCamera(0);
   }
 
-  _updateCamera(dt) {
+  _updateCamera(dt, dtc = dt) {
     if (this.showcase && dt > 0 && this.state) this._showcaseCam(dt);
     else {
       if (this.followId !== null && this.views?.[this.followId]) {
@@ -781,10 +875,10 @@ export class Renderer {
         this.goal.z = clamp(this.goal.z, -lim, lim);
       }
       if (dt > 0) {
-        if (!this.dragging) this.target.lerp(this.goal, damp(this.followId !== null ? 9 : 7, dt));
-        this.view += (this.viewGoal - this.view) * damp(9, dt);
+        if (!this.dragging) this.target.lerp(this.goal, damp(this.followId !== null ? 9 : 7, dtc));
+        this.view += (this.viewGoal - this.view) * damp(9, dtc);
         this.camAngle += (this.camAngleGoal - this.camAngle) * damp(8, dt);
-        this.elev += (this.elevGoal - this.elev) * damp(5, dt);
+        this.elev += (this.elevGoal - this.elev) * damp(5, dtc);
       }
     }
     const v = this.view * this.viewScale;
@@ -989,7 +1083,7 @@ export class Renderer {
   _anim(ms, fn) {
     if (this._hidden || !this.state) { if (fn) fn(1); return Promise.resolve(); }
     return new Promise((resolve) => {
-      this.anims.push({ t: 0, dur: Math.max(0.001, ms / 1000 / Math.max(0.05, this.speed || 1)), fn, resolve });
+      this.anims.push({ t: 0, dur: Math.max(0.001, ms / 1000), fn, resolve });
     });
   }
   _wait(ms) { return this._anim(ms, null); }
@@ -998,15 +1092,21 @@ export class Renderer {
     this.anims = [];
     for (const a of list) { try { if (a.fn) a.fn(1); } catch { /* stale */ } a.resolve(); }
   }
-  get _fast() { return this.speed > 1.6; }
+  /** Cinematic extras (action cams, slow-mo, long kill-fx tails) are skipped at high playback speed. */
+  get _fast() { return this._speed > 2.6; }
 
   _frame(now) {
     const realDt = Math.min(0.05, Math.max(0, (now - this._last) / 1000));
     this._last = now;
     this.realTime += realDt;
-    if (this.hitStop > 0) { this.hitStop -= realDt; this.timeScale = 0.03; } else this.timeScale += (this.slowGoal - this.timeScale) * damp(10, realDt);
-    const dt = realDt * this.timeScale;
+    const sp = this._speed;
+    const pdt = realDt * sp; // playback time
+    this.playT += pdt;
+    if (this.hitStop > 0) { this.hitStop -= pdt; this.timeScale = 0.03; } else this.timeScale += (this.slowGoal - this.timeScale) * damp(10, pdt);
+    const dt = pdt * this.timeScale; // gameplay clock (speed × slow-mo)
     this.time += dt;
+    this.pdt = pdt;
+    this.worldT += realDt * this.timeScale; // ambient world clock: real time, but slows with kill-cam slow-mo
     const list = this.anims;
     for (let i = list.length - 1; i >= 0; i--) {
       const a = list[i];
@@ -1019,7 +1119,7 @@ export class Renderer {
     if (this.state && this.world) {
       this._perfTick(realDt);
       const U = this.fields.uniforms;
-      U.uTime.value = this.time;
+      U.uTime.value = this.worldT;
       this.fields.update(realDt);
       // mood / storm grading
       this.storm += (this.stormGoal - this.storm) * damp(0.8, realDt);
@@ -1031,9 +1131,23 @@ export class Renderer {
       this._applySun();
       this.sun.color.copy(this.mood.sun); this.sun.intensity = this.mood.sunI;
       this.hemi.color.copy(this.mood.sky); this.hemi.groundColor.copy(this.mood.ground); this.hemi.intensity = this.mood.hemiI + flash * 3;
-      this.scene.fog.color.copy(this.mood.fog);
+      // aerial perspective: the far haze warms when the camera looks toward the sun
+      const ya = this.cameraYaw();
+      const shx = this.sunDir.x, shz = this.sunDir.z, shl = Math.hypot(shx, shz) || 1;
+      const sunward = Math.max(0, -(Math.cos(ya) * shx + Math.sin(ya) * shz) / shl);
+      _col.copy(this.mood.sun).multiplyScalar(0.55);
+      this.scene.fog.color.copy(this.mood.fog).lerp(_col, sunward * 0.22 * (1 - this.mood.haze * 0.4));
       this.scene.fog.near = CAM_D - 6 - this.mood.haze * 10; this.scene.fog.far = CAM_D + 60 - this.mood.haze * 30;
       this.scene.background.copy(this.mood.bg);
+      this.skyBg.update(this.mood, 0.5 + 0.5 * (Math.sin(ya) * shx - Math.cos(ya) * shz) / shl, this.look.night ? 1 : 0, this.worldT);
+      U.uSkyTop.value.copy(this.mood.sky).multiplyScalar(1.05);
+      U.uSkyHor.value.copy(this.scene.fog.color).lerp(this.mood.sun, 0.25).multiplyScalar(1.25);
+      // rain soaks the island (fast), drying is slow
+      const rainNow = Math.max(this.look.rain, this.storm - 0.45);
+      const wetGoal = clamp(rainNow * 1.8, 0, 1);
+      this.wet += (wetGoal - this.wet) * Math.min(1, realDt * (wetGoal > this.wet ? 0.25 : 0.04));
+      U.uWet.value = this.wet;
+      if (this.props.version !== this._aoVer) { this._aoVer = this.props.version; this.fields.setOcclusion(this.props.cover); }
       this.gl.toneMappingExposure = this.mood.exposure;
       U.uSunCol.value.copy(this.mood.sun);
       U.uSkyCol.value.copy(this.mood.sky);
@@ -1050,10 +1164,13 @@ export class Renderer {
         g.uStorm.value = this.storm; g.uTime.value = this.realTime % 100; g.uFlash.value = flash * 0.25;
         g.uDesat.value = 0.75 * (1 - clamp(this.timeScale * 1.4, 0, 1));
         g.uTilt.value += ((this.showcase ? 1 : 0) - g.uTilt.value) * damp(3, realDt);
+        const GR = this.look.grade;
+        if (GR) { g.uLift.value.set(...GR.lift); g.uGain.value.set(...GR.gain); g.uSat.value = GR.sat; g.uContrast.value = GR.contrast; }
+        g.uCA.value = Math.min(1, this._whiteK * 1.5 + Math.max(0, this.fx.shake - 0.6) * 0.8);
         this.post.bloom.strength = 0.55 + (this.showcase ? 0.25 : 0) + this.storm * 0.1;
       }
       const rainK = Math.max(this.look.rain, this.storm - 0.45);
-      if (rainK > 0 && !this._fast) this._rain(realDt, rainK);
+      if (rainK > 0) this._rain(realDt, rainK);
       // units
       updateUnitShared(this.time);
       for (let i = 0; i < this.views.length; i++) {
@@ -1061,22 +1178,43 @@ export class Renderer {
         if (v.root.visible) v.update(dt, this.time);
       }
       this.fx.update(dt, null);
-      this.ambient?.update(dt, this.time, this.storm);
-      this.kelp?.update(this.time, this.storm);
-      this.stageScenery?.update(this.time, this.storm);
+      this.bf?.update(dt, this.realTime);
+      if (this._whiteK > 0.002) {
+        this._white.visible = true;
+        this._white.material.uniforms.uA.value = Math.min(1, this._whiteK * 1.2);
+        this._whiteK *= Math.exp(-pdt * 2.2);
+      } else if (this._white.visible) { this._white.visible = false; this._whiteK = 0; }
+      const wdt = realDt * this.timeScale;
+      this.ambient?.update(wdt, this.worldT, this.storm);
+      this.kelp?.update(this.worldT, this.storm);
+      this.stageScenery?.update(this.worldT, this.storm);
+      if (this.shafts && this.quality === 'high') {
+        const L = this.look.shafts || { k: 1 };
+        const k = (L.k ?? 1) * clamp(this.mood.sunI / 2.6, 0.2, 1.2) * (1 - clamp(this.storm * 1.1, 0, 0.92)) * (this.showcase ? 1.25 : 1);
+        _col.copy(this.mood.sun);
+        if (L.col !== undefined) _col.lerp(_c2.set(L.col), 0.5);
+        this.shafts.update(realDt, this.worldT, this.target, this.view * this.viewScale, this.sunDir, _col, k, this.camera.position);
+      }
       this._stepCoverFade(realDt);
-      this._stepDropIn(realDt);
+      this._stepDropIn(pdt);
       this._updateBeacons();
-      updatePickupShared(this.time);
+      updatePickupShared(this.worldT);
       for (let i = 0; i < this.crateList.length; i++) {
         const ud = this.crateList[i].userData;
-        ud.spin.rotation.y += dt * 0.7;
-        ud.spin.position.y = 0.06 + Math.sin(this.time * 2.2 + ud.phase) * 0.04;
+        ud.spin.rotation.y += wdt * 0.7;
+        ud.spin.position.y = 0.06 + Math.sin(this.worldT * 2.2 + ud.phase) * 0.04;
       }
       this._updateOverlays();
       if (this.hoverPx && !this.dragging && !this.showcase) { this._setHover(this._tileAt(this.hoverPx[0], this.hoverPx[1])); }
     }
-    this._updateCamera(realDt);
+    // camera moves follow playback speed (holds already run on playT); user fling stays real-time
+    this._updateCamera(realDt, this.dragging || this.realTime - this.userCamT < 0.6 ? realDt : pdt);
+    // title-screen showcase is a backdrop: draw it at ~30 fps without SSAO (keeps the menu cheap)
+    if (this.showcase) {
+      if (this.realTime - (this._lastDraw || 0) < 1 / 31) return;
+      this._lastDraw = this.realTime;
+    }
+    if (this.post?.ao) this.post.ao.enabled = !this.showcase;
     if (this.state && this.world) this._fitShadow();
     if (this.post) this.post.composer.render(realDt);
     else this.gl.render(this.scene, this.camera);
@@ -1386,7 +1524,7 @@ export class Renderer {
     const st = this.state, u = st.units[id], d = this.disp[id];
     let best = null, bd = 1e9;
     for (const e of st.units) {
-      if (e.team === u.team) continue;
+      if (e.team === u.team || this._parked(e.id)) continue;
       const de = this.disp[e.id];
       if (!de.alive || de.downed) continue;
       const dd = Math.hypot(de.x - d.x, de.y - d.y);
@@ -1445,7 +1583,20 @@ export class Renderer {
     return { x: this.S / 2, y: this.S / 2 };
   }
 
-  _weaponOf(u) { return u.weapon?.name || ({ assault: 'Rifle', marksman: 'Long Rifle', breacher: 'Shotgun', medic: 'SMG', recon: 'Carbine' })[u.cls]; }
+  _weaponOf(u) { return u.weapon?.name || ({ assault: 'Rifle', marksman: 'Long Rifle', breacher: 'Shotgun', medic: 'SMG', recon: 'Carbine', gunner: 'LMG', engineer: 'SMG' })[u.cls]; }
+  /** Weapon category for visuals: ar | smg | lmg | shotgun | dmr | sniper | carbine | pistol | mpistol | launcher. */
+  _weaponCat(u, ev = {}) {
+    const c = ev.cat || (ev.secondary || ev.slot === 'secondary' ? u.secondary?.cat : null) || u.weapon?.cat || u.loadout?.primary?.cat;
+    if (c) return String(c).toLowerCase().replace(/[^a-z]/g, '');
+    const n = String(this._weaponOf(u) || '').toLowerCase();
+    if (/shotgun/.test(n)) return 'shotgun';
+    if (/long|sniper/.test(n)) return 'sniper';
+    if (/smg/.test(n)) return 'smg';
+    if (/lmg/.test(n)) return 'lmg';
+    if (/carbine/.test(n)) return 'carbine';
+    if (/pistol/.test(n)) return 'pistol';
+    return 'ar';
+  }
   /** Weapon family for audio: Audio 1.0 knows rifle / longrifle / shotgun (names also passed through). */
 
   _hp(id, delta) {
@@ -1467,6 +1618,11 @@ export class Renderer {
     const st = this.state;
     const sfx = this.hooks.sfx;
     const g = this.gen;
+    // 5.0 events (engagement, equipment, streaks, vehicles, stage events, the Pit)
+    if (this.bf) {
+      if (BF_EVENTS.has(ev.type)) { try { return await this.bf.play(ev); } catch (e) { console.warn('playEvent', ev.type, e); return; } }
+      if (ev.type === 'grenade' && KIND_EVENT[ev.kind]) { try { return await this.bf.play({ ...ev, type: KIND_EVENT[ev.kind] }); } catch (e) { console.warn('playEvent', ev.type, e); return; } }
+    }
     if (ev.id !== undefined && ev.type !== 'smoke_clear' && typeof ev.id === 'number' && !st.units[ev.id] && ev.type !== 'crate_drop') return;
     switch (ev.type) {
       case 'move': return this._evMove(ev);
@@ -1532,6 +1688,14 @@ export class Renderer {
       }
       case 'overwatch_trigger': {
         const shooter = st.units[ev.id], target = st.units[ev.target];
+        if (!shooter) return;
+        if (!target) {
+          // 5.0: overwatch baited by a decoy at (x, y)
+          this.views[ev.id].setOverwatch(false);
+          this._drawLabel(shooter);
+          if (Number.isFinite(ev.x) && (shooter.team === this.myTeam || this.views[ev.id].root.visible)) { this._face(ev.id, ev.x, ev.y); this.views[ev.id].aimGoal = 1; await this._wait(300); }
+          return;
+        }
         this.views[ev.id].setOverwatch(false);
         this._drawLabel(shooter);
         if (target.team === this.myTeam || shooter.team === this.myTeam || this.views[ev.target].root.visible) {
@@ -1563,6 +1727,7 @@ export class Renderer {
         if (gm && vis) this.fx.pickupBurst(gm.position.x, gm.position.z);
         this._removeCrate(ev.crate);
         this._drawLabel(u);
+        this.views[ev.id]?.syncWeapon?.(u); // new legendary / field attachment shows on the model
         if (u.team === this.myTeam) {
           sfx?.pickup();
           const name = { cache: 'SUPPLY CACHE', frag: '+FRAG', smoke: '+SMOKE', medkit: '+MEDKIT', armor: '+ARMOR', scope: '+SCOPE', barrel: '+BARREL' }[ev.item] || '+' + String(ev.item).toUpperCase();
@@ -1608,6 +1773,7 @@ export class Renderer {
         return;
       }
       case 'turn_start':
+        this.bf?.onTurnStart(ev.team);
         for (const id of st.teams[ev.team].members) {
           const u = st.units[id];
           const d = this.disp[id];
@@ -1623,9 +1789,18 @@ export class Renderer {
           if (d.downed && u.alive && d.bleed !== (u.bleed || 0)) { d.bleed = u.bleed || 0; this.views[u.id].setBleed(d.bleed); this._drawLabel(u); }
         }
         return;
-      case 'game_over':
+      case 'game_over': {
         this.slowGoal = 1;
+        // winners celebrate with their victory emote
+        const wt = ev.winner ?? ev.team ?? st.winner;
+        if (wt !== null && wt !== undefined && st.teams[wt]) {
+          for (const id of st.teams[wt].members) {
+            const v = this.views[id];
+            if (v && this.disp[id].alive && !this.disp[id].downed) v.playEmote?.(this.cos[id]?.emote, { fx: this.fx });
+          }
+        }
         return;
+      }
       default:
         return;
     }
@@ -1637,10 +1812,11 @@ export class Renderer {
     const mine = u.team === this.myTeam;
     const v = this.views[ev.id];
     if (!ev.path || ev.path.length < 2) return;
+    this.bf?.onMove(ev);
     const anyVisible = mine || ev.path.some(([x, y]) => this._seenAt(ev.id, x, y));
     v.setHunker(false);
     v.aimGoal = 0;
-    if (!anyVisible || this.speed > 3) {
+    if (!anyVisible || this._speed > 6) {
       const [ex, ey] = ev.path[ev.path.length - 1];
       const [px, py] = ev.path[ev.path.length - 2];
       this.disp[ev.id].x = ex; this.disp[ev.id].y = ey;
@@ -1713,9 +1889,14 @@ export class Renderer {
       return;
     }
     const weapon = this._weaponOf(s);
-    const shotgun = s.cls === 'breacher' || weapon === 'Shotgun';
-    const marks = s.cls === 'marksman';
-    const smg = s.cls === 'medic';
+    // 5.0 weapon categories (ev.cat / unit weapon def), falling back to the 3.0 class kits
+    const cat = this._weaponCat(s, ev);
+    const shotgun = cat === 'shotgun';
+    const marks = cat === 'sniper' || cat === 'dmr';
+    const smg = cat === 'smg' || cat === 'mpistol';
+    const lmg = cat === 'lmg';
+    const quiet = !!(ev.suppressed || ev.silenced);
+    const legendary = !!(ev.legendary || s.weapon?.legendary);
     vs.root.visible = true;
     vs.setHunker(false);
     this._face(ev.from, dt.x, dt.y);
@@ -1741,8 +1922,8 @@ export class Renderer {
     let ix = B.x, iy = B.y + 0.6 - vt.hunk * 0.15 - vt.down * 0.3, iz = B.z;
     const dirx = ix - mx, dirz = iz - mz, dl = Math.hypot(dirx, dirz) || 1;
     const nx = dirx / dl, nz = dirz / dl;
-    const bursts = smg ? 3 : 1;
-    const col = new THREE.Color(this.teamColor(s.team));
+    const bursts = smg ? 3 : lmg ? 4 : cat === 'ar' && (ev.burst || s.weapon?.special === 'burst') ? 3 : 1;
+    const col = new THREE.Color(legendary ? '#ffc040' : this.teamColor(s.team));
     let missKind = null;
     if (!hitting) {
       const ct = ev.cover > 0 ? this._coverTileBetween(dt.x, dt.y, ds.x, ds.y) : null;
@@ -1759,13 +1940,14 @@ export class Renderer {
     }
     for (let b = 0; b < bursts; b++) {
       if (b > 0) { await this._wait(70); if (g !== this.gen) return; vs.muzzleWorld(_v1); }
-      sfx?.shot(this._far(ds.x, ds.y), weapon);
-      this.fx.muzzle(_v1.x, _v1.y, _v1.z, nx, nz, shotgun ? 1.4 : marks ? 1.2 : smg ? 0.75 : 1);
+      sfx?.shot(this._far(ds.x, ds.y), s.weapon?.id ? s.weapon : weapon, { cat, suppressed: quiet, legendary, burst: 1 });
+      this.fx.muzzle(_v1.x, _v1.y, _v1.z, nx, nz, (shotgun ? 1.4 : marks ? 1.2 : smg ? 0.75 : lmg ? 1.1 : cat === 'pistol' ? 0.6 : 1) * (quiet ? 0.35 : 1));
       this.fx.shell(_v1.x, _v1.y, _v1.z, nx, nz);
       vs.doRecoil(shotgun ? 1.3 : smg ? 0.6 : 1);
-      const width = marks ? 0.05 : shotgun ? 0.025 : smg ? 0.026 : 0.035;
+      const width = (cat === 'sniper' ? 0.06 : marks ? 0.05 : shotgun ? 0.025 : smg ? 0.026 : cat === 'pistol' ? 0.024 : 0.035) * (legendary ? 1.4 : 1);
       const jx = b ? (Math.random() - 0.5) * 0.15 : 0, jy = b ? (Math.random() - 0.5) * 0.12 : 0;
-      this.fx.tracer(_v1.x, _v1.y, _v1.z, ix + jx, iy + jy, iz - jx, col, width * (ev.ability === 'aimed' ? 1.6 : 1));
+      if (cat === 'launcher' && this.bf) { await this.bf.rocket(_v1.x, _v1.y, _v1.z, ix, iy, iz); if (g !== this.gen) return; continue; }
+      this.cfx.tracer(legendary ? null : this.cos[s.id]?.tracer, _v1.x, _v1.y, _v1.z, ix + jx, iy + jy, iz - jx, col, width * (ev.ability === 'aimed' ? 1.6 : 1));
       if (shotgun) {
         for (let i = 0; i < 4; i++) {
           const j = (Math.random() - 0.5) * 0.5;
@@ -1778,8 +1960,10 @@ export class Renderer {
     if (hitting) {
       const graze = ev.result === 'graze';
       sfx?.hit(graze);
+      if (s.team === this.myTeam) sfx?.hitmarker?.();
       this.fx.hitFlash(ix, iy, iz, graze ? 0.6 : kill ? 1.4 : 1, nx, nz);
-      vt.doFlinch(graze ? 0.55 : 1, nx, nz);
+      if (vt.doHit) vt.doHit(graze ? 'light' : kill || downing ? 'heavy' : ev.headshot ? 'head' : 'light', nx, nz); else vt.doFlinch(graze ? 0.55 : 1, nx, nz);
+      this._lastSrc?.set(ev.to, 'shot');
       if (tVis) this._textAt(ev.to, (graze ? 'GRAZE ' : '') + '-' + ev.dmg, graze ? TEXT.graze : TEXT.hit, graze ? 0.85 : kill ? 1.35 : 1.15);
       if (kill || downing) {
         this.hitStop = cam ? 0.14 : 0.07;
@@ -1817,7 +2001,7 @@ export class Renderer {
     const wasDowned = d.downed;
     d.hp = 0; d.downed = false;
     this._drawLabel(u);
-    if (wasVisible && !(this.speed > 3)) {
+    if (wasVisible && !(this._speed > 6)) {
       sfx?.death();
       let dir = Math.random() < 0.5 ? -1 : 1;
       if (ev.by !== null && ev.by !== undefined && this.views[ev.by] && ev.by !== ev.id) {
@@ -1826,7 +2010,7 @@ export class Renderer {
         v.faceTo(k.x, k.z, true);
         dir = (ev.id % 2) ? 1 : -1;
       }
-      v.die(dir);
+      v.die(dir, BLAST_SRC.has(this._lastSrc?.get(ev.id)) ? 'blast' : undefined);
       v.corpse = true;
       if (this.camStack.some((s) => s.tag === 'kill')) this.slowGoal = 0.45;
       const p = v.root.position;
@@ -1868,7 +2052,7 @@ export class Renderer {
     v.setDowned(true, d.bleed);
     this._drawLabel(u);
     if (u.team === this.myTeam) this.refreshFog();
-    if (v.root.visible && !(this.speed > 3)) {
+    if (v.root.visible && !(this._speed > 6)) {
       if (ev.by !== null && ev.by !== undefined && this.views[ev.by] && ev.by !== ev.id) {
         const k = this.views[ev.by].root.position;
         v.faceTo(k.x, k.z);
@@ -2016,12 +2200,13 @@ export class Renderer {
     }
     const a0 = v.root.position;
     const cam = this._pointCam('blast', (a0.x + tx) / 2, (a0.z + tz) / 2);
-    if (sVis) { this._face(ev.id, ev.x, ev.y); v.setHunker(false); v.aimGoal = 0; }
-    await this._wait(200);
+    let rel = 0.2;
+    if (sVis) { this._face(ev.id, ev.x, ev.y); v.setHunker(false); v.aimGoal = 0; rel = v.doThrow ? v.doThrow(smoke ? 'smoke' : 'frag') : (v.doRecoil(1.4), 0.2); }
+    await this._wait(rel * 1000);
     if (g !== this.gen) return;
     sfx?.grenadeThrow?.();
-    if (sVis) v.doRecoil(1.4);
-    const ax = a0.x, ay = a0.y + 0.95, az = a0.z;
+    const hand = sVis && v.handWorld ? v.handWorld(_v2) : _v2.set(a0.x, a0.y + 0.95, a0.z);
+    const ax = hand.x, ay = hand.y, az = hand.z;
     const dist = Math.hypot(tx - ax, tz - az);
     const peak = 1.6 + dist * 0.28;
     const nade = this.fx.throwStart(kind);
@@ -2053,16 +2238,17 @@ export class Renderer {
     await this._wait(380);
     if (g !== this.gen) return;
     // the damage / cover events that follow keep the cam; it releases on its own shortly after
-    if (cam) { const s = this.camStack[this.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, performance.now() / 1000 + 1.1); }
+    if (cam) { const s = this.camStack[this.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, this.playT + 1.1); }
   }
 
   _extendBlastHold() {
     const s = this.camStack[this.camStack.length - 1];
-    if (s && s.tag === 'blast') s.until = Math.max(s.until, performance.now() / 1000 + 0.7);
+    if (s && s.tag === 'blast') s.until = Math.max(s.until, this.playT + 0.7);
   }
 
   async _evDamage(ev) {
     const g = this.gen;
+    (this._lastSrc || (this._lastSrc = new Map())).set(ev.id, ev.source);
     const v = this.views[ev.id];
     this._hp(ev.id, -ev.dmg);
     if (v.root.visible) {
@@ -2075,7 +2261,7 @@ export class Renderer {
         const q = this.views[ev.by].root.position, L = Math.hypot(p.x - q.x, p.z - q.z) || 1;
         nx = (p.x - q.x) / L; nz = (p.z - q.z) / L;
       }
-      v.doFlinch(1, nx, nz);
+      if (v.doHit) v.doHit(BLAST_SRC.has(ev.source) ? 'blast' : 'heavy', nx, nz); else v.doFlinch(1, nx, nz);
       this.fx.hitFlash(p.x, 0.6, p.z, 0.8, nx, nz);
       this._textAt(ev.id, '-' + ev.dmg, TEXT.hit, 1.15);
       await this._wait(160);
@@ -2091,7 +2277,7 @@ export class Renderer {
     const prev = this.props.cover[k];
     const fromC = from ?? prev;
     const changed = this.props.setCover(x, y, to);
-    if (changed && this.visibleToMe(x, y) && !(this.speed > 3)) {
+    if (changed && this.visibleToMe(x, y) && !(this._speed > 6)) {
       const wx = this.wx(x), wz = this.wz(y);
       const cols = this.props.debrisColors(k, fromC);
       const big = fromC === 2;
@@ -2167,7 +2353,7 @@ export class Renderer {
     this._blast = { x: tx, z: tz };
     this.props.detonate(ev.x, ev.y);
     const vis = this.visibleToMe(ev.x, ev.y);
-    if (!vis || this.speed > 3) {
+    if (!vis || this._speed > 6) {
       sfx?.explosion(1);
       if (!vis) { this._ping(ev.x, ev.y); this.hooks.onFeed?.(`Barrel blast to the ${compass(this.myRef(), ev.x, ev.y)}`); }
       return;
@@ -2191,7 +2377,7 @@ export class Renderer {
     await this._wait(300);
     if (g !== this.gen) return;
     this._extendBlastHold();
-    if (cam) { const s = this.camStack[this.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, performance.now() / 1000 + 1.4); }
+    if (cam) { const s = this.camStack[this.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, this.playT + 1.4); }
   }
 
   async _evSupply(ev) {

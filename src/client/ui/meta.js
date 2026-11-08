@@ -9,7 +9,7 @@
 import { career } from './career.js';
 
 const KEY = 'tidefall.meta.v1';
-export const CLASS_KEYS = ['assault', 'marksman', 'breacher', 'medic', 'recon'];
+export const CLASS_KEYS = ['assault', 'marksman', 'breacher', 'medic', 'recon', 'engineer', 'gunner'];
 
 // ------------------------------------------------------------------ prestige
 
@@ -35,11 +35,6 @@ export function classProgress(cls) {
 
 // ------------------------------------------------------------------ catalog
 
-export const SLOTS = [
-  { cat: 'skins', key: 'skin', name: 'Skins', one: 'Skin' },
-  { cat: 'killFx', key: 'killFx', name: 'Kill FX', one: 'Kill effect' },
-  { cat: 'dropIns', key: 'dropIn', name: 'Drop-ins', one: 'Drop-in' },
-];
 export const RARITY = ['common', 'rare', 'epic', 'legendary'];
 const RARITY_PRICE = { common: 150, rare: 450, epic: 1100, legendary: 2500 };
 
@@ -74,6 +69,8 @@ const FALLBACK_CATALOG = {
 };
 
 let catalogSource = 'fallback';
+let RAW_BUNDLES = null;
+export let RARITY_INFO = null;
 let RAW = FALLBACK_CATALOG;
 export let DEFAULT_LOADOUT = { skin: 'default', killFx: 'default', dropIn: 'default' };
 try {
@@ -81,7 +78,34 @@ try {
   const C = mod.COSMETICS;
   if (C && Array.isArray(C.skins) && Array.isArray(C.killFx) && Array.isArray(C.dropIns)) { RAW = C; catalogSource = 'shared'; }
   if (mod.DEFAULT_LOADOUT && typeof mod.DEFAULT_LOADOUT === 'object') DEFAULT_LOADOUT = { ...DEFAULT_LOADOUT, ...mod.DEFAULT_LOADOUT };
+  if (Array.isArray(mod.BUNDLES)) RAW_BUNDLES = mod.BUNDLES;
+  if (mod.RARITY && typeof mod.RARITY === 'object') RARITY_INFO = mod.RARITY;
 } catch (e) { console.warn('[tidefall] cosmetics catalog unavailable, using the built-in list', e?.message || e); }
+
+// Slots: the three 3.0 slots always exist; any other array category in the
+// 5.0 catalog (emotes, charms, tracers, streak skins...) becomes a slot too.
+const KNOWN_SLOTS = [
+  { cat: 'skins', key: 'skin', name: 'Skins', one: 'Skin', icon: 'user' },
+  { cat: 'killFx', key: 'killFx', name: 'Kill FX', one: 'Kill effect', icon: 'burst' },
+  { cat: 'dropIns', key: 'dropIn', name: 'Drop-ins', one: 'Drop-in', icon: 'drop' },
+  { cat: 'emotes', key: 'emote', name: 'Emotes', one: 'Victory emote', icon: 'trophy' },
+  { cat: 'charms', key: 'charm', name: 'Charms', one: 'Weapon charm', icon: 'charm' },
+  { cat: 'tracers', key: 'tracer', name: 'Tracers', one: 'Tracer', icon: 'tracer' },
+  { cat: 'streakSkins', key: 'streakSkin', name: 'Streak skins', one: 'Streak skin', icon: 'jet' },
+];
+const NOT_SLOTS = new Set(['bundles', 'camos', 'featured', 'rarities']);
+export const SLOTS = (() => {
+  const out = [];
+  for (const s of KNOWN_SLOTS) if (Array.isArray(RAW[s.cat]) || s.cat === 'skins' || s.cat === 'killFx' || s.cat === 'dropIns') out.push(s);
+  for (const [cat, list] of Object.entries(RAW)) {
+    if (NOT_SLOTS.has(cat) || out.some((s) => s.cat === cat) || !Array.isArray(list) || !list.some((i) => i && typeof i.id === 'string')) continue;
+    const key = cat.replace(/s$/, '');
+    const nice = cat.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+    out.push({ cat, key, name: nice, one: nice.replace(/s$/, ''), icon: 'sparkle' });
+  }
+  return out;
+})();
+for (const s of SLOTS) if (!(s.key in DEFAULT_LOADOUT)) DEFAULT_LOADOUT[s.key] = 'default';
 
 function normalise(list, slot) {
   const out = [];
@@ -109,6 +133,39 @@ function normalise(list, slot) {
 
 const CATALOG = {};
 for (const s of SLOTS) CATALOG[s.key] = normalise(RAW[s.cat], s);
+
+// Bundles: [{ id, name, price?, rarity?, items: ['cat:id' | {cat|slot, id} | {slot: id...}] }]
+const slotOf = (k) => SLOTS.find((s) => s.key === k || s.cat === k)?.key || null;
+export const BUNDLES = (RAW_BUNDLES || (Array.isArray(RAW.bundles) ? RAW.bundles : [])).map((b) => {
+  if (!b || typeof b.id !== 'string') return null;
+  let items = [];
+  const push = (sk, id) => { const k = slotOf(sk); if (k && CATALOG[k].some((i) => i.id === id && !i.isDefault)) items.push({ slot: k, id }); };
+  if (Array.isArray(b.items)) for (const it of b.items) {
+    if (typeof it === 'string' && it.includes(':')) push(...it.split(':'));
+    else if (it && typeof it === 'object') push(it.slot || it.cat || it.kind, it.id);
+  } else if (b.items && typeof b.items === 'object') for (const [k, v] of Object.entries(b.items)) (Array.isArray(v) ? v : [v]).forEach((id) => push(k, id));
+  if (!items.length) return null;
+  const full = items.reduce((a, it) => a + (CATALOG[it.slot].find((i) => i.id === it.id)?.price || 0), 0);
+  const rarity = RARITY.includes(b.rarity) ? b.rarity : 'epic';
+  return { ...b, items, rarity, name: String(b.name || b.id), desc: String(b.desc || ''), full: Number(b.fullPrice) || full, price: Math.max(1, Math.round(Number(b.price) || full * 0.7)) };
+}).filter(Boolean);
+export function buyBundle(id) {
+  const b = BUNDLES.find((x) => x.id === id);
+  if (!b) return { ok: false, error: 'Bundle not found' };
+  const missing = b.items.filter((it) => !owns(it.slot, it.id));
+  if (!missing.length) return { ok: false, error: 'You already own everything in it' };
+  const price = bundlePrice(b);
+  if (data.salvage < price) return { ok: false, error: `You need ${price - data.salvage} more Salvage` };
+  data.salvage -= price;
+  for (const it of missing) data.owned[it.slot].push(it.id);
+  changed('buy');
+  return { ok: true, price };
+}
+/** Bundles get cheaper by the value of the parts you already own. */
+export function bundlePrice(b) {
+  const ownedVal = b.items.filter((it) => owns(it.slot, it.id)).reduce((a, it) => a + (itemById(it.slot, it.id)?.price || 0), 0);
+  return Math.max(0, Math.round(((b.price) * (1 - ownedVal / Math.max(1, b.full))) / 10) * 10);
+}
 export const catalog = () => CATALOG;
 export const catalogInfo = () => ({ source: catalogSource });
 export const itemById = (slotKey, id) => CATALOG[slotKey]?.find((i) => i.id === id) || null;
@@ -122,8 +179,8 @@ const EMPTY = () => ({
   earned: 0,          // lifetime Salvage earned
   classXp: {},        // cls -> xp
   classStats: {},     // cls -> { matches, kills, wins }
-  owned: { skin: [], killFx: [], dropIn: [] },
-  loadout: { skins: {}, killFx: null, dropIn: null }, // skins per class
+  owned: Object.fromEntries(SLOTS.map((sl) => [sl.key, []])),
+  loadout: { skins: {} }, // skins per class; every other slot is global (slotKey -> id)
   seen: [],           // item keys the player has looked at (for "new" dots)
   migrated: false,
   welcomed: false,
@@ -131,37 +188,42 @@ const EMPTY = () => ({
 });
 
 const num = (v) => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : 0; };
+
+/** Validate any object into a meta record (also used by the transfer import). */
+export function sanitizeMeta(saved) {
+  const base = EMPTY();
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return base;
+  for (const k of Object.keys(base)) {
+    if (saved[k] === undefined || saved[k] === null) continue;
+    if (typeof saved[k] === typeof base[k] || base[k] === null) base[k] = saved[k];
+  }
+  if (!base.loadout || typeof base.loadout !== 'object' || Array.isArray(base.loadout)) base.loadout = EMPTY().loadout;
+  if (!base.loadout.skins || typeof base.loadout.skins !== 'object') base.loadout.skins = {};
+  for (const [k, v] of Object.entries(base.loadout)) if (k !== 'skins' && typeof v !== 'string') delete base.loadout[k];
+  if (!Array.isArray(base.seen)) base.seen = [];
+  base.seen = base.seen.filter((x) => typeof x === 'string').slice(-400);
+  if (!base.owned || typeof base.owned !== 'object' || Array.isArray(base.owned)) base.owned = EMPTY().owned;
+  for (const sl of SLOTS) base.owned[sl.key] = Array.isArray(base.owned[sl.key]) ? base.owned[sl.key].filter((id) => typeof id === 'string') : [];
+  // Garbage-proof the per-class maps: finite, non-negative numbers only.
+  const xp = {}, cs = {};
+  if (base.classXp && typeof base.classXp === 'object') for (const k of CLASS_KEYS) { const v = Number(base.classXp[k]); if (Number.isFinite(v) && v > 0) xp[k] = Math.min(v, 1e8); }
+  if (base.classStats && typeof base.classStats === 'object') for (const k of CLASS_KEYS) {
+    const r = base.classStats[k];
+    if (r && typeof r === 'object') cs[k] = { matches: num(r.matches), kills: num(r.kills), wins: num(r.wins) };
+  }
+  base.classXp = xp; base.classStats = cs;
+  base.salvage = Math.min(num(base.salvage), 1e9);
+  base.earned = Math.min(num(base.earned), 1e10);
+  base.migrated = !!base.migrated; base.welcomed = !!base.welcomed;
+  if (base.notice && (typeof base.notice !== 'object' || typeof base.notice.kind !== 'string')) base.notice = null;
+  return base;
+}
+
 let data = EMPTY();
 try {
   const raw = localStorage.getItem(KEY);
-  if (raw) {
-    const saved = JSON.parse(raw);
-    if (saved && typeof saved === 'object') {
-      const base = EMPTY();
-      for (const k of Object.keys(base)) {
-        if (saved[k] === undefined || saved[k] === null) continue;
-        if (typeof saved[k] === typeof base[k] || base[k] === null) base[k] = saved[k];
-      }
-      if (!base.loadout || typeof base.loadout !== 'object') base.loadout = EMPTY().loadout;
-      if (!base.loadout.skins || typeof base.loadout.skins !== 'object') base.loadout.skins = {};
-      if (!Array.isArray(base.seen)) base.seen = [];
-      if (!base.owned || typeof base.owned !== 'object' || Array.isArray(base.owned)) base.owned = EMPTY().owned;
-      for (const s of SLOTS) base.owned[s.key] = Array.isArray(base.owned[s.key]) ? base.owned[s.key].filter((id) => typeof id === 'string') : [];
-      // Garbage-proof the per-class maps: finite, non-negative numbers only.
-      const xp = {}, cs = {};
-      if (base.classXp && typeof base.classXp === 'object') for (const k of CLASS_KEYS) { const v = Number(base.classXp[k]); if (Number.isFinite(v) && v > 0) xp[k] = v; }
-      if (base.classStats && typeof base.classStats === 'object') for (const k of CLASS_KEYS) {
-        const r = base.classStats[k];
-        if (r && typeof r === 'object') cs[k] = { matches: num(r.matches), kills: num(r.kills), wins: num(r.wins) };
-      }
-      base.classXp = xp; base.classStats = cs;
-      base.salvage = num(base.salvage);
-      base.earned = num(base.earned);
-      if (base.notice && (typeof base.notice !== 'object' || typeof base.notice.kind !== 'string')) base.notice = null;
-      data = base;
-    }
-  }
-} catch { /* private mode etc. */ }
+  if (raw) data = sanitizeMeta(JSON.parse(raw));
+} catch { /* private mode, corrupt JSON etc. */ data = EMPTY(); }
 
 function save() { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch { /* ignore */ } }
 
@@ -327,8 +389,19 @@ export function equip(slotKey, id, cls) {
 
 /** The resolved loadout for a class, in the renderer's shape. */
 export function loadoutFor(cls) {
-  return { skin: equipped('skin', cls), killFx: equipped('killFx', cls), dropIn: equipped('dropIn', cls) };
+  const out = {};
+  for (const sl of SLOTS) out[sl.key] = equipped(sl.key, cls);
+  return out;
 }
+
+export function spend(n) {
+  n = Math.max(0, Math.round(n));
+  if (data.salvage < n) return { ok: false, error: `You need ${n - data.salvage} more Salvage` };
+  data.salvage -= n; changed('spend');
+  return { ok: true, balance: data.salvage };
+}
+export function grantSalvage(n) { n = num(n); data.salvage += n; data.earned += n; changed('grant'); return data.salvage; }
+export function replaceAll(d) { data = sanitizeMeta(d); data.migrated = true; data.welcomed = true; save(); changed('import'); }
 
 export function ownedCount() {
   let n = 0, all = 0;

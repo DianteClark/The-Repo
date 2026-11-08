@@ -7,6 +7,8 @@ import { STAGES, SIGHT } from './constants.js';
 //   terrain:   0 ground, 1 kelp (conceals), 2 shallow water (costs 2 movement).
 //   explosive: 1 = this half-cover tile is a fuel barrel (Rig Graveyard).
 // Plus: wallHeight (cosmetic only), sight (tiles), stage (key).
+// 5.0: building (Int16Array, building id or -1) and buildings [{id, kind:'building'|'tower',
+//   x0, y0, w, h, walls:[tileKey] (full cover at generation), floor:[tileKey], collapsed}].
 
 export function generateMap(seed, size, stageKey = 'harbor') {
   const stage = STAGES[stageKey] || STAGES.harbor;
@@ -17,6 +19,9 @@ export function generateMap(seed, size, stageKey = 'harbor') {
   const explosive = new Uint8Array(size * size);
   const wallHeight = new Float32Array(size * size);
   const tall = new Uint8Array(size * size);
+  // 5.0: which building each tile belongs to (-1: none). Filled without rng draws.
+  const building = new Int16Array(size * size).fill(-1);
+  const rects = []; // [{x0,y0,w,h,kind}]
   const idx = (x, y) => y * size + x;
   const ri = (n) => Math.floor(rng() * n);
   const inside = (x, y, m = 1) => x >= m && y >= m && x < size - m && y < size - m;
@@ -32,11 +37,14 @@ export function generateMap(seed, size, stageKey = 'harbor') {
     for (let i = 0; i < n; i++) {
       const w = 2 + ri(2), h = 2 + ri(2);
       const x0 = cx + ri(9) - 4, y0 = cy + ri(9) - 4;
+      const bid = rects.length;
+      rects.push({ x0, y0, w, h, kind: 'tower' });
       for (let x = x0; x < x0 + w; x++) {
         for (let y = y0; y < y0 + h; y++) {
           if (!inside(x, y, 2)) continue;
           cover[idx(x, y)] = 2;
           tall[idx(x, y)] = 1;
+          building[idx(x, y)] = bid;
         }
       }
     }
@@ -126,7 +134,26 @@ export function generateMap(seed, size, stageKey = 'harbor') {
   // Cosmetic per-tile height for full walls (rendering only, never gameplay).
   for (let k = 0; k < size * size; k++) wallHeight[k] = tall[k] ? 2.2 + rng() * 1.6 : 0.95 + rng() * 0.35;
 
-  return { size, cover, terrain, explosive, wallHeight, sight: stage.sight ?? SIGHT, stage: stage.key };
+  // Buildings (5.0 collapse): a building's walls are its full-cover tiles at generation time;
+  // its footprint includes the open floor inside. Overlaps: the later building owns the tile.
+  const buildingList = rects.map((r, id) => ({ id, kind: r.kind, x0: r.x0, y0: r.y0, w: r.w, h: r.h, walls: [], floor: [], collapsed: false }));
+  for (let k = 0; k < size * size; k++) {
+    const b = building[k];
+    if (b < 0) continue;
+    if (cover[k] === 2) buildingList[b].walls.push(k);
+    else if (cover[k] === 0) buildingList[b].floor.push(k);
+  }
+  // Tiny remnants (fully overwritten) aren't buildings.
+  for (const b of buildingList) {
+    if (b.walls.length >= 3) continue;
+    for (const k of [...b.walls, ...b.floor]) building[k] = -1;
+    b.walls = []; b.floor = []; b.collapsed = true;
+  }
+
+  return {
+    size, cover, terrain, explosive, wallHeight, sight: stage.sight ?? SIGHT, stage: stage.key,
+    building, buildings: buildingList,
+  };
 
   function hollowBuilding(w, h, x0, y0) {
     if (x0 + w > size - 2 || y0 + h > size - 2) return;
@@ -134,8 +161,10 @@ export function generateMap(seed, size, stageKey = 'harbor') {
       for (let y = y0; y < y0 + h; y++) {
         const edge = x === x0 || x === x0 + w - 1 || y === y0 || y === y0 + h - 1;
         cover[idx(x, y)] = edge ? 2 : 0;
+        building[idx(x, y)] = rects.length;
       }
     }
+    rects.push({ x0, y0, w, h, kind: 'building' });
     // doorways (never on corners), plus broken wall sections that become half cover
     const openings = 2 + ri(2);
     for (let d = 0; d < openings; d++) {

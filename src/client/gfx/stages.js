@@ -25,7 +25,7 @@ const MIX_DEFAULT = [14, 12, 13, 12, 10, 10, 7, 8, 6, 8, 0];
 export const STAGE_LOOK = {
   harbor: {
     key: 'harbor', mood: MOOD, water: WATER, ground: GROUND, mix: MIX_DEFAULT,
-    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 1, fogDark: 0.42, gulls: 1, sightFeel: 0, neon: false, lightning: 1,
+    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 1, fogDark: 0.42, gulls: 1, sightFeel: 0, neon: false, shafts: { k: 1 }, caustic: 1, grade: { lift: [0.012, 0.02, 0.03], gain: [1.03, 1.0, 0.95], sat: 1.06, contrast: 1.08 }, lightning: 1,
   },
   kelp: {
     key: 'kelp',
@@ -38,7 +38,7 @@ export const STAGE_LOOK = {
     water: { shallow: 0x86d6a2, mid: 0x2f9a7e, deep: 0x0e4a40, foam: 0xeefbe8, oil: 0 },
     ground: { ...GROUND, sand: 0xd6c79c, concrete: 0x8c957f, floor: 0xaaa98c, seabed: 0x9fa77a, kelp: 0x5d7a45 },
     mix: [8, 6, 8, 4, 3, 16, 6, 16, 14, 12, 0],
-    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 0.9, fogDark: 0.45, gulls: 1, sightFeel: 0, neon: false, lightning: 1,
+    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 0.9, fogDark: 0.45, gulls: 1, sightFeel: 0, neon: false, shafts: { k: 1.15, col: 0xd8ffc0 }, caustic: 1.3, grade: { lift: [0.0, 0.025, 0.02], gain: [1.0, 1.03, 0.94], sat: 1.08, contrast: 1.06 }, lightning: 1,
   },
   rig: {
     key: 'rig',
@@ -51,7 +51,7 @@ export const STAGE_LOOK = {
     water: { shallow: 0x5f8f80, mid: 0x24514f, deep: 0x0e2427, foam: 0xd9d6c8, oil: 1 },
     ground: { ...GROUND, sand: 0x7e7064, concrete: 0x6f6b63, board: 0x6c4e36, floor: 0x7f7a6e, deck: 0x75736c, seabed: 0x6f6250 },
     mix: [12, 22, 6, 6, 8, 4, 10, 4, 4, 10, 14],
-    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 1.05, fogDark: 0.4, gulls: 0.5, sightFeel: 0, neon: false, deck: true, lightning: 1,
+    stormFloor: 0, stormGain: 1, rain: 0, wallScale: 1.05, fogDark: 0.4, gulls: 0.5, sightFeel: 0, neon: false, deck: true, shafts: { k: 0.9, col: 0xffb070 }, caustic: 0.6, grade: { lift: [0.03, 0.012, 0.0], gain: [1.05, 0.98, 0.9], sat: 0.98, contrast: 1.12 }, lightning: 1,
   },
   spire: {
     key: 'spire',
@@ -64,7 +64,7 @@ export const STAGE_LOOK = {
     water: { shallow: 0x2f6680, mid: 0x143c54, deep: 0x061826, foam: 0xb8c8e8, oil: 0 },
     ground: { ...GROUND, sand: 0x9a9284, concrete: 0x7c7e8a, board: 0x7a6250, floor: 0x8e8a86, seabed: 0x5a6070 },
     mix: [10, 8, 8, 20, 18, 4, 10, 6, 4, 12, 0],
-    stormFloor: 0, stormGain: 0.8, rain: 0.15, wallScale: 1.35, fogDark: 0.26, gulls: 0, sightFeel: 1, neon: true, night: true, lightning: 0.6,
+    stormFloor: 0, stormGain: 0.8, rain: 0.15, wallScale: 1.35, fogDark: 0.26, gulls: 0, sightFeel: 1, neon: true, night: true, shafts: { k: 0.55, col: 0x9fb8ff }, caustic: 0.5, grade: { lift: [0.012, 0.008, 0.018], gain: [1.0, 1.0, 1.02], sat: 1.02, contrast: 1.05 }, lightning: 0.6,
   },
   surge: {
     key: 'surge',
@@ -77,7 +77,22 @@ export const STAGE_LOOK = {
     water: { shallow: 0x427f7a, mid: 0x1c4f57, deep: 0x0a2a33, foam: 0xe6eeec, oil: 0 },
     ground: { ...GROUND, sand: 0xb8a580, concrete: 0x84867f },
     mix: [14, 10, 14, 10, 10, 14, 8, 8, 8, 12, 0],
-    stormFloor: 0.62, stormGain: 1, rain: 0.55, wallScale: 1, fogDark: 0.4, gulls: 0.4, sightFeel: 0, neon: false, lightning: 1.8,
+    stormFloor: 0.62, stormGain: 1, rain: 0.55, wallScale: 1, fogDark: 0.4, gulls: 0.4, sightFeel: 0, neon: false, shafts: { k: 0.35 }, caustic: 0.7, grade: { lift: [0.0, 0.015, 0.03], gain: [0.96, 1.0, 1.04], sat: 0.92, contrast: 1.12 }, lightning: 1.8,
+  },
+  // 5.0 The Pit: a flooded dry-dock arena at night under red floodlights
+  pit: {
+    key: 'pit',
+    mood: [
+      kf(0xff8a6a, 1.6, 0x5a3a46, 0x1a0e10, 0.95, 0x1c0c10, 0x0c0507, 1.1, 0.1, 0.4),
+      kf(0xff8a6a, 1.6, 0x5a3a46, 0x1a0e10, 0.95, 0x1c0c10, 0x0c0507, 1.1, 0.1, 0.4),
+      kf(0xff7a5a, 1.5, 0x4e3240, 0x160c0e, 0.92, 0x180a0e, 0x0a0406, 1.1, 0.1, 0.5),
+      kf(0xff7a5a, 1.5, 0x4e3240, 0x160c0e, 0.92, 0x180a0e, 0x0a0406, 1.1, 0.1, 0.5),
+    ],
+    water: { shallow: 0x3a5a5c, mid: 0x1a3036, deep: 0x080f14, foam: 0xd8c8c0, oil: 0.5 },
+    ground: { ...GROUND, sand: 0x6e625a, concrete: 0x5f5a58, floor: 0x6a625c, deck: 0x5a5856, seabed: 0x4a4440 },
+    mix: [12, 14, 6, 4, 8, 2, 10, 4, 2, 14, 10],
+    stormFloor: 0, stormGain: 0, rain: 0, wallScale: 1.1, fogDark: 0.5, gulls: 0, sightFeel: 0, neon: true, deck: true,
+    shafts: { k: 0.8, col: 0xff4a3a }, caustic: 0.4, grade: { lift: [0.03, 0.0, 0.01], gain: [1.06, 0.96, 0.94], sat: 1.05, contrast: 1.14 }, lightning: 0,
   },
 };
 

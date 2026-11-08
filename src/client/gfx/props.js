@@ -28,6 +28,7 @@ export class PropField {
     this.cover = Uint8Array.from(map.cover); // displayed cover (lags sim until events play)
     this.explosive = map.explosive ? Uint8Array.from(map.explosive) : new Uint8Array(n); // displayed live barrels
     this.damaged = new Uint8Array(n);
+    this.version = 0; // bumps on every displayed cover change (contact AO re-bake)
     this.wasCover = new Uint8Array(n);
     this.group = new THREE.Group();
     // Always in the transparent pass (opacity 1 normally): toggling `transparent` would
@@ -151,6 +152,7 @@ export class PropField {
     const from = this.cover[k];
     if (from === to) return false;
     this.cover[k] = to;
+    this.version = (this.version || 0) + 1;
     this._footDirty = true;
     if (this.fade > 0.001) { this._footDirty = false; this.foot.rebuild(this.cover, this.wx, this.wz, this.cls); }
     if (to < from) this.damaged[k] = 1;
@@ -164,6 +166,19 @@ export class PropField {
     }
     for (const i of dirty) this._buildChunk(this.chunks[i]);
     return true;
+  }
+
+  /** 5.0 Engineer barricade on a tile: axis 0 = panel along x, 1 = along z; col = squad stripe. */
+  markBarricade(x, y, axis, col) {
+    if (!this.barricade) this.barricade = new Map();
+    this.barricade.set(y * this.S + x, { axis, col: new THREE.Color(col).getHex() });
+  }
+
+  /** Rebuild the chunk holding a tile (terrain height changed under it). */
+  refreshTile(x, y) {
+    this._footDirty = true;
+    this.version++;
+    this._buildChunk(this.chunks[Math.floor(y / CH) * this.nc + Math.floor(x / CH)]);
   }
 
   /** A barrel went off: the tile shows scorched wreckage until its cover_change lands. */
@@ -195,6 +210,9 @@ export class PropField {
     const r = rng((k * 7919) ^ this.seed);
     const nb = this._nb(x, y);
     if (cv === 0) return debrisScatter(b, r);
+    const bar = this.barricade?.get(k);
+    if (bar && cv === 2) return barricadeProp(b, r, bar.axis, bar.col);
+    if (bar && cv === 1) return rubble(b, r, true);
     if (cv === 2) {
       const wh = this.map.wallHeight ? this.map.wallHeight[k] : 1.1;
       const h = (1.02 + (wh - 0.95) * 1.0) * (this.look.wallScale || 1);
@@ -685,6 +703,20 @@ function pipes(b, r, nb) {
 }
 
 const MIX = [14, 12, 13, 12, 10, 10, 7, 8, 6, 8, 0];
+
+/** 5.0 deployable barricade as a full-cover prop: steel panel wall with a squad stripe. */
+function barricadeProp(b, r, axis, col) {
+  const ry = axis ? Math.PI / 2 : 0;
+  const c = Math.cos(ry), s = Math.sin(ry);
+  const at = (lx, lz) => [lx * c + lz * s, -lx * s + lz * c];
+  b.box(0.92, 1.0, 0.1, 0, 0.5, 0, 0x55605f, ry);
+  for (const x of [-0.3, 0, 0.3]) { const [px, pz] = at(x, 0); b.box(0.03, 0.96, 0.12, px, 0.5, pz, 0x3c4544, ry); }
+  b.box(0.94, 0.06, 0.13, 0, 1.0, 0, 0x2f3636, ry);
+  b.box(0.94, 0.08, 0.13, 0, 0.62, 0, col, ry);
+  for (const x of [-0.3, 0.3]) { const [px, pz] = at(x, 0); b.box(0.12, 0.2, 0.11, px, 0.82, pz, 0x1a2228, ry); }
+  for (const x of [-0.38, 0.38]) { const [px, pz] = at(x, 0); b.box(0.1, 0.08, 0.5, px, 0.04, pz, 0x2f3636, ry); }
+  void r;
+}
 
 // ---------- cover footprints (shown while cover is faded in move mode) ----------
 

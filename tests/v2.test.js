@@ -13,7 +13,7 @@ const sureShot = (u) => { u.weapon.aim = 300; };
 const sureMiss = (u) => { u.weapon.aim = -300; };
 
 test('medic and recon classes exist with stable keys and starting kit', () => {
-  assert.deepEqual(Object.keys(CLASSES), ['assault', 'marksman', 'breacher', 'medic', 'recon']);
+  assert.deepEqual(Object.keys(CLASSES), ['assault', 'marksman', 'breacher', 'medic', 'recon', 'engineer', 'gunner']);
   assert.equal(CLASSES.medic.weapon.range, 7);
   assert.equal(CLASSES.recon.weapon.range, 10);
   assert.equal(CLASSES.recon.move, 7);
@@ -21,10 +21,10 @@ test('medic and recon classes exist with stable keys and starting kit', () => {
   const me = s.units.find((u) => u.isPlayer);
   assert.equal(me.cls, 'recon');
   assert.equal(me.items.smoke, 1);
-  assert.ok(CRATE_LABEL.smoke && CRATE_TABLE.some(([k]) => k === 'smoke'));
+  assert.ok(CRATE_LABEL.smoke && CRATE_TABLE.some(([k]) => k === 'tactical'));
   const classes = new Set();
   for (let seed = 1; seed < 10; seed++) for (const u of createGame({ seed, noHuman: true }).units) classes.add(u.cls);
-  assert.equal(classes.size, 5, 'bots roll all five classes');
+  assert.equal(classes.size, 7, 'bots roll all seven classes');
 });
 
 test('team modes: a unit at 0 HP with a standing squadmate is downed, not dead', () => {
@@ -90,7 +90,7 @@ test('downed units bleed out after two of their own team turns', () => {
   const log = ownTurnEnd();
   const i = log.findIndex((e) => e.type === 'bleed_out');
   assert.deepEqual(log[i], { type: 'bleed_out', id: t.id });
-  assert.deepEqual(log[i + 1], { type: 'death', id: t.id, by: a.id }, 'death follows, credited to whoever downed it');
+  assert.deepEqual({ ...log[i + 1], weapon: undefined }, { type: 'death', id: t.id, by: a.id, weapon: undefined }, 'death follows, credited to whoever downed it');
   assert.equal(t.alive, false);
   assert.equal(a.kills, 1);
 });
@@ -123,7 +123,10 @@ test('revive: adjacent squadmate, 1 AP, back at 3 HP and acts next turn', () => 
   assert.equal(reviveTargets(s, far).size, 0);
   const r = act(s, a.id, { type: 'revive', targetId: b.id });
   assert.ok(r.ok, r.error);
-  assert.deepEqual(r.events, [{ type: 'revive', id: b.id, by: a.id, hp: 3 }]);
+  assert.deepEqual(r.events, [
+    { type: 'revive', id: b.id, by: a.id, hp: 3 },
+    { type: 'streak_points', id: a.id, add: 1, total: 1, reason: 'revive' },
+  ]);
   assert.equal(b.downed, false);
   assert.equal(b.hp, 3);
   assert.equal(b.ap, 0);
@@ -159,6 +162,7 @@ test('medic patch: heals self or adjacent ally, revives downed at 4 HP, cooldown
   assert.deepEqual(rv.events, [
     { type: 'patch', id: a.id, target: b.id, amount: 4 },
     { type: 'revive', id: b.id, by: a.id, hp: 4 },
+    { type: 'streak_points', id: a.id, add: 1, total: 1, reason: 'revive' },
   ]);
   // Not adjacent / not a medic.
   cycleTo(s, a.team); cycleTo(s, a.team);
@@ -296,10 +300,10 @@ test('scan: recon only, 12 tiles, no LOS needed, reveals radius 5 until the reco
 test('abilityInfo covers patch, scan, smoke and revive', () => {
   const { s, a: medic } = arena({ me: [5, 5, 'medic'], mate: [6, 5, 'recon'] });
   const keys = abilityInfo(medic, s).map((x) => x.key);
-  assert.deepEqual(keys, ['grenade', 'smoke', 'patch', 'revive', 'hunker']);
+  assert.deepEqual(keys, ['grenade', 'smoke', 'patch', 'revive', 'reload', 'swap', 'hunker']);
   const recon = s.units.find((u) => u.alive && u.cls === 'recon');
   const info = abilityInfo(recon, s);
-  assert.deepEqual(info.map((x) => x.key), ['grenade', 'smoke', 'scan', 'revive', 'hunker']);
+  assert.deepEqual(info.map((x) => x.key), ['grenade', 'smoke', 'scan', 'revive', 'reload', 'swap', 'hunker']);
   const sm = info.find((x) => x.key === 'smoke');
   assert.equal(sm.charges, 1);
   assert.equal(info.find((x) => x.key === 'scan').ready, true);

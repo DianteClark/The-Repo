@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateMap } from '../src/sim/map.js';
-import { createGame, act, endTeamTurn, currentTeamId, aliveTeams } from '../src/sim/game.js';
+import {
+  createGame, act, endTeamTurn, currentTeamId, aliveTeams, isTeamActive,
+} from '../src/sim/game.js';
 import { botTakeTurn } from '../src/sim/ai.js';
 import { losDirect, coverVs, hitChance } from '../src/sim/rules.js';
 import { MODES } from '../src/sim/constants.js';
@@ -64,7 +66,8 @@ test('every mode has 16 players; trios has a lone wolf with extra AP/HP/armor', 
 
 test('cannot act out of turn', () => {
   const s = createGame({ seed: 9 });
-  const other = s.units.find((u) => u.team !== currentTeamId(s));
+  const other = s.units.find((u) => !isTeamActive(s, u.team));
+  assert.ok(other, 'some squad is waiting');
   assert.equal(act(s, other.id, { type: 'overwatch' }).ok, false);
 });
 
