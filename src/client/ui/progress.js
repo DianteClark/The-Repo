@@ -10,6 +10,7 @@
 import { career } from './career.js';
 import * as A from './arsenal.js';
 import * as M from './meta.js';
+import * as UL from './unlocks.js';
 import { CARDS, EMBLEMS, cardById, emblemById, DEFAULT_CARD, DEFAULT_EMBLEM } from '../../shared/cards.js';
 
 const KEY = 'tidefall.v5';
@@ -148,7 +149,9 @@ export const MEDALS = {
 
 // ------------------------------------------------------------------ storage
 
-const LOADOUT_DEFAULT_CLASSES = ['assault', 'marksman', 'breacher', 'medic', 'recon'];
+// 5.2: the three starter classes first; slots 4–5 become Marksman / Breacher once they unlock
+// (until then they read as the starter default, see gated()).
+const LOADOUT_DEFAULT_CLASSES = ['assault', 'medic', 'recon', 'marksman', 'breacher'];
 const EMPTY = () => ({
   v: 5,
   xp: 0,
@@ -284,14 +287,21 @@ export function setCamo(weaponId, camoId) {
 
 // ------------------------------------------------------------------ loadouts
 
-export const loadouts = () => data.loadouts;
+// 5.2: classes / perks / streaks unlock with player level (unlocks.js). Stored loadouts keep what
+// the player picked; every read is gated to the current level (a locked item shows as the
+// default), and every save stores the gated version.
+const gated = (l) => { const g = UL.gateLoadout(A.cleanLoadout(l, isAttachmentUnlocked), player().level).loadout; return l?.name ? { ...g, name: l.name } : g; };
+export const loadouts = () => data.loadouts.map(gated);
+export const rawLoadouts = () => data.loadouts;
 export const activeIndex = () => data.active;
-export function activeLoadout() { return A.cleanLoadout(data.loadouts[data.active], isAttachmentUnlocked); }
+export function activeLoadout() { return gated(data.loadouts[data.active]); }
+/** Loadout slots whose saved picks are above the current level (shown as defaults for now). */
+export const lockedSlots = () => data.loadouts.map((l, i) => (UL.loadoutLocked(l, player().level) ? i : -1)).filter((i) => i >= 0);
 export function setActive(i) { if (i >= 0 && i < LOADOUT_SLOTS) { data.active = i; changed('loadout'); } }
 export function saveLoadout(i, l) {
   if (i < 0 || i >= LOADOUT_SLOTS) return null;
   const name = typeof l?.name === 'string' && l.name.trim() ? l.name.trim().slice(0, 18) : data.loadouts[i]?.name || `Loadout ${i + 1}`;
-  data.loadouts[i] = { ...A.cleanLoadout(l, isAttachmentUnlocked), name };
+  data.loadouts[i] = { ...gated(l), name };
   changed('loadout');
   return data.loadouts[i];
 }
@@ -428,5 +438,7 @@ export function awardMatch5(m) {
 
 /** Debug only. */
 export function _debugXp(n) { data.xp += n; changed('xp'); return player(); }
+/** Debug only: jump to the start of a player level (unlock tests). */
+export function _debugLevel(n) { data.xp = LEVEL_FLOOR[Math.max(1, Math.min(MAX_LEVEL, n | 0))] + 1; changed('xp'); return player(); }
 export function _debugWeapon(id, stats) { const r = data.weapons[id] || (data.weapons[id] = Object.fromEntries(WSTATS.map((k) => [k, 0]))); for (const [k, v] of Object.entries(stats)) r[k] = (r[k] || 0) + v; changed('w'); return r; }
 export function replaceAll(d) { data = sanitize(d); data.migrated = true; save(); }

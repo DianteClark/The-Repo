@@ -1,6 +1,6 @@
 {
   "name": "tidefall",
-  "version": "5.1.0",
+  "version": "5.2.0",
   "private": true,
   "type": "module",
   "description": "Turn-based XCOM-style 16-player battle royale in the browser.",

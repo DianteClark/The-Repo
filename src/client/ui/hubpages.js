@@ -12,6 +12,7 @@ import { openSheet, closeSheet, onSheetClose, cleanCallsign, randomCallsign } fr
 import * as M from './meta.js';
 import * as P from './progress.js';
 import * as A from './arsenal.js';
+import * as UL from './unlocks.js';
 import { CARDS, EMBLEMS, cardSVG, emblemSVG, cardById, emblemById } from '../../shared/cards.js';
 import { weaponThumb, hydrateThumbs, setThumbRenderer } from './weaponthumbs.js';
 
@@ -28,6 +29,12 @@ const RAR = { common: 'Common', rare: 'Rare', epic: 'Epic', legendary: 'Legendar
 const EQUIP_ICON = { frag: 'grenade', grenade: 'grenade', semtex: 'semtex', claymore: 'claymore', knife: 'knife', smoke: 'smoke', flashbang: 'flash', flash: 'flash', stim: 'stim', decoy: 'decoy' };
 const STREAK_ICON = { uav: 'uav', care: 'care', care_package: 'care', cuav: 'cuav', counter_uav: 'cuav', airstrike: 'airstrike', sentry: 'sentry', gunship: 'gunship' };
 export const equipIcon = (id) => ICON[EQUIP_ICON[id]] || ICON.grenade;
+/** Art for one class / perk / killstreak unlock (unlocks.describe shape). */
+export function unlockIcon(d, size = 30) {
+  if (d.kind === 'class') return badgeSVG(d.key, 0, { size, title: false, animated: false });
+  if (d.kind === 'perk') return `<span class="ul-perk t${d.tier || 1}">${ICON.perk}<em>${d.tier || 1}</em></span>`;
+  return `<span class="ul-str">${ICON[STREAK_ICON[d.key]] || ICON.bolt}</span>`;
+}
 export const streakIcon = (k) => ICON[STREAK_ICON[k]] || ICON.bolt;
 // Weapon previews need GFX-CHAR's renderPreview({kind:'weapon'}). Until the
 // preview module handles that kind, keep the SVG art (a soldier would render instead).
@@ -236,6 +243,8 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
     const nAtt = Object.keys(l.primary.attachments || {}).length;
     const pk = l.perks.map((k) => A.perkByKey(k));
     const st = l.streaks.map((k) => A.streakByKey(k)).filter(Boolean);
+    const lvl = P.player().level;
+    const nx = UL.nextUnlock(lvl);
     el.innerHTML = `
       <div class="bk">
         <div class="bk-slots h-scroll" role="tablist" aria-label="Loadouts">${slotTabs()}</div>
@@ -245,7 +254,10 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
               <input id="bkName" class="bk-name" maxlength="18" value="${esc(l.name || '')}" aria-label="Loadout name" spellcheck="false" autocomplete="off" />
               ${editIdx === P.activeIndex() ? `<span class="bk-active">${ICON.check}Active</span>` : '<button id="bkUse" class="btn ghost sm">Use this loadout</button>'}
             </div>
-            <div class="bk-classes h-scroll" role="radiogroup" aria-label="Class">${A.classKeys().map((k) => `<button class="bk-cls${k === l.cls ? ' on' : ''}" data-cls="${k}" role="radio" aria-checked="${k === l.cls}">${badgeSVG(k, M.classProgress(k).tier, { size: 40, title: false, animated: k === l.cls })}<b>${esc(A.CLASSES[k].name)}</b></button>`).join('')}</div>
+            <div class="bk-classes h-scroll" role="radiogroup" aria-label="Class">${A.classKeys().map((k) => {
+              const need = UL.unlockLevel('class', k), locked = lvl < need;
+              return `<button class="bk-cls${k === l.cls ? ' on' : ''}${locked ? ' lock' : ''}" data-cls="${k}" role="radio" aria-checked="${k === l.cls}"${locked ? ` aria-disabled="true" data-need="${need}" title="${esc(A.CLASSES[k].name)}: unlocks at Level ${need}"` : ''}>${badgeSVG(k, M.classProgress(k).tier, { size: 40, title: false, animated: k === l.cls })}<b>${esc(A.CLASSES[k].name)}</b>${locked ? `<span class="ul-lock">${ICON.lock}Lv ${need}</span>` : ''}</button>`;
+            }).join('')}</div>
             <div class="bk-cinfo">
               <div class="bkc-h"><b>${esc(C.name || l.cls)}</b><span>${esc(role.role || C.desc || '')}</span></div>
               <div class="bkc-ab"><span class="ab-ic">${ICON[l.cls === 'engineer' ? 'cover' : l.cls === 'gunner' ? 'suppress' : { assault: 'grenade', marksman: 'aimed', breacher: 'breach', medic: 'patch', recon: 'scan' }[l.cls]] || ICON.bolt}</span><div><b>${esc(role.ability || '')}</b><p>${esc(role.abilityDesc || '')}</p></div></div>
@@ -265,8 +277,8 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
             </div>
             <div class="bk-sec">Perks</div>
             <div class="bk-perks">${pk.map((p, i) => `<button class="bk-perk t${i + 1}" data-pick="perk${i + 1}"><span class="pk-ic">${ICON.perk}<em>${i + 1}</em></span><b>${esc(p?.name || '?')}</b><small>${esc(p?.desc || '')}</small></button>`).join('')}</div>
-            <div class="bk-sec">Killstreaks<small>Kills in one match</small></div>
-            <div class="bk-streaks">${st.map((s) => `<button class="bk-str" data-pick="streaks"><span class="str-ic">${streakIcon(s.key)}</span><b>${esc(s.name)}</b><span class="str-c">${s.cost}<small>kills</small></span></button>`).join('')}</div>
+            <div class="bk-sec">Killstreaks<small>Streak points in one match</small></div>
+            <div class="bk-streaks">${st.map((s) => `<button class="bk-str" data-pick="streaks"><span class="str-ic">${streakIcon(s.key)}</span><b>${esc(s.name)}</b><span class="str-c">${s.cost}<small>pts</small></span></button>`).join('')}</div>
           </div>
           <div class="bk-col bk-side">
             <div class="bk-statcard">
@@ -275,6 +287,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
               <div class="flags">${flagsLine(cur)}</div>
               <p class="bk-desc">${esc(w?.desc || '')}</p>
             </div>
+            ${nx ? `<button class="bk-next" data-goto="career">${ICON.lock}<span><small>Next unlock · Level ${nx.level}</small><b>${nx.items.map((d) => esc(d.name)).join(' · ')}</b></span>${ICON.chevR}</button>` : ''}
             <div class="bk-tip">${ICON.bolt}<span>Every unlock is a sidegrade: a new player is never outgunned by raw stats.</span></div>
           </div>
         </div>
@@ -293,6 +306,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
       b.onclick = () => {
         const cls = b.dataset.cls;
         if (cls === draft.cls) return;
+        if (b.classList.contains('lock')) { onClick?.('error'); toast?.(`${A.CLASSES[cls]?.name || cls} unlocks at Level ${b.dataset.need}`, 'error', 'lock'); return; }
         click();
         const d = A.defaultLoadout(cls);
         // Keep what still fits the new class; swap the primary if its category isn't allowed.
@@ -302,6 +316,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
       };
     });
     el.querySelectorAll('[data-pick]').forEach((b) => { b.onclick = () => { click(); openPick(b.dataset.pick); }; });
+    el.querySelector('.bk-next')?.addEventListener('click', () => { click(); onChange?.('goto:career'); requestAnimationFrame(() => $('cpRoad')?.scrollIntoView({ block: 'start', behavior: 'smooth' })); });
   }
 
   // ---- pickers
@@ -313,31 +328,42 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
     if (kind === 'tactical') return pickList('Tactical', A.TACTICALS.map((e) => ({ id: e.id, name: e.name, desc: e.desc, icon: equipIcon(e.id), cyan: true, sel: draft.tactical === e.id, meta: `${e.charges} charge${e.charges === 1 ? '' : 's'}` })), (id) => { draft.tactical = id; });
     if (kind.startsWith('perk')) {
       const t = Number(kind.slice(4));
-      return pickList(`Perk ${t}`, A.PERKS[`tier${t}`].map((p) => ({ id: p.key, name: p.name, desc: p.desc, icon: ICON.perk, sel: draft.perks[t - 1] === p.key })), (id) => { draft.perks[t - 1] = id; });
+      const lvl = P.player().level;
+      return pickList(`Perk ${t}`, A.PERKS[`tier${t}`].map((p) => ({ id: p.key, name: p.name, desc: p.desc, icon: ICON.perk, sel: draft.perks[t - 1] === p.key, need: UL.perkUnlocked(p.key, lvl) ? 0 : UL.unlockLevel('perk', p.key) })), (id) => { draft.perks[t - 1] = id; });
     }
     if (kind === 'streaks') return pickStreaks();
     return null;
   }
 
   function pickList(title, items, apply) {
-    const html = `<div class="pk-list">${items.map((it) => `<button class="pk-it${it.sel ? ' sel' : ''}" data-id="${esc(it.id)}">
-        ${it.art ? `<span class="pk-art">${it.art}</span>` : `<span class="pk-ic${it.cyan ? ' cy' : ''}">${it.icon || ''}</span>`}
-        <span class="pk-t"><b>${esc(it.name)}</b><small>${esc(it.desc || '')}</small>${it.meta ? `<em>${esc(it.meta)}</em>` : ''}</span>${it.sel ? `<i class="pk-chk">${ICON.check}</i>` : ''}</button>`).join('')}</div>`;
+    const html = `<div class="pk-list">${items.map((it) => `<button class="pk-it${it.sel ? ' sel' : ''}${it.need ? ' lock' : ''}" data-id="${esc(it.id)}"${it.need ? ` aria-disabled="true" data-need="${it.need}"` : ''}>
+        ${it.art ? `<span class="pk-art">${it.art}</span>` : `<span class="pk-ic${it.cyan ? ' cy' : ''}">${it.need ? ICON.lock : it.icon || ''}</span>`}
+        <span class="pk-t"><b>${esc(it.name)}</b><small>${esc(it.desc || '')}</small>${it.meta ? `<em>${esc(it.meta)}</em>` : ''}${it.need ? `<em class="ul-need">${ICON.lock}Unlocks at Level ${it.need}</em>` : ''}</span>${it.sel ? `<i class="pk-chk">${ICON.check}</i>` : ''}</button>`).join('')}</div>`;
     openPicker(title, html, (body) => {
-      body.querySelectorAll('.pk-it').forEach((b) => { b.onclick = () => { click(); apply(b.dataset.id); commit(); closeSheet('pickSheet'); }; });
+      body.querySelectorAll('.pk-it').forEach((b) => {
+        b.onclick = () => {
+          if (b.classList.contains('lock')) { onClick?.('error'); toast?.(`${b.querySelector('b').textContent} unlocks at Level ${b.dataset.need}`, 'error', 'lock'); return; }
+          click(); apply(b.dataset.id); commit(); closeSheet('pickSheet');
+        };
+      });
     });
   }
 
   function pickStreaks() {
     let sel = [...draft.streaks];
-    const render = () => `<p class="pk-note">Pick three. Each unlocks once your kills this match reach its cost; Hardline makes them 1 cheaper.</p>
-      <div class="pk-list streaks">${A.STREAKS.map((s) => { const on = sel.includes(s.key); return `<button class="pk-it${on ? ' sel' : ''}" data-id="${s.key}"><span class="pk-ic str">${streakIcon(s.key)}</span><span class="pk-t"><b>${esc(s.name)}</b><small>${esc(s.desc)}</small></span><span class="str-c">${s.cost}<small>kills</small></span>${on ? `<i class="pk-chk">${ICON.check}</i>` : ''}</button>`; }).join('')}</div>
+    const render = () => `<p class="pk-note">Pick three. Each is earned once your streak points this match reach its cost (kill 2, down 1, assist 1, revive 1); Hardline makes them 1 cheaper. More unlock as you level up.</p>
+      <div class="pk-list streaks">${A.STREAKS.map((s) => {
+        const on = sel.includes(s.key);
+        const need = UL.streakUnlocked(s.key, P.player().level) ? 0 : UL.unlockLevel('streak', s.key);
+        return `<button class="pk-it${on ? ' sel' : ''}${need ? ' lock' : ''}" data-id="${s.key}"${need ? ` aria-disabled="true" data-need="${need}"` : ''}><span class="pk-ic str">${need ? ICON.lock : streakIcon(s.key)}</span><span class="pk-t"><b>${esc(s.name)}</b><small>${esc(s.desc)}</small>${need ? `<em class="ul-need">${ICON.lock}Unlocks at Level ${need}</em>` : ''}</span><span class="str-c">${s.cost}<small>pts</small></span>${on ? `<i class="pk-chk">${ICON.check}</i>` : ''}</button>`;
+      }).join('')}</div>
       <div class="pk-foot"><span>${sel.length}/3 selected</span><button class="btn primary" id="pkStrOk" ${sel.length === 3 ? '' : 'disabled'}>Save</button></div>`;
     openPicker('Killstreaks', render(), function wire(body) {
       body.querySelectorAll('.pk-it').forEach((b) => {
         b.onclick = () => {
           click();
           const k = b.dataset.id;
+          if (b.classList.contains('lock')) { onClick?.('error'); toast?.(`${b.querySelector('b').textContent} unlocks at Level ${b.dataset.need}`, 'error', 'lock'); return; }
           if (sel.includes(k)) sel = sel.filter((x) => x !== k);
           else if (sel.length < 3) sel.push(k);
           else { sel.shift(); sel.push(k); }
@@ -548,6 +574,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
       </div>
       <div class="career">${tile('trophy', c.wins, c.wins === 1 ? 'Win' : 'Wins')}${tile('skull', c.kills, 'Kills')}${tile('squads', c.matches, c.matches === 1 ? 'Match' : 'Matches')}${tile('medal', c.best ? `#${c.best}` : '–', 'Best')}
         <div class="cr-foot">${c.matches ? `${winRate}% win rate${c.streak > 1 ? ` · ${c.streak} win streak` : ''} · ${fmt(pr.totals.medals)} medals` : 'No matches yet. Your record starts with the first drop.'}</div></div>
+      ${unlockRoad(lv.level)}
       <div class="bk-sec">Daily challenges<small>New in ${h}h ${mi}m</small></div>
       <div class="cp-daily">${ds.map((d) => `<div class="dc${d.done ? ' done' : ''}"><span class="dc-ic">${d.done ? ICON.check : ICON.calendar}</span><div class="dc-t"><b>${esc(d.label)}</b><span class="xpbar sm"><i style="--w:${Math.round((d.have / d.n) * 100)}%"></i></span><small>${d.have}/${d.n}</small></div><div class="dc-r"><span>+${fmt(d.xp)} XP</span><span>${ICON.coin}${d.salvage}</span></div></div>`).join('')}</div>
       <div class="bk-sec">Class prestige<small>Recruit → Legend, earned per class</small></div>
@@ -562,7 +589,28 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
     wireCareer(el);
   }
 
+  /** 5.2: the road of class / perk / killstreak unlocks by player level. */
+  function unlockRoad(level) {
+    const road = UL.road();
+    const next = road.find((s) => s.level > level);
+    const got = road.filter((s) => s.level <= level).reduce((a, s) => a + s.items.length, 0);
+    const total = road.reduce((a, s) => a + s.items.length, 0);
+    const stop = (s) => {
+      const st = s.level <= level ? 'got' : s === next ? 'next' : 'lock';
+      return `<div class="ur-stop ${st}"><div class="ur-lv"><small>Level</small><b>${s.level}</b>${st === 'got' ? `<i>${ICON.check}</i>` : st === 'lock' ? `<i>${ICON.lock}</i>` : ''}</div>
+        <div class="ur-items">${s.items.map((d) => `<div class="ur-it k-${d.kind}" title="${esc(d.desc)}"><span class="ur-ic">${unlockIcon(d, 30)}</span><span class="ur-t"><b>${esc(d.name)}</b><small>${esc(d.label)}</small></span></div>`).join('')}</div></div>`;
+    };
+    return `<div class="bk-sec" id="cpRoad">Unlocks<small>${got}/${total} · ${next ? `next at level ${next.level}` : 'all unlocked'}</small></div>
+      <div class="cp-road h-scroll" role="list">
+        <div class="ur-stop got start"><div class="ur-lv"><small>Start</small><b>1</b><i>${ICON.check}</i></div><div class="ur-items">${UL.starters().map((d) => `<div class="ur-it k-${d.kind} mini" title="${esc(d.desc)}"><span class="ur-ic">${unlockIcon(d, 22)}</span><b>${esc(d.name)}</b></div>`).join('')}</div></div>
+        ${road.map(stop).join('')}
+      </div>`;
+  }
+
   function wireCareer(el) {
+    // open the unlock road on the next unlock
+    const nx = el.querySelector('.ur-stop.next');
+    if (nx) requestAnimationFrame(() => { const r = nx.parentElement; if (r) r.scrollLeft = Math.max(0, nx.offsetLeft - r.clientWidth / 3); });
     const cs = $('callsign');
     const commitCs = () => { const v = cleanCallsign(cs.value) || randomCallsign(); settings.callsign = v; cs.value = v; renderProfile(); };
     cs.addEventListener('input', () => { const v = cs.value.toUpperCase().replace(/[^A-Z0-9 ._-]/g, ''); if (v !== cs.value) cs.value = v; });

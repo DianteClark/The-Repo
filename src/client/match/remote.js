@@ -177,7 +177,8 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
         });
         return;
       }
-      case 'step': hook('onStep', { active: m.active || [], activeCount: m.activeCount, engagements: m.engagements || [], round: m.round }); return;
+      // 5.2: after what's queued has played (the turn label must not run ahead of the animations)
+      case 'step': player.then(() => hook('onStep', { active: m.active || [], activeCount: m.activeCount, engagements: m.engagements || [], round: m.round })); return;
       case 'status': hook('onStatus', m.msg, m.level || 'info'); return;
       case 'pit': player.then(() => pit(m)); return;
       case 'over': player.then(() => finish(m.summary)); return;
@@ -214,7 +215,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
 
   function tick() {
     const me = mirror?.units?.[myUnitId];
-    const spec = !!mirror && view.state === mirror && (!me || !me.alive);
+    const spec = !!mirror && view.state === mirror && (!me || (!me.alive && player.playedDead(mirror, myUnitId)));
     if (spec !== player.spectating) { player.spectating = spec; player.applySpeed(); hook('onState'); }
     if (!turn) return;
     const now = performance.now();
@@ -253,6 +254,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
     get summary() { return summary; },
     get speed() { return player.spec; },
     get spectating() { return player.spectating; },
+    get pending() { return player.pending; },
     get fastForwarding() { return player.ff; },
     get turn() { return turn ? { unitId: turn.unitId, deadline: turn.deadline, total: turn.total, busy: turn.busy, left: Math.max(0, (turn.deadline - performance.now()) / 1000) } : null; },
     get names() { return names; },
@@ -308,7 +310,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
     setSpeed(x) { player.spec = SPEC_SPEEDS.includes(x) ? x : 2; player.applySpeed(); return player.spec; },
     fastForward() {
       const me = mirror?.units?.[myUnitId];
-      if (me && me.alive) return false;
+      if (me && (me.alive || !player.playedDead(mirror, myUnitId))) return false;
       player.ff = true;
       return true;
     },

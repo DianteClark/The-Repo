@@ -363,7 +363,8 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
   function updateSpectating() {
     if (!state) return;
     const me = state.units[myUnitId];
-    const spec = view.state === state && (!me || !me.alive); // in my Pit duel I'm playing, not spectating
+    // in my Pit duel I'm playing, not spectating; 5.2: only once my death has PLAYED here
+    const spec = view.state === state && (!me || (!me.alive && player.playedDead(state, myUnitId)));
     if (spec !== player.spectating) { player.spectating = spec; player.applySpeed(); hook('onState'); }
   }
 
@@ -543,6 +544,8 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
     get speed() { return player.spec; },
     get fastForwarding() { return player.ff; },
     get spectating() { return player.spectating; },
+    /** Batches queued or playing here (0 = everything the sim did has been shown). */
+    get pending() { return player.pending; },
     get turn() {
       const t = turns.get(myUnitId) || [...turns.values()].find((x) => x.local);
       return t ? { unitId: t.unitId, deadline: t.deadline, total: t.total, busy: t.busy, left: Math.max(0, (t.deadline - performance.now()) / 1000) } : null;
@@ -595,7 +598,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
     /** Skip the remaining animations (spectating). Online, other players' turns still run at their pace. */
     fastForward() {
       const me = state.units[myUnitId];
-      if (me && me.alive) return false; // only once out of the match (spectating)
+      if (me && (me.alive || !player.playedDead(state, myUnitId))) return false; // only once out of the match (spectating), after my death played
       player.ff = true;
       return true;
     },
@@ -611,7 +614,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
       endResolve?.(summary || { reason, place: null, winner: state?.winner ?? null });
     },
     /** Debug/test helpers */
-    _debug: { turns, humans, clients, player, get stateRef() { return state; } },
+    _debug: { turns, humans, clients, player, emit, get stateRef() { return state; } },
   };
   api.done = new Promise((r) => { endResolve = r; });
   return api;

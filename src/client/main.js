@@ -19,7 +19,8 @@ import { initShop } from './ui/shop.js';
 import { squadColor } from './ui/squads.js';
 import * as P from './ui/progress.js';
 import * as AR from './ui/arsenal.js';
-import { initHubPages, medalArt, equipIcon, streakIcon, weaponImg } from './ui/hubpages.js';
+import { initHubPages, medalArt, equipIcon, streakIcon, weaponImg, unlockIcon } from './ui/hubpages.js';
+import * as UL from './ui/unlocks.js';
 import { hydrateThumbs } from './ui/weaponthumbs.js';
 import { openTransfer } from './ui/xferui.js';
 import { cardSVG, emblemSVG, CARDS, EMBLEMS } from '../shared/cards.js';
@@ -34,6 +35,7 @@ import {
 } from './ui/menu.js';
 import * as H from './ui/hud.js';
 import * as J from './ui/juice.js';
+import { createShown } from './ui/shown.js';
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -138,6 +140,20 @@ document.addEventListener('click', (e) => {
 // ---------------------------------------------------------------- state
 
 let state = null;
+// 5.2: the DISPLAYED model (src/client/ui/shown.js). The sim resolves an action instantly and
+// its events animate afterwards, so every player-facing read (unit card, downed alert, spectator
+// bar, squads left, minimap, streak bar, ammo…) goes through hudState(): the live state when
+// nothing is queued, otherwise the state as far as the played events have shown it.
+const shown = createShown();
+/** The state the HUD may show right now (never ahead of the animations). */
+function hudState() {
+  if (!state) return null;
+  if (fastForward || attract || !ctl || !(ctl.pending > 0)) return state;
+  if (!shown.ready || shown.live !== state) shown.sync(state); // first read, or the Pit swapped the view
+  return shown.state();
+}
+/** My unit as displayed. */
+const shownMe = () => { const S = hudState(); return S && myId() >= 0 ? S.units[myId()] || null : null; };
 let gameToken = 0;
 let turnCtx = null;        // the active human turn
 let fastForward = false;
@@ -192,6 +208,10 @@ const myTeam = () => (pitView ? (state?.units?.[myId()]?.team ?? -1) : ctl ? ctl
 const keyOf = (x, y) => y * state.map.size + x;
 const playerAlive = () => !!me()?.alive;
 const playerUp = () => standing(me());
+// 5.2: as the player has SEEN it (see hudState)
+const shownAlive = () => !!shownMe()?.alive;
+const shownUp = () => standing(shownMe());
+const shownWinner = () => hudState()?.winner ?? null;
 const teamMode = () => !!state && MODES[state.mode].teamSize > 1;
 const callsign = () => cleanCallsign(settings.callsign) || 'You';
 const unitVisible = (u) => {
@@ -495,7 +515,7 @@ const minimap = new Minimap($('minimap'), {
 });
 setInterval(() => {
   if (document.hidden || !state || fastForward || $('hud').classList.contains('hidden')) return;
-  minimap.draw(state, R);
+  minimap.draw(hudState(), R); // 5.2: displayed units / crates / zone only
 }, 180);
 
 // ---------------------------------------------------------------- tab visibility
@@ -710,6 +730,9 @@ async function startGame({ online = null } = {}) {
     return;
   }
   state = ctl.view || ctl.state;
+  shown.reset();
+  shown.setRenderer(R);
+  if (state) shown.sync(state);
   stats = { dmg: 0, shots: 0, hits: 0, kills: 0, squadKills: 0, roundOut: null, taken: 0, revives: 0, patched: 0, scans: 0, downs: 0, barrels: 0, recorded: false, award: null, streaks: 0, lethalKills: 0 };
   zoneCenter = state ? { x: state.zone.x, y: state.zone.y } : null;
   Rcall('setMenuShowcase', false);
@@ -759,7 +782,14 @@ function matchHooks(token) {
       }
     },
     onEventStart: guard((ev) => { preMeta(ev); }),
-    onEvent: guard((ev, info = {}) => { fastForward = !!info.ff; meta(ev); }),
+    onEvent: guard((ev, info = {}) => {
+      fastForward = !!info.ff;
+      // 5.2: the event has PLAYED: only now does its consequence reach the displayed model
+      if (!info.ff && !info.scope) shown.apply(ev, state);
+      meta(ev);
+    }),
+    // everything queued has played: the displayed model catches up with the sim
+    onIdle: guard(() => { shown.sync(state); queueHud(); }),
     onTurnStart: guard((t) => openTurn(t)),
     onTick: guard((t) => {
       if (turnCtx && t.unitId === turnCtx.u.id) { turnCtx.deadline = t.deadline; turnCtx.total = t.total; }
@@ -965,7 +995,7 @@ let specIdx = -1;
 function cycleSpectate(dir) {
   if (!state) return;
   const mt = myTeam();
-  const list = state.units.filter((u) => standing(u) && (u.team === mt || unitVisible(u)))
+  const list = hudState().units.filter((u) => standing(u) && (u.team === mt || unitVisible(u)))
     .sort((a, b) => (b.team === mt) - (a.team === mt) || a.team - b.team || a.id - b.id);
   if (!list.length) return;
   const cur = list.findIndex((u) => u.id === specIdx);
@@ -976,7 +1006,7 @@ function cycleSpectate(dir) {
   renderSpecWho();
 }
 function renderSpecWho() {
-  const u = state?.units[specIdx];
+  const u = hudState()?.units[specIdx];
   const el = $('specWho');
   if (!el) return;
   if (!u || !u.alive) { el.innerHTML = '<small>Free camera</small><b>Tap ‹ › to follow a soldier</b>'; return; }
@@ -984,7 +1014,7 @@ function renderSpecWho() {
 }
 
 function skipToResults() {
-  if (!state || state.winner !== null || !ctl) return;
+  if (!state || !ctl || shownAlive() || shownWinner() !== null) return; // 5.2: never before my death has played
   if (ctl.fastForward?.() === false) { H.toast('Online matches play out at everyone\'s pace', 'info', 'clock'); return; }
   fastForward = true;
   $('skipBtn').disabled = true;
@@ -1010,7 +1040,7 @@ function openTurn(t) {
 
 function updateTimer(left) {
   const c = turnCtx;
-  H.renderTimer({ left: left ?? (c ? Math.max(0, (c.deadline - performance.now()) / 1000) : 0), total: TURN_SECONDS, active: !!c, style: settings.timer, over: !!state && state.winner !== null });
+  H.renderTimer({ left: left ?? (c ? Math.max(0, (c.deadline - performance.now()) / 1000) : 0), total: TURN_SECONDS, active: !!c, style: settings.timer, over: !!state && shownWinner() !== null });
 }
 
 function openPause() {
@@ -1198,7 +1228,7 @@ function setFor(mode, u) {
 }
 
 const CD_LABEL = (n) => `Cooldown: ${n} round${n === 1 ? '' : 's'}`;
-const downedMates = () => (state ? state.teams[myTeam()].members.map((id) => state.units[id]).filter((m) => m.alive && m.downed) : []);
+const downedMates = (S = hudState()) => (S ? S.teams[myTeam()].members.map((id) => S.units[id]).filter((m) => m.alive && m.downed) : []);
 
 // ---- 5.0 kit helpers (ammo, weapons, equipment, streaks): all feature-checked against the sim
 
@@ -1545,7 +1575,7 @@ function pressStreak(s) {
 
 function endTurnPressed(force = false) {
   if (!turnCtx) {
-    if (state && !playerAlive() && state.winner === null) skipToResults();
+    if (state && !shownAlive() && shownWinner() === null) skipToResults();
     return;
   }
   if (turnCtx.busy) return;
@@ -2216,7 +2246,8 @@ function onUnitTap(id) {
   if (t.team === myTeam()) { if (turnCtx) handleTile(t.x, t.y); return; }
   if (!unitVisible(t)) return;
   if (!turnCtx || turnCtx.busy) {
-    H.toast(`Squad ${t.team + 1} · ${t.name} · ${CLASSES[t.cls]?.name || t.cls} · ${t.downed ? 'downed' : `${t.hp}/${t.maxHp} HP`}`, 'info', 'eye');
+    const d = hudState().units[id] || t; // 5.2: as displayed, not as already resolved
+    H.toast(`Squad ${t.team + 1} · ${t.name} · ${CLASSES[t.cls]?.name || t.cls} · ${d.downed ? 'downed' : `${d.hp}/${d.maxHp} HP`}`, 'info', 'eye');
     return;
   }
   if (AREA_MODES.has(ui.mode)) { handleTile(t.x, t.y); return; }
@@ -2325,7 +2356,7 @@ function updateEndBtn(force) {
   const b = $('endBtn');
   if (!b) return;
   if (b.classList.contains('armed') && !force) return;
-  const u = me();
+  const u = shownMe(); // 5.2: as displayed
   const my = !!turnCtx && !turnCtx.busy;
   b.className = 'act end ' + (my ? 'on' : 'off');
   b.innerHTML = `<span class="ai">${ICON.end}</span><span class="al">End turn</span><kbd>Space</kbd>`;
@@ -2336,49 +2367,51 @@ function updateEndBtn(force) {
 
 function updateHud() {
   if (!state || attract) return;
-  const u = me();
-  const alive = new Set(typeof G.aliveTeams === 'function' ? G.aliveTeams(state) : state.teams.map((t) => t.id));
+  // 5.2: everything below reads the DISPLAYED state (S), never the sim's resolved future.
+  const S = hudState();
+  const u = S.units[myId()] || null;
+  const liveU = me();
+  const alive = new Set(typeof G.aliveTeams === 'function' ? G.aliveTeams(S) : S.teams.map((t) => t.id));
   const mt = myTeam();
   let act = pitView ? [] : activeTeams.filter((t) => alive.has(t));
-  if (!act.length && state.winner === null) {
+  if (!act.length && S.winner === null) {
     try { act = typeof G.activeTeams === 'function' ? G.activeTeams(state) : [G.currentTeamId(state)]; } catch { act = []; }
   }
-  const curTeam = state.winner === null ? (act.includes(mt) ? mt : act[0] ?? -1) : -1;
+  const curTeam = S.winner === null ? (act.includes(mt) ? mt : act[0] ?? -1) : -1;
 
   // turn strip + label
-  H.renderTurnStrip(state, { myTeam: mt, activeTeam: curTeam, activeTeams: act, alive });
+  H.renderTurnStrip(S, { myTeam: mt, activeTeam: curTeam, activeTeams: act, alive });
   let label, kind;
-  if (pitView && state.winner !== null) { const w = state.winner === mt; label = w ? 'THE PIT · WON · REDEPLOYING' : 'ELIMINATED · SPECTATING'; kind = w ? 'you' : 'neutral'; } // duel over, arena still on screen
-  else if (state.winner !== null) { label = state.winner === mt ? 'VICTORY' : 'MATCH OVER'; kind = state.winner === mt ? 'you' : 'neutral'; }
+  if (pitView && S.winner !== null) { const w = S.winner === mt; label = w ? 'THE PIT · WON · REDEPLOYING' : 'ELIMINATED · SPECTATING'; kind = w ? 'you' : 'neutral'; } // duel over, arena still on screen
+  else if (S.winner !== null) { label = S.winner === mt ? 'VICTORY' : 'MATCH OVER'; kind = S.winner === mt ? 'you' : 'neutral'; }
   else if (!pitView && !standing(u) && u && !u.alive && ctl?.state?.pit?.queue?.includes?.(u.id)) { label = 'OUT · WAITING FOR THE PIT'; kind = 'neutral'; }
   else if (pitView) { label = turnCtx ? 'THE PIT · YOUR TURN' : 'THE PIT'; kind = turnCtx ? 'you' : 'enemy'; }
   else if (turnCtx) { label = 'YOUR TURN'; kind = 'you'; }
-  else if (act.includes(mt)) { label = playerUp() ? (turnCtx === null && act.length > 1 ? 'SQUADS MOVING' : 'SQUADMATES MOVING') : 'YOUR SQUAD'; kind = 'mates'; }
+  else if (act.includes(mt)) { label = standing(u) ? (turnCtx === null && act.length > 1 ? 'SQUADS MOVING' : 'SQUADMATES MOVING') : 'YOUR SQUAD'; kind = 'mates'; }
   else if (act.length > 1) { label = `${act.length} SQUADS MOVING`; kind = 'enemy'; }
   else { label = curTeam >= 0 ? squadName(curTeam).toUpperCase() : 'STANDBY'; kind = 'enemy'; }
   H.renderTurnLabel(label, kind);
   updateTimer();
 
   // chips
-  const z = state.zone;
   H.renderChips({
-    round: state.round,
+    round: S.round,
     squadsLeft: alive.size,
-    squadsTotal: state.teams.length,
-    tideIn: G.roundsUntilShrink ? G.roundsUntilShrink(state) : 0,
-    tideDmg: G.zoneDamage ? G.zoneDamage(state) : 0,
-    outside: u?.alive && !G.insideZone(state, u.x, u.y),
+    squadsTotal: S.teams.length,
+    tideIn: G.roundsUntilShrink ? G.roundsUntilShrink(S) : 0,
+    tideDmg: G.zoneDamage ? G.zoneDamage(S) : 0,
+    outside: u?.alive && !G.insideZone(S, u.x, u.y),
     nextOutside: u?.alive && !insideNext(u.x, u.y),
   });
 
   // unit card + actions
-  const mates = state.teams[mt]?.members.map((id) => state.units[id]).filter((m) => standing(m) && !isMe(m)).length || 0;
-  const boatV = u?.alive && u.vehicle != null ? (state.vehicles || []).find((v) => v.id === u.vehicle) : null;
+  const mates = S.teams[mt]?.members.map((id) => S.units[id]).filter((m) => standing(m) && !isMe(m)).length || 0;
+  const boatV = u?.alive && u.vehicle != null ? (S.vehicles || []).find((v) => v.id === u.vehicle) : null;
   const boat = boatV ? { hp: boatV.hp, maxHp: boatV.maxHp ?? 12, fuel: boatV.fuel, driver: boatV.seats?.[0] === u.id } : null;
-  const spotted = !!u?.alive && !!state.reveals?.some((r) => r.team !== mt && r.ids?.includes(u.id));
+  const spotted = !!u?.alive && !!S.reveals?.some((r) => r.team !== mt && r.ids?.includes(u.id));
   H.renderUnitCard(u, {
     CLASSES, myTurn: !!turnCtx, callsign: callsign(), boat,
-    outside: u?.alive && !G.insideZone(state, u.x, u.y),
+    outside: u?.alive && !G.insideZone(S, u.x, u.y),
     nextOutside: u?.alive && !insideNext(u.x, u.y),
     spectating: !u?.alive, aliveMates: mates,
     inSmoke: !!u?.alive && concealBy(u.x, u.y) === 'smoke',
@@ -2389,11 +2422,15 @@ function updateHud() {
     spotted,
   });
   if (standing(u)) {
-    const { list, av } = actionList(u);
-    if (!turnCtx) ui.gearOpen = false;
-    H.renderActions(list, pressAction, { open: !!ui.gearOpen, onToggle: () => toggleGear() });
-    renderWeaponBar(u, av);
-    renderStreakBar(u);
+    // Actions are computed on the live unit (the sim's rules); while my own downing / death is
+    // still animating the bars simply stay as they were.
+    if (standing(liveU)) {
+      const { list, av } = actionList(liveU);
+      if (!turnCtx) ui.gearOpen = false;
+      H.renderActions(list, pressAction, { open: !!ui.gearOpen, onToggle: () => toggleGear() });
+      renderWeaponBar(u, av);
+      renderStreakBar(u);
+    }
   } else { ui.gearOpen = false; H.renderActions([], pressAction, {}); $('wpnBar').classList.add('hidden'); $('streakBar').classList.add('hidden'); }
   updateEndBtn();
   document.body.classList.toggle('my-turn', !!turnCtx);
@@ -2401,7 +2438,7 @@ function updateHud() {
   document.body.classList.toggle('downed', !!u?.alive && !!u?.downed);
 
   // downed squadmates: alert + world markers
-  const downed = state.winner === null ? downedMates() : [];
+  const downed = S.winner === null ? downedMates(S) : [];
   const canAct = !!turnCtx && !turnCtx.busy && standing(u) && u.ap > 0;
   const rset = canAct && downed.length ? reviveSet(u) : null;
   H.renderSquadAlert(downed.filter((m) => !isMe(m)).map((m) => ({
@@ -2410,13 +2447,13 @@ function updateHud() {
   })), {
     canAct,
     onRevive: (id) => { sfx.uiClick(); quickRevive(id); },
-    onFind: (id) => { sfx.uiClick(); const m = state.units[id]; Rcall('setFollow', null); Rcall('focus', m.x, m.y); },
+    onFind: (id) => { sfx.uiClick(); const m = hudState().units[id]; Rcall('setFollow', null); Rcall('focus', m.x, m.y); },
   });
   const sig = downed.map((m) => m.id).join(',');
   if (sig !== reviveSig) { reviveSig = sig; Rcall('setReviveMarkers', downed.length ? downed.map((m) => m.id) : null); }
 
   // spectator bar
-  const spec = !u?.alive && state.winner === null;
+  const spec = !u?.alive && S.winner === null;
   $('specBar').classList.toggle('hidden', !spec);
   if (spec && !fastForward) {
     $('skipBtn').disabled = false;
@@ -2424,8 +2461,8 @@ function updateHud() {
   }
   $('dock').classList.toggle('spectating', !standing(u));
 
-  updateIntensity(u, alive);
-  minimap.draw(state, R);
+  updateIntensity(u, alive, S);
+  minimap.draw(S, R);
 }
 
 /** Ammo counter + reload + primary/secondary swap (5.0). */
@@ -2493,21 +2530,21 @@ function queueHud() {
   requestAnimationFrame(() => { hudQueued = false; updateHud(); });
 }
 
-function updateIntensity(u, alive) {
-  const total = Math.max(2, state.teams.length);
+function updateIntensity(u, alive, S = hudState()) {
+  const total = Math.max(2, S.teams.length);
   const prog = 1 - (alive.size - 1) / (total - 1);
-  const stage = clamp((state.zone.stage || 0) / 6, 0, 1);
+  const stage = clamp((S.zone.stage || 0) / 6, 0, 1);
   let near = 0;
   const ref = u?.alive ? u : (hasR('myRef') ? Rcall('myRef') : null);
   if (ref) {
-    for (const e of state.units) {
+    for (const e of S.units) {
       if (standing(e) && e.team !== myTeam() && unitVisible(e) && RU.dist(e.x, e.y, ref.x, ref.y) <= 9) near++;
     }
   }
   let v = 0.12 + prog * 0.42 + stage * 0.16 + Math.min(1, near / 2) * 0.3;
   if (turnCtx) { const left = (turnCtx.deadline - performance.now()) / 1000; if (left < 6) v += 0.08; }
   if (u?.downed) v += 0.1;
-  if (state.winner !== null) v = 0.15;
+  if (S.winner !== null) v = 0.15;
   v = clamp(Math.round(v * 50) / 50, 0, 1);
   if (v !== lastIntensity) { lastIntensity = v; sfx.setIntensity(v); }
   updateAmbience();
@@ -2671,7 +2708,7 @@ function meta(ev) {
     }
     case 'flare_end': {
       const u = st.units[ev.id];
-      if (!ff && isMe(u) && u.alive) H.toast('Your flare burned out. Back in the dark', 'info', 'flare');
+      if (!ff && isMe(u) && shownAlive()) H.toast('Your flare burned out. Back in the dark', 'info', 'flare');
       queueHud();
       break;
     }
@@ -2696,7 +2733,7 @@ function meta(ev) {
         buzz('downed');
         H.edgeGlow('hurt', 1600);
       } else if (u.team === mt) {
-        H.banner(`${u.name.toUpperCase()} IS DOWN`, 'down', playerUp() ? 'Get next to them and revive' : 'Hold on', 1700);
+        H.banner(`${u.name.toUpperCase()} IS DOWN`, 'down', shownUp() ? 'Get next to them and revive' : 'Hold on', 1700);
         buzz('downed');
       } else if (isMe(k)) {
         H.toast(`You downed ${u.name}. Finish them before they're revived`, 'kill', 'downed');
@@ -2780,7 +2817,8 @@ function meta(ev) {
         stats.roundOut = st.round;
         stats.killedBy = k && k.team !== mt ? k.name : null;
         stats.bledOut = lastCause[ev.id] === 'bleed';
-        const mates = st.teams[mt].members.some((id) => standing(st.units[id]));
+        const S = hudState();
+        const mates = S.teams[mt].members.some((id) => standing(S.units[id]));
         if (!ff && mates) H.banner(stats.bledOut ? 'YOU BLED OUT' : 'YOU\'RE OUT', 'bad', 'Your squad fights on', 1800);
         if (!mates) Rcall('setSpectator', true);
         if (!ff) buzz('downed');
@@ -2797,7 +2835,7 @@ function meta(ev) {
         if (!ff && st.winner !== mt && stats) { sfx.stinger('defeat'); stats.defeatPlayed = true; }
       } else if (!ff) {
         H.feedLine({ a: `Squad ${ev.team + 1}`, aColor: teamColor(ev.team), icon: 'squads', note: `eliminated · #${ev.place}`, kind: 'out' });
-        if (lastKillerTeam === mt && st.winner === null) H.banner('SQUAD ELIMINATED', 'kill', `${G.aliveTeams(st).length} squads left`, 1300);
+        if (lastKillerTeam === mt && st.winner === null) H.banner('SQUAD ELIMINATED', 'kill', `${G.aliveTeams(hudState()).length} squads left`, 1300);
       }
       break;
     case 'crate': {
@@ -2824,7 +2862,7 @@ function meta(ev) {
       const nz = nextZone(st.zone);
       const drifting = moved || Math.hypot(nz.x - st.zone.x, nz.y - st.zone.y) > 0.5;
       zoneCenter = { x: cx, y: cy };
-      const u = me();
+      const u = shownMe();
       const outN = u?.alive && !insideNext(u.x, u.y);
       if (!ff) {
         if (drifting) {
@@ -2863,7 +2901,8 @@ function recordCareer(place) {
     stats.award5 = P.awardMatch5({
       cls: u.cls, place, total, won, kills: u.kills || 0, dmg: stats.dmg, revives: stats.revives,
       rounds: stats.roundOut ?? (ctl?.state || state).round, medals, weaponId: matchLoadout?.primary?.id,
-      wstats: { ...tracker.w }, // primary-weapon tallies from the event stream (juice.js tracker) streaks: tracker.streaks || stats.streaks || 0, lethalKills: tracker.lethalKills,
+      wstats: { ...tracker.w }, // primary-weapon tallies from the event stream (juice.js tracker)
+      streaks: tracker.streaks || stats.streaks || 0, lethalKills: tracker.lethalKills,
     });
   } catch (e) { warnOnce('awardMatch5', e); }
   return recordMatch({
@@ -3031,6 +3070,7 @@ function renderEndXp(a) {
     }
   }
   const unl = [
+    ...(a.player ? UL.unlocksBetween(a.player.before.level, a.player.after.level) : []).map((d) => `<div class="ec-u ul k-${d.kind}"><span class="ec-ul-ic">${unlockIcon(d, 48)}</span><b>${esc(d.name)}</b><small>${esc(d.label)} · Level ${d.level}</small></div>`),
     ...a.camos.map((x) => `<div class="ec-u camo"><span class="ec-sw big${x.camo.animated ? ' anim' : ''}" style="--c1:${x.camo.colors[0]};--c2:${x.camo.colors[1]};--c3:${x.camo.colors[2] || x.camo.colors[0]}"></span><b>${esc(x.camo.name)}</b><small>Camo · ${esc(AR.weaponById(x.weapon)?.name || '')}</small></div>`),
     ...a.unlocks.map((x) => `<div class="ec-u">${x.kind === 'card' ? cardSVG(x.id, { w: 150, animated: false }) : emblemSVG(x.id, 52)}<b>New ${x.kind === 'card' ? 'calling card' : 'emblem'}</b></div>`),
   ];
@@ -3061,7 +3101,7 @@ function animateEndXp(a, token) {
     };
     later(step, 500);
   };
-  fill('exPlayer', a.player, a.player.levelUps, (lv) => { sfx.levelUp(); buzz('win'); if (lv === a.player.after.level) queueLevelUp({ kind: 'player', level: lv }); });
+  fill('exPlayer', a.player, a.player.levelUps, (lv) => { sfx.levelUp(); buzz('win'); if (lv === a.player.after.level) queueLevelUp({ kind: 'player', level: lv, from: a.player.before.level }); });
   if (a.weapon) fill('exWeapon', a.weapon, 0, (lv) => { sfx.rankUp(); if (lv === a.weapon.after.level && a.weapon.unlocked.length) queueLevelUp({ kind: 'weapon', level: lv, weapon: a.weapon }); });
   for (const c of a.camos) queueLevelUp({ kind: 'camo', camo: c });
   // Salvage tally counts up.
@@ -3082,14 +3122,28 @@ function queueLevelUp(item) {
 }
 function showLevelUp(it) {
   const el = $('levelUp');
+  el.classList.remove('has-unl');
   if (it.kind === 'player') {
     $('luKick').textContent = 'Level up';
     $('luBadge').innerHTML = `<div class="lu-num"><small>Level</small><b>${it.level}</b></div>`;
     $('luName').textContent = `LEVEL ${it.level}`;
     $('luName').className = 'tu-name t3';
-    const cards = CARDS_AT(it.level);
-    $('luSub').textContent = cards.length ? 'New rewards unlocked.' : `${(P.levelNeed(it.level)).toLocaleString('en-US')} XP to the next level.`;
-    $('luRewards').innerHTML = cards.join('');
+    const from = Number.isFinite(it.from) ? Math.min(it.from, it.level - 1) : it.level - 1;
+    const cards = [];
+    for (let l = from + 1; l <= it.level; l++) cards.push(...CARDS_AT(l));
+    // 5.2: classes / perks / killstreaks this level-up unlocked: one card each, revealed in turn
+    const ul = UL.unlocksBetween(from, it.level);
+    const nx = UL.nextUnlock(it.level);
+    $('luSub').textContent = ul.length ? `${ul.length} new unlock${ul.length === 1 ? '' : 's'} for your loadouts.` : cards.length ? 'New rewards unlocked.' : `${(P.levelNeed(it.level)).toLocaleString('en-US')} XP to the next level.${nx ? ` Next unlock at level ${nx.level}.` : ''}`;
+    $('luRewards').innerHTML = (ul.length ? `<div class="lu-unls">${ul.map((d, i) => `<div class="lu-unl k-${d.kind}" style="--i:${i}"><div class="lu-unl-in"><div class="lu-unl-back" aria-hidden="true">${ICON.lock}</div><div class="lu-unl-front"><span class="lu-unl-k">${esc(d.kind === 'class' ? 'New class' : d.kind === 'perk' ? `New perk · tier ${d.tier}` : 'New killstreak')}</span><span class="lu-unl-ic">${unlockIcon(d, 64)}</span><b>${esc(d.name)}</b><small>${esc(d.kind === 'class' ? d.sub || d.desc : d.desc)}</small><em>Level ${d.level}</em></div></div></div>`).join('')}</div>` : '')
+      + cards.join('')
+      + (ul.length ? `<button class="btn ghost sm lu-go" id="luGo">${ICON.gear}Equip in Barracks</button>` : '');
+    if (ul.length) {
+      $('levelUp').classList.add('has-unl');
+      ul.forEach((d, i) => later(() => { sfx.rankUp?.(); buzz('tap'); }, 700 + i * 380));
+      const go = $('luGo');
+      if (go) go.onclick = () => { sfx.uiClick(); levelQueue.length = 0; closeLevelUp(true); toMenu('barracks'); };
+    } else $('levelUp').classList.remove('has-unl');
   } else if (it.kind === 'weapon') {
     const wd = AR.weaponById(it.weapon.id);
     $('luKick').textContent = `${wd?.name || ''} · weapon level`;
@@ -3375,6 +3429,38 @@ if (DEBUG) {
       if (turnCtx) finishTurn(); else updateHud();
       return 'dead';
     },
+    /**
+     * Debug only (5.2 spoiler tests): the nearest enemy steps next to me and shoots me through the
+     * REAL pipeline (sim → controller emit → playback → HUD), retrying until a hit lands.
+     * hp: my HP before the shot (1 = the hit downs / kills me).
+     */
+    async enemyShootsMe(hp = 1, who = 'me') {
+      const u = who === 'mate' ? state?.teams[myTeam()].members.map((id) => state.units[id]).find((x) => !isMe(x) && standing(x)) : me();
+      const SC = await import('../sim/core.js'), ST = await import('../sim/turns.js');
+      if (!standing(u) || !ctl?._debug?.emit || typeof SC.resolveShot !== 'function') return 'n/a';
+      const e = state.units.filter((x) => standing(x) && x.team !== u.team).sort((a, b) => RU.dist(a.x, a.y, u.x, u.y) - RU.dist(b.x, b.y, u.x, u.y))[0];
+      if (!e) return 'no enemy';
+      const S = state.map.size;
+      for (const [dx, dy] of [[2, 0], [0, 2], [-2, 0], [0, -2], [1, 0], [0, 1], [-1, 0], [0, -1]]) {
+        const x = u.x + dx, y = u.y + dy;
+        if (x < 0 || y < 0 || x >= S || y >= S || state.map.cover[y * S + x] || unitAt(x, y)) continue;
+        e.x = x; e.y = y; break;
+      }
+      u.hp = Math.max(1, hp); u.armor = 0; u.hunkered = false;
+      Rcall('syncFromState');
+      shown.sync(state);
+      const events = [];
+      for (let i = 0; i < 40 && !events.some((v) => v.type === 'shot' && v.result !== 'miss'); i++) {
+        const evs = SC.resolveShot(state, e, u);
+        const hit = evs.some((v) => v.type === 'shot' && v.result !== 'miss');
+        if (hit) events.push(...evs);
+      }
+      try { ST.settle?.(state, events); } catch { /* older sims */ }
+      ctl._debug.emit(events);
+      return events.map((v) => v.type).join(',');
+    },
+    /** Debug: the displayed model vs the sim right now (non-empty while consequences are still animating). */
+    shownDiff: () => shown.diff(),
     /** Debug only: knock the player down (team modes), as if shot. */
     downMe() {
       const u = me();
@@ -3414,7 +3500,11 @@ if (DEBUG) {
     streak: (key) => { const s = streakBar(me()).find((x) => x.key === key) || streakBar(me())[0]; if (!s) return 'none'; pressStreak({ ...s, ready: true }); return ui.mode; },
     equip: (slot = 'lethal') => { const a = actionList(me()).list.find((x) => x.key === slot); if (!a) return 'none'; pressAction(a); return ui.mode; },
     endScreen: () => { const st = ctl?.state; if (!st) return 'no match'; playerPlace = 3; showEnd(gameToken, { place: 3 }); return 'ok'; },
-    levelUp: (kind = 'player') => { queueLevelUp(kind === 'player' ? { kind, level: P.player().level } : { kind: 'camo', camo: { weapon: 'tr7', camo: P.MASTERY.gold } }); return 'ok'; },
+    levelUp: (kind = 'player', from) => { queueLevelUp(kind === 'player' ? { kind, level: P.player().level, from } : { kind: 'camo', camo: { weapon: 'tr7', camo: P.MASTERY.gold } }); return 'ok'; },
+    online: (kind = 'host', code = null) => { openOnline(kind, code); return kind; },
+    get lobby() { return lobby; },
+    /** 5.2: jump to a player level (start of it) and refresh the hub. */
+    setLevel: (n) => { const p = P._debugLevel(n); hub.render(menu.page?.() || 'play'); menu.refreshMeta?.(); return p.level; },
     pit: (phase = 'start') => { J.showPit({ phase, mine: true, meName: callsign(), foeName: 'KESTREL-09', won: true, round: 4 }); return 'ok'; },
     medal: (k = 'double_kill') => { J.showMedal(k, sfx); J.xpPop([['KILL', 100, 'kill'], ['FLANK', 50]]); J.hitmarker('kill'); J.killConfirm('VEX-31'); return 'ok'; },
     meta: M,

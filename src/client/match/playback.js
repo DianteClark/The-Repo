@@ -59,6 +59,16 @@ export function createPlayer({ R, ui = {}, getState, getMyTeam, opts = {} }) {
     lastTeam: null, // the squad whose actions we're showing (for the "Squad N is moving" beat)
     lastActor: null,
     timeline: [], // debug: [{t, ev, phase}] (last 300)
+    // 5.2: units whose death has PLAYED here (spectating flips on this, never on the sim's
+    // already-resolved state: "Skip to results" must not show before the death animation).
+    dead: new Set(),
+  };
+  /** Has this unit's death been played (or is nothing left to play and the sim says it's dead)? */
+  P.playedDead = (st, id) => {
+    const u = st?.units?.[id];
+    if (!u) return true;
+    if (u.alive) return false;
+    return P.dead.has(id) || P.pending === 0 || P.ff;
   };
 
   /** The active pacing preset (the renderer owns it: R.setPacing / R.getPacing). */
@@ -246,6 +256,8 @@ export function createPlayer({ R, ui = {}, getState, getMyTeam, opts = {} }) {
             const chain = nx && eventClass(nx) === 'conseq' && visible;
             if (!chain && owed > 0) { await P.delay(owed); owed = 0; if (g !== gen) return shown; }
           }
+          if (ev.type === 'death' && Number.isInteger(ev.id)) P.dead.add(ev.id);
+          else if (ev.type === 'redeploy' && Number.isInteger(ev.id)) P.dead.delete(ev.id);
           hook('onEvent', ev, { ff: P.ff, visible });
         }
         if (owed > 0) await P.delay(owed);
@@ -255,7 +267,7 @@ export function createPlayer({ R, ui = {}, getState, getMyTeam, opts = {} }) {
       } catch (e) { console.warn('[match] playback', e); } finally { if (cine && R) { R.cineManaged = false; if (R.inCinematic) Rcall('cineEnd', 0); } }
       return shown;
     };
-    const p = queue.then(run).finally(() => { P.pending--; });
+    const p = queue.then(run).finally(() => { P.pending--; if (P.pending === 0) hook('onIdle'); });
     queue = p.catch(() => {});
     return p;
   };
@@ -263,12 +275,12 @@ export function createPlayer({ R, ui = {}, getState, getMyTeam, opts = {} }) {
   P.then = (fn) => {
     const g = gen;
     P.pending++;
-    const p = queue.then(() => (g === gen ? fn() : undefined)).finally(() => { P.pending--; });
+    const p = queue.then(() => (g === gen ? fn() : undefined)).finally(() => { P.pending--; if (P.pending === 0) hook('onIdle'); });
     queue = p.catch(() => {});
     return p;
   };
   P.idle = () => queue;
-  P.stop = () => { gen++; queue = Promise.resolve(); P.pending = 0; P.lastTeam = null; P.lastActor = null; };
+  P.stop = () => { gen++; queue = Promise.resolve(); P.pending = 0; P.lastTeam = null; P.lastActor = null; P.dead.clear(); };
   P.Rcall = Rcall;
   P.hook = hook;
   return P;

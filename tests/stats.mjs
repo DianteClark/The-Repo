@@ -3,12 +3,14 @@
 // --detail the full breakdown (hit rates, cover, per-class results, ability usage).
 // Always ends with the 5.0 totals: class / weapon-category kill + win share, equipment,
 // ammo, killstreaks and engagement-turn shape, then the battlefield layer (boats, stage events,
-// building collapse, the Pit) and streak points (what a mid-game survivor earns).
+// building collapse, the Pit) and streak points (what a mid-game survivor earns), then the bot
+// sanity audit (tests/audit.js): counts of bad decisions such as claymores in the tide.
 import { createGame, endTeamTurn, activeTeams } from '../src/sim/game.js';
 import { botTakeTurn } from '../src/sim/ai.js';
 import { MODES, STAGE_KEYS } from '../src/sim/constants.js';
 import { weaponDef } from '../src/sim/weapons.js';
 import { streakCost } from '../src/sim/core.js';
+import { createAudit, auditReport } from './audit.js';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const detail = process.argv.includes('--detail');
@@ -26,6 +28,9 @@ const TOTAL = {
   pointsBy: {}, midN: 0, midEarned: [0, 0, 0, 0], midUsed: 0, midPoints: [], lateN: 0, lateEarned: 0,
   duels: 0, wardenDuels: 0, wardenWins: 0, duelRounds: 0, stageHits: 0, tideDeathsAboard: 0,
 };
+// Sanity audit: bad bot decisions across every match (see tests/audit.js).
+const AUDIT = createAudit();
+AUDIT.install();
 const catOf = (id) => weaponDef(id)?.cat || '?';
 
 function run(stage, mode) {
@@ -114,9 +119,14 @@ function run(stage, mode) {
     tally(s.startEvents);
     while (s.winner === null && guard++ < 5000) {
       const t = activeTeams(s)[0];
-      for (const id of s.teams[t].members) tally(botTakeTurn(s, id));
-      tally(endTeamTurn(s, t));
+      for (const id of s.teams[t].members) {
+        const evs = AUDIT.unitTurn(s, id, () => botTakeTurn(s, id));
+        AUDIT.events(s, evs); tally(evs);
+      }
+      const evs = endTeamTurn(s, t);
+      AUDIT.events(s, evs); tally(evs);
     }
+    AUDIT.endMatch();
     for (const u of s.units) {
       if (u.team !== s.winner) continue;
       st.classWin[u.cls] = (st.classWin[u.cls] || 0) + 1;
@@ -209,3 +219,7 @@ const mp = [...T.midPoints].sort((a, b) => a - b);
 const q = (p) => mp[Math.floor(p * (mp.length - 1))];
 console.log(`alive at round 8 (${T.midN}): final points p25/median/p75 ${q(0.25)}/${q(0.5)}/${q(0.75)}  streaks earned avg ${((T.midEarned[1] + 2 * T.midEarned[2] + 3 * T.midEarned[3]) / Math.max(1, T.midN)).toFixed(2)} (0/1/2/3: ${T.midEarned.map((n) => pct(n, T.midN)).join('/')})  used avg ${(T.midUsed / Math.max(1, T.midN)).toFixed(2)}`);
 console.log(`alive at round 11 (${T.lateN}): streaks earned avg ${(T.lateEarned / Math.max(1, T.lateN)).toFixed(2)}`);
+
+// ---------- sanity audit ----------
+console.log(`\n=== bot sanity audit (${T.matches} matches) ===`);
+console.log(auditReport(AUDIT.A, T.matches));

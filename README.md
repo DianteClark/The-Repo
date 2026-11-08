@@ -6,7 +6,7 @@ A 16-player, turn-based, XCOM-style battle royale that runs in the browser.
 One soldier per player. Rival salvage crews fight across a drowning archipelago
 while the storm tide (**the Surge**) floods the map from the edges in.
 
-> **Status: v5.1.** XCOM tactics × Call of Duty loadouts × Battlefield destruction. Solo vs 15 bots, or online via invite code (peer-to-peer, host-run). Installable, works offline.
+> **Status: v5.2.** XCOM tactics × Call of Duty loadouts × Battlefield destruction. Solo vs 15 bots, or online via invite code (peer-to-peer, host-run). Installable, works offline.
 
 ## Play it
 
@@ -26,7 +26,7 @@ while the storm tide (**the Surge**) floods the map from the edges in.
 | The Pit | Your first death sends you to a 1v1 duel. Win it and you redeploy |
 | Stages | Drowned Harbor · Kelp Shallows · Rig Graveyard · Night Spires · Surge Point (44×44). Picked at random by a stage wheel before every match |
 | Presentation | An action director frames every visible action before it plays · Cinematic, Normal or Fast pacing · letterboxed slow-motion stage events |
-| Progression | Player level 1–100 · class prestige badges (5 tiers) · weapon levels 1–20 · camo challenges with Gold, Diamond and animated Tidal · daily challenges · medals · calling cards and emblems |
+| Progression | Player level 1–100 unlocks classes, perks and killstreaks · class prestige badges (5 tiers) · weapon levels 1–20 · camo challenges with Gold, Diamond and animated Tidal · daily challenges · medals · calling cards and emblems |
 | Store | 120+ cosmetics: operator skins, kill effects, drop-ins, emotes, charms, tracers, streak skins, bundles. Earned Salvage only, no real money |
 | Online | Code invites, lobby with squads, host-authoritative with fog-filtered data (no hidden-info leaks), reconnect within 60 s |
 | Account | Transfer code (`TF5-…`) + QR to move your progress between devices |
