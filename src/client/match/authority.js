@@ -188,7 +188,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
       player.myTurn = true;
       player.applySpeed();
       Rcall('setFollow', null);
-      Rcall('focus', u.x, u.y);
+      if (typeof R?.overview === 'function') Rcall('overview', u.x, u.y); else Rcall('focus', u.x, u.y);
       sfx?.turn?.();
       hook('onTurnStart', { unitId: u.id, deadline: t.deadline, total: t.total, pit: world.pit || null });
     } else if (net) {
@@ -295,7 +295,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
         let evs = [];
         try { evs = AI.botTakeTurn(st, id) || []; } catch (e) { console.warn('[match] bot', e); }
         const shown = await emit(evs, world.pit ? world : null);
-        if (shown) await player.delay(player.botSpeed === 'normal' ? 220 : 120);
+        void shown; // 5.1: the beat between soldiers is paced by playback (pacing preset 'gap')
       }
     }
     if (stopped || st.winner !== null) return;
@@ -520,7 +520,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
     net.send(pid, startMsg(pid));
     if (over) { net.send(pid, { t: 'over', summary: summaryFor(c.team, c.unitId) }); return; }
     const t = turns.get(c.unitId);
-    if (t && !t.done) {
+    if (t && !t.done && !t.autoing) { // (a turn being auto-overwatched after a drop is already over)
       const left = t.acked ? Math.max(1000, t.deadline - performance.now()) : t.total;
       net.send(pid, { t: 'turn', unitId: c.unitId, ms: left });
     }

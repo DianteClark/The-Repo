@@ -2286,7 +2286,9 @@ function updateHud() {
   // turn strip + label
   H.renderTurnStrip(state, { myTeam: mt, activeTeam: curTeam, activeTeams: act, alive });
   let label, kind;
-  if (state.winner !== null) { label = state.winner === mt ? 'VICTORY' : 'MATCH OVER'; kind = state.winner === mt ? 'you' : 'neutral'; }
+  if (pitView && state.winner !== null) { const w = state.winner === mt; label = w ? 'THE PIT · WON · REDEPLOYING' : 'ELIMINATED · SPECTATING'; kind = w ? 'you' : 'neutral'; } // duel over, arena still on screen
+  else if (state.winner !== null) { label = state.winner === mt ? 'VICTORY' : 'MATCH OVER'; kind = state.winner === mt ? 'you' : 'neutral'; }
+  else if (!pitView && !standing(u) && u && !u.alive && ctl?.state?.pit?.queue?.includes?.(u.id)) { label = 'OUT · WAITING FOR THE PIT'; kind = 'neutral'; }
   else if (pitView) { label = turnCtx ? 'THE PIT · YOUR TURN' : 'THE PIT'; kind = turnCtx ? 'you' : 'enemy'; }
   else if (turnCtx) { label = 'YOUR TURN'; kind = 'you'; }
   else if (act.includes(mt)) { label = playerUp() ? (turnCtx === null && act.length > 1 ? 'SQUADS MOVING' : 'SQUADMATES MOVING') : 'YOUR SQUAD'; kind = 'mates'; }
@@ -2708,6 +2710,7 @@ function meta(ev) {
         });
         if (isMe(k) && u.team !== mt) { J.killConfirm(unitName(u), tracker.turnKills >= 2 ? `${tracker.turnKills} kills this turn` : 'Eliminated'); J.hitmarker('kill'); sfx.killConfirm(); buzz('kill'); }
       }
+      if (isMe(u) && pitView) break; // lost the Pit duel: keep the main-match death (round, killer) for the end screen
       if (isMe(u)) {
         stats.roundOut = st.round;
         stats.killedBy = k && k.team !== mt ? k.name : null;

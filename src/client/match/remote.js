@@ -118,7 +118,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       player.applySpeed();
       const u = view.state?.units[m.unitId];
       Rcall('setFollow', null);
-      if (u && !u.hidden) Rcall('focus', u.x, u.y);
+      if (u && !u.hidden) { if (typeof R?.overview === 'function') Rcall('overview', u.x, u.y); else Rcall('focus', u.x, u.y); }
       sfx?.turn?.();
       hook('onTurnStart', { unitId: m.unitId, deadline: turn.deadline, total: turn.total, pit: m.scope || null });
     });
@@ -160,7 +160,12 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
         // The host answered: stop the no-answer clock now, resolve once the action's events have played.
         const r = waiting.get(m.seq);
         r?.got?.();
-        player.then(() => { waiting.delete(m.seq); r?.({ ok: !!m.ok, error: m.error }); });
+        player.then(() => {
+          waiting.delete(m.seq);
+          r?.({ ok: !!m.ok, error: m.error });
+          // The host has no turn open for me (e.g. it auto-overwatched while I reconnected): drop my stale turn.
+          if (!m.ok && m.error === 'Not your turn' && turn) { closeTurn('ended'); net.send({ t: 'resync' }); }
+        });
         return;
       }
       case 'step': hook('onStep', { active: m.active || [], activeCount: m.activeCount, engagements: m.engagements || [], round: m.round }); return;

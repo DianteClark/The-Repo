@@ -11,7 +11,7 @@
 // then adds anything loaded at runtime that this list missed.
 // PeerJS (esm.sh) is deliberately not cached: online play needs the network anyway.
 
-const VERSION = 'tidefall-v5.0.1';
+const VERSION = 'tidefall-v5.0.2';
 const NET_TIMEOUT = 4000; // ms before a cached copy wins over a slow network
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
