@@ -44,8 +44,20 @@ import { loadPostModules, createComposer } from './gfx/post.js';
 import { SkyBackdrop, LightShafts } from './gfx/sky.js';
 import { Battlefield, BF_EVENTS } from './gfx/battlefield.js';
 import { clamp, damp, compass, easeInOutCubic, easeOutCubic, lerp } from './gfx/util.js';
+import { Director, PACING, PACING_NAMES } from './gfx/director.js';
 
-const VIEW_MIN = 5.5, VIEW_MAX = 34;
+const VIEW_MIN = 6, VIEW_MAX = 40;
+// 5.1: base (overview) zoom, pulled out from 5.0's 14 / 13 (portrait views are ×1.3 again via viewScale)
+const VIEW_BASE = 18, VIEW_BASE_PORTRAIT = 16;
+/** Critically damped spring (Unity's SmoothDamp) on one axis. vel = [v]; returns the new value. */
+function smoothDamp(cur, goal, vel, i, T, dt) {
+  const w = 2 / Math.max(1e-3, T), x = w * dt;
+  const e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const ch = cur - goal;
+  const tmp = (vel[i] + w * ch) * dt;
+  vel[i] = (vel[i] - w * tmp) * e;
+  return goal + (ch + tmp) * e;
+}
 const ELEV = 0.68; // ~39°
 const CAM_D = 60;
 const TEXT = { hit: '#ff6a55', graze: '#ffd9a0', miss: '#c9d2d0', heal: '#7fe9ff', tide: '#6fd6e8', info: '#efe7d4', signal: '#7fe9ff', kill: '#ffffff', down: '#efe7d4' };
@@ -114,8 +126,18 @@ export class Renderer {
     this.followId = null;
     this.camStack = [];
     this.userCamT = 0;
+    this.camV = [0, 0, 0]; // spring velocities: target x, target z, view
+    this.baseView = VIEW_BASE; // the overview zoom: staged actions frame relative to it; user zoom moves it
+    this._elevBase = ELEV;
+    this.specMul = 1; // spectator 1×/2×/4× (playback sets it): real-time director beats divide by it
+    this.director = new Director(this);
+    try { const pc = globalThis.localStorage?.getItem('tidefall.pacing'); if (pc && PACING[pc]) this.director.setPacing(pc); } catch { /* private mode */ }
+    this.onCinematic = null; // UI: ({phase:'start'|'end', kind, name, sub, light}) => banner
+    this.onFocus = null; // UI: ({team, unitId, name}) => "Squad 7 is moving"
 
     this._speed = 1;
+    // debug (?debug&realclock): let the render clock keep real time on very slow (software GL) machines
+    this._dtCap = (() => { try { const q = new URLSearchParams(globalThis.location?.search || ''); return q.has('debug') && q.has('realclock') ? 0.6 : 0.05; } catch { return 0.05; } })();
     this.playT = 0; // playback clock: real time × spectator speed (camera holds, hit-stop)
     this.cinematic = true;
     this.showcase = false;
@@ -272,6 +294,35 @@ export class Renderer {
   get speed() { return this._speed; }
   set speed(v) { v = Number(v); this._speed = Number.isFinite(v) && v > 0 ? Math.min(16, Math.max(0.1, v)) : 1; }
   setSpeed(x) { this.speed = x; }
+
+  // ---------- 5.1 pacing / action director ----------
+  /** Pacing preset: 'cinematic' (default) | 'normal' | 'fast'. The match controller reads it every event. */
+  setPacing(name) {
+    const n = this.director.setPacing(String(name || '').toLowerCase());
+    try { globalThis.localStorage?.setItem('tidefall.pacing', n); } catch { /* private mode */ }
+    return n;
+  }
+  getPacing() { return this.director.preset.name; }
+  /** The active preset object (numbers documented in gfx/director.js). */
+  get pacing() { return this.director.preset; }
+  get pacingNames() { return PACING_NAMES.slice(); }
+  /** Frame an event before it plays; resolves when the camera has arrived. opts: {mine, force}. */
+  stage(ev, opts) { return this.director.stage(ev, opts); }
+  /** "Squad N is moving" beat (frames the first actor; ms = beat length, 0 = hook only). */
+  squadFocus(team, unitId, ms) { return this.director.squadFocus(team, unitId, ms); }
+  /** Letterboxed set piece (stage events, airstrikes, collapses). See gfx/director.js. */
+  cineBegin(o) { return this.director.cineBegin(o); }
+  cineEnd(holdMs) { return this.director.cineEnd(holdMs); }
+  get inCinematic() { return !!this.director.cine; }
+  /** Resolve once the camera has reached its goal (bounded). */
+  cameraArrive(maxMs) { return this.director.arrive(maxMs); }
+  /** Director debug timeline (stage / arrived / cine events with camera state). */
+  get directorLog() { return this.director.log; }
+  /** Real-time pause (not slowed by slow-mo; divided by the spectator multiplier). Never hangs. */
+  _sleepReal(ms) {
+    if (this._hidden || !this.state || !(ms > 0)) return Promise.resolve();
+    return new Promise((resolve) => { (this._sleeps || (this._sleeps = [])).push({ until: this.realTime + ms / 1000 / Math.max(1, this.specMul || 1), resolve }); });
+  }
   /** Resolve after `ms` of playback time (scaled by speed, never hangs; for the match controller's inter-event gaps). */
   wait(ms) { return this._wait(ms); }
 
@@ -342,6 +393,7 @@ export class Renderer {
     this.ov = new Overlays(this.world, this.overlay, wx, wz, S);
     this.overlay.add(this._white);
     this._whiteK = 0;
+    this.director.attach(this.overlay);
 
     // shadow camera covers the whole map
     const sc = this.sun.shadow.camera;
@@ -403,12 +455,15 @@ export class Renderer {
     for (const u of state.units) this._drawLabel(u);
     const me = state.units.find((u) => u.isPlayer) || state.units.find((u) => u.alive) || state.units[0];
     this.focus(me.x, me.y, true);
-    this.view = this.viewGoal = this.aspect < 1 ? 13 : 14;
+    this.baseView = this.aspect < 1 ? VIEW_BASE_PORTRAIT : VIEW_BASE;
+    this.view = this.viewGoal = this.baseView;
+    this.camV[0] = this.camV[1] = this.camV[2] = 0;
     this.perf.warm = 0;
     if (this.showcase) this._enterShowcase(true);
   }
 
   _teardown() {
+    this.director?.flush();
     this.bf?.dispose(); this.bf = null;
     this.fx?.clear();
     this.cfx?.clear();
@@ -797,10 +852,18 @@ export class Renderer {
     this.goal.set(this.wx(x), 0, this.wz(y));
     this.followId = null;
     this.vel.set(0, 0, 0);
-    if (instant) this.target.copy(this.goal);
+    if (instant) { this.target.copy(this.goal); this.camV[0] = this.camV[1] = 0; }
+  }
+  /** Back to the overview zoom around (x, y) (e.g. my turn opens). */
+  overview(x, y, instant = false) {
+    if (Number.isFinite(x)) this.focus(x, y, instant);
+    if (this.realTime - this.userCamT > 1.2) this.viewGoal = this.baseView;
+    this.elevGoal = this._elevBase;
   }
   rotate(dir) { if (!this.showcase) this.camAngleGoal += dir; }
-  zoomBy(f) { if (this.showcase) return; this.viewGoal = clamp(this.viewGoal * f, VIEW_MIN, VIEW_MAX); this.userCamT = this.realTime; }
+  zoomBy(f) { if (this.showcase) return; this.viewGoal = clamp(this.viewGoal * f, VIEW_MIN, VIEW_MAX); this._userZoom(); }
+  /** The player zoomed: their zoom becomes the overview the director frames around. */
+  _userZoom() { this.userCamT = this.realTime; this.baseView = clamp(this.viewGoal, 10, 30); }
   setFollow(id) { this.followId = id ?? null; if (id !== null && id !== undefined) this.vel.set(0, 0, 0); }
 
   /** Push a tagged camera hold; it auto-releases after HOLD[tag] seconds. */
@@ -832,7 +895,7 @@ export class Renderer {
   }
   _camExpire() {
     // invariant: slow-mo only lives while an action-cam hold does
-    if (this.slowGoal < 1) {
+    if (this.slowGoal < 1 && !this.director.cine) {
       let held = false;
       for (let i = 0; i < this.camStack.length; i++) { const t = this.camStack[i].tag; if (t === 'kill' || t === 'shot') { held = true; break; } }
       if (!held) this.slowGoal = 1;
@@ -875,8 +938,17 @@ export class Renderer {
         this.goal.z = clamp(this.goal.z, -lim, lim);
       }
       if (dt > 0) {
-        if (!this.dragging) this.target.lerp(this.goal, damp(this.followId !== null ? 9 : 7, dtc));
-        this.view += (this.viewGoal - this.view) * damp(9, dtc);
+        // 5.1: critically damped glide (eases in AND out: no lurch at the start of a move).
+        // The player's own pan / fling / zoom stays on the snappy exponential follow.
+        const user = this.realTime - this.userCamT < 0.6;
+        if (this.dragging) { this.camV[0] = this.camV[1] = 0; } else if (user) this.target.lerp(this.goal, damp(9, dtc));
+        else {
+          const T = this.followId !== null ? 0.16 : this.director.preset.camTime;
+          this.target.x = smoothDamp(this.target.x, this.goal.x, this.camV, 0, T, dtc);
+          this.target.z = smoothDamp(this.target.z, this.goal.z, this.camV, 1, T, dtc);
+        }
+        if (user) { this.view += (this.viewGoal - this.view) * damp(10, dtc); this.camV[2] = 0; }
+        else this.view = smoothDamp(this.view, this.viewGoal, this.camV, 2, this.director.preset.camTime * 1.15, dtc);
         this.camAngle += (this.camAngleGoal - this.camAngle) * damp(8, dt);
         this.elev += (this.elevGoal - this.elev) * damp(5, dtc);
       }
@@ -992,7 +1064,7 @@ export class Renderer {
       let gx, gy;
       if (pts.size >= 2) {
         const [mx, my, d] = mid();
-        if (pinch0 > 0) { this.viewGoal = this.view = clamp(view0 * (pinch0 / Math.max(1, d)), VIEW_MIN, VIEW_MAX); }
+        if (pinch0 > 0) { this.viewGoal = this.view = clamp(view0 * (pinch0 / Math.max(1, d)), VIEW_MIN, VIEW_MAX); this._userZoom(); this.camV[2] = 0; }
         gx = mx; gy = my;
       } else {
         if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 8) dragged = true;
@@ -1007,6 +1079,7 @@ export class Renderer {
         const dx = grab.x - cur.x, dz = grab.z - cur.z;
         this.target.x += dx; this.target.z += dz;
         this.goal.copy(this.target);
+        this.camV[0] = this.camV[1] = 0;
         const now = performance.now(), dtm = Math.max(1, now - lastMoveT) / 1000;
         lastMoveT = now;
         this.vel.set(lerp(this.vel.x, dx / dtm, 0.35), 0, lerp(this.vel.z, dz / dtm, 0.35));
@@ -1040,7 +1113,7 @@ export class Renderer {
       }
       this.viewGoal = nv;
       this.followId = null;
-      this.userCamT = this.realTime;
+      this._userZoom();
     }, { passive: false });
   }
 
@@ -1096,7 +1169,7 @@ export class Renderer {
   get _fast() { return this._speed > 2.6; }
 
   _frame(now) {
-    const realDt = Math.min(0.05, Math.max(0, (now - this._last) / 1000));
+    const realDt = Math.min(this._dtCap, Math.max(0, (now - this._last) / 1000));
     this._last = now;
     this.realTime += realDt;
     const sp = this._speed;
@@ -1116,6 +1189,13 @@ export class Renderer {
       if (t >= 1) { list.splice(i, 1); a.resolve(); }
     }
     this._camExpire();
+    this.director.update(realDt);
+    if (this._sleeps?.length) {
+      for (let i = this._sleeps.length - 1; i >= 0; i--) {
+        const w = this._sleeps[i];
+        if (this.realTime >= w.until || this._hidden || !this.state) { this._sleeps.splice(i, 1); w.resolve(); }
+      }
+    }
     if (this.state && this.world) {
       this._perfTick(realDt);
       const U = this.fields.uniforms;
@@ -1551,24 +1631,25 @@ export class Renderer {
 
   /** Frame two world points for an action cam. Returns the hold tag or null. */
   _actionCam(a, b, kill) {
-    if (!this._cine) return null;
+    if (!this._cine || this.director.userBusy) return null; // the player has the camera: leave it
     const tag = kill ? 'kill' : 'shot';
     this._camPush(tag);
     if (kill) {
       this.elevGoal = 0.5;
       this.goal.set(lerp(a.x, b.x, 0.55), 0, lerp(a.z, b.z, 0.55));
-      this.viewGoal = Math.max(6.5, this._fitView(a, b, 2.2, 2.6));
+      this.viewGoal = Math.max(7.5, this._fitView(a, b, 2.4, 2.8));
     } else {
-      this.elevGoal = 0.6;
-      this.goal.set((a.x + b.x) / 2, 0, (a.z + b.z) / 2);
-      this.viewGoal = Math.max(8, this._fitView(a, b, 3, 3.5));
+      // 5.1: the director already framed shooter + target; a subtle push-in only (no zoom pumping)
+      this.elevGoal = this._elevBase - 0.06;
+      if (!this.director.framedRecently) this.goal.set((a.x + b.x) / 2, 0, (a.z + b.z) / 2);
+      this.viewGoal = Math.max(this.viewGoal * 0.92, this._fitView(a, b, 3.2, 3.8));
     }
     this.followId = null;
     return tag;
   }
 
   _pointCam(tag, x, z, view) {
-    if (!this._cine) return false;
+    if (!this._cine || this.director.userBusy) return false;
     this._camPush(tag);
     this.goal.set(x, 0, z); this.followId = null;
     if (view) this.viewGoal = Math.max(this.viewGoal, view);

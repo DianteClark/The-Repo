@@ -294,8 +294,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
         if (kind === 'local' && !player.ff) while (globalThis.document?.hidden && !stopped) await sleep(400);
         let evs = [];
         try { evs = AI.botTakeTurn(st, id) || []; } catch (e) { console.warn('[match] bot', e); }
-        const shown = await emit(evs, world.pit ? world : null);
-        void shown; // 5.1: the beat between soldiers is paced by playback (pacing preset 'gap')
+        await emit(evs, world.pit ? world : null); // 5.1: the beat between soldiers is paced by playback (preset 'gap')
       }
     }
     if (stopped || st.winner !== null) return;

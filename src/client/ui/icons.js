@@ -56,6 +56,8 @@ export const ICON = {
   vibrate: S('<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M3 8v8M21 8v8M11 18h2"/>'),
   chevL: S('<path d="M15 4.5L7.5 12 15 19.5"/>'),
   chevR: S('<path d="M9 4.5l7.5 7.5L9 19.5"/>'),
+  chevU: S('<path d="M5 15l7-7 7 7"/>'),
+  boat: S('<path d="M3 14h18l-2.6 4.6a2 2 0 0 1-1.7 1H7.3a2 2 0 0 1-1.7-1L3 14z"/><path d="M12 3v11M12 4l6 7h-6"/>'),
   medal: S('<path d="M8 2.5h8l-2 6h-4z"/><circle cx="12" cy="15" r="6"/><path d="M12 12l.9 1.9 2 .3-1.5 1.4.4 2-1.8-1-1.8 1 .4-2-1.5-1.4 2-.3z" fill="currentColor" stroke="none"/>'),
   target: S('<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/>'),
   sparkle: S('<path d="M12 3l1.8 5.4L19 10l-5.2 1.7L12 17l-1.8-5.3L5 10l5.2-1.6z"/><path d="M19 16l.7 1.8 1.8.7-1.8.7L19 21l-.7-1.8-1.8-.7 1.8-.7z"/>'),

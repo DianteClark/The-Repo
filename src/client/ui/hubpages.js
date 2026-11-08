@@ -13,6 +13,13 @@ import * as M from './meta.js';
 import * as P from './progress.js';
 import * as A from './arsenal.js';
 import { CARDS, EMBLEMS, cardSVG, emblemSVG, cardById, emblemById } from '../../shared/cards.js';
+import { weaponThumb, hydrateThumbs, setThumbRenderer } from './weaponthumbs.js';
+
+/** Weapon card art: the cached 3D render (equipped camo + attachments), SVG until it lands. */
+export function weaponImg(id, attachments = {}, { w = 220, cls = '' } = {}) {
+  const sw = camoSwatch(id);
+  return weaponThumb(id, { attachments, camo: P.equippedCamo(id) || 'none', cls, fallback: weaponArt(id, attachments, { w, camo: sw?.colors, gold: sw?.gold }) });
+}
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -147,17 +154,19 @@ export function openPicker(title, html, wire, cls = '') {
   body.innerHTML = html;
   pickWire = wire;
   wire?.(body);
+  hydrateThumbs(body);
   openSheet('pickSheet');
   body.scrollTop = 0;
   $('pickSheet').querySelector('.sheet-card').scrollTop = 0;
 }
-export function refreshPicker(html) { const body = $('pickBody'); const st = $('pickSheet').querySelector('.sheet-card').scrollTop; body.innerHTML = html; pickWire?.(body); $('pickSheet').querySelector('.sheet-card').scrollTop = st; }
+export function refreshPicker(html) { const body = $('pickBody'); const st = $('pickSheet').querySelector('.sheet-card').scrollTop; body.innerHTML = html; pickWire?.(body); hydrateThumbs(body); $('pickSheet').querySelector('.sheet-card').scrollTop = st; }
 
 // ------------------------------------------------------------------ init
 
 export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {} }) {
   const click = (k) => onClick?.(k);
   const R = () => getR?.();
+  setThumbRenderer(R);
   let preview = null; // canvas with a live renderPreview
   function stopPreview() {
     if (preview && typeof R()?.stopPreview === 'function') { try { R().stopPreview(preview); } catch { /* ignore */ } }
@@ -244,13 +253,13 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
             </div>
             <button class="bk-item primary" data-pick="primary">
               <span class="bki-k">Primary<em>LV ${wl.level}</em></span>
-              <span class="bki-art">${weaponArt(l.primary.id, l.primary.attachments, { w: 240, camo: sw?.colors, gold: sw?.gold })}</span>
+              <span class="bki-art">${weaponImg(l.primary.id, l.primary.attachments, { w: 240 })}</span>
               <span class="bki-n"><b>${esc(w?.name || l.primary.id)}</b><small>${esc(A.CAT_NAMES[w?.cat] || '')}</small></span>
               <span class="bki-att">${A.SLOT_KEYS.map((s) => { const a = A.attachmentById(l.primary.attachments?.[s]); return `<i class="${a ? 'on' : ''}" title="${esc(A.SLOT_NAMES[s])}: ${esc(a?.name || 'none')}">${ICON[SLOT_ICON[s]]}</i>`; }).join('')}</span>
             </button>
             <button class="bk-item gunsmith" data-pick="gunsmith"><span class="bki-ic">${ICON.gear}</span><span class="bki-n"><b>Gunsmith</b><small>${nAtt}/5 attachments · ${A.unlockTrack(l.primary.id).filter((id) => P.isAttachmentUnlocked(l.primary.id, id)).length} unlocked</small></span>${ICON.chevR}</button>
             <div class="bk-two">
-              <button class="bk-item" data-pick="secondary"><span class="bki-k">Secondary</span><span class="bki-art sm">${weaponArt(l.secondary.id, {}, { w: 120 })}</span><span class="bki-n"><b>${esc(sec?.name || l.secondary.id)}</b></span></button>
+              <button class="bk-item" data-pick="secondary"><span class="bki-k">Secondary</span><span class="bki-art sm">${weaponImg(l.secondary.id, {}, { w: 120 })}</span><span class="bki-n"><b>${esc(sec?.name || l.secondary.id)}</b></span></button>
               <button class="bk-item" data-pick="lethal"><span class="bki-k">Lethal</span><span class="bki-ic big">${equipIcon(l.lethal)}</span><span class="bki-n"><b>${esc(le?.name || l.lethal)}</b></span></button>
               <button class="bk-item" data-pick="tactical"><span class="bki-k">Tactical</span><span class="bki-ic big cy">${equipIcon(l.tactical)}</span><span class="bki-n"><b>${esc(ta?.name || l.tactical)}</b></span></button>
             </div>
@@ -271,6 +280,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
         </div>
       </div>`;
     wireBarracks(el);
+    hydrateThumbs(el);
   }
 
   function wireBarracks(el) {
@@ -298,7 +308,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
   function openPick(kind) {
     if (kind === 'primary') return pickPrimary();
     if (kind === 'gunsmith') return pickGunsmith();
-    if (kind === 'secondary') return pickList('Secondary', A.SECONDARIES.map((w) => ({ id: w.id, name: w.name, desc: w.desc, art: weaponArt(w.id, {}, { w: 150 }), sel: draft.secondary.id === w.id, meta: `${w.range} range · ${w.dmg[0]}–${w.dmg[1]} dmg · ${w.mag === Infinity ? '∞' : w.mag} mag` })), (id) => { draft.secondary = { id }; });
+    if (kind === 'secondary') return pickList('Secondary', A.SECONDARIES.map((w) => ({ id: w.id, name: w.name, desc: w.desc, art: weaponImg(w.id, {}, { w: 150 }), sel: draft.secondary.id === w.id, meta: `${w.range} range · ${w.dmg[0]}–${w.dmg[1]} dmg · ${w.mag === Infinity ? '∞' : w.mag} mag` })), (id) => { draft.secondary = { id }; });
     if (kind === 'lethal') return pickList('Lethal', A.LETHALS.map((e) => ({ id: e.id, name: e.name, desc: e.desc, icon: equipIcon(e.id), sel: draft.lethal === e.id, meta: `${e.charges + (draft.cls === 'assault' ? 1 : 0)} charge${e.charges + (draft.cls === 'assault' ? 1 : 0) === 1 ? '' : 's'}${draft.cls === 'assault' ? ' (Frag specialist +1)' : ''}` })), (id) => { draft.lethal = id; });
     if (kind === 'tactical') return pickList('Tactical', A.TACTICALS.map((e) => ({ id: e.id, name: e.name, desc: e.desc, icon: equipIcon(e.id), cyan: true, sel: draft.tactical === e.id, meta: `${e.charges} charge${e.charges === 1 ? '' : 's'}` })), (id) => { draft.tactical = id; });
     if (kind.startsWith('perk')) {
@@ -352,7 +362,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
           const sw = camoSwatch(w.id);
           const d = (a, b) => (a > b ? `<em class="up">+${a - b}</em>` : a < b ? `<em class="dn">${a - b}</em>` : '');
           return `<button class="pk-w${w.id === draft.primary.id ? ' sel' : ''}" data-id="${w.id}">
-            <span class="pkw-art">${weaponArt(w.id, {}, { w: 200, camo: sw?.colors, gold: sw?.gold })}</span>
+            <span class="pkw-art">${weaponImg(w.id, w.id === draft.primary.id ? draft.primary.attachments : {}, { w: 200 })}</span>
             <span class="pkw-h"><b>${esc(w.name)}</b><span class="lvl">LV ${lv.level}</span></span>
             <span class="pkw-s"><span>DMG <b>${s.dmg[0]}–${s.dmg[1]}</b></span><span>RNG <b>${s.range}</b>${d(s.range, base.range)}</span><span>AIM <b>${s.aim}</b>${d(s.aim, base.aim)}</span><span>MAG <b>${s.mag === Infinity ? '∞' : s.mag}</b></span>${s.move ? `<span>MOV <b>${s.move > 0 ? '+' : ''}${s.move}</b></span>` : ''}</span>
             <small>${esc(w.desc)}</small></button>`;
@@ -438,7 +448,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
         const cs = P.camoStatus(w.id);
         const sw = camoSwatch(w.id);
         return `<button class="ar-w${cs.gold ? ' gold' : ''}" data-id="${w.id}">
-          <span class="arw-art">${weaponArt(w.id, {}, { w: 220, camo: sw?.colors, gold: sw?.gold })}</span>
+          <span class="arw-art">${weaponImg(w.id, {}, { w: 220 })}</span>
           <span class="arw-h"><b>${esc(w.name)}</b><small>${esc(A.CAT_NAMES[w.cat] || '')}</small><span class="lvl${lv.level >= A.MAX_WEAPON_LEVEL ? ' max' : ''}">LV ${lv.level}</span></span>
           <span class="xpbar sm"><i style="--w:${Math.round(lv.frac * 100)}%"></i></span>
           <span class="arw-camo">${cs.core.map((c) => `<i class="${c.done ? 'on' : ''}" style="--c:${c.camo.colors[0]}"></i>`).join('')}<em class="${cs.gold ? 'on' : ''}">G</em></span>
@@ -446,6 +456,7 @@ export function initHubPages({ getR, onClick, onChange, toast, onDeploy, sfx = {
       }).join('')}</div></div>`;
     el.querySelectorAll('.ar-cats button').forEach((b) => { b.onclick = () => { click('tab'); arCat = b.dataset.cat; renderArmory(); }; });
     el.querySelectorAll('.ar-w').forEach((b) => { b.onclick = () => { click(); openWeapon(b.dataset.id); }; });
+    hydrateThumbs(el);
   }
 
   function openWeapon(wid) {

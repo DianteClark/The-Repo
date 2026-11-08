@@ -235,8 +235,9 @@ export function renderStep({ active = [], engagements = [], myTeam, nameOf, colo
   const mineActive = active.includes(myTeam);
   engagedTxt = foes.length ? `vs ${foes.map((t) => nameOf(t)).join(', ')}` : '';
   const chips = foes.slice(0, 3).map((t) => `<i style="--sq:${colorOf(t)}">${esc(nameOf(t))}</i>`).join('');
-  el.className = `engage${foes.length ? ' hot' : ''}${mineActive ? ' mine' : ''}`;
-  el.innerHTML = `<span class="en-n"><b>${n}</b> squad${n === 1 ? '' : 's'} moving</span>${foes.length ? `<span class="en-sep"></span><span class="en-vs">${ICON.target}${mineActive ? 'Engaged' : 'Contact'} ${chips}${foes.length > 3 ? `<em>+${foes.length - 3}</em>` : ''}</span>` : mineActive ? '<span class="en-sep"></span><span class="en-free">Free move</span>' : ''}`;
+  const cls = `engage${foes.length ? ' hot' : ''}${mineActive ? ' mine' : ''}`;
+  const html = `<span class="en-n"><b>${n}</b> squad${n === 1 ? '' : 's'} moving</span>${foes.length ? `<span class="en-sep"></span><span class="en-vs">${ICON.target}${mineActive ? 'Engaged' : 'Contact'} ${chips}${foes.length > 3 ? `<em>+${foes.length - 3}</em>` : ''}</span>` : mineActive ? '<span class="en-sep"></span><span class="en-free">Free move</span>' : ''}`;
+  if (el._beat) el._beat = { html, cls }; else { el.className = cls; el.innerHTML = html; }
   const sig = foes.slice().sort().join(',');
   if (sig && sig !== lastEngaged) {
     banner?.(foes.length > 1 ? 'ENGAGEMENT' : 'CONTACT', 'engage', `${engagedTxt} · squads in contact take turns in order`, 1500);
@@ -244,7 +245,20 @@ export function renderStep({ active = [], engagements = [], myTeam, nameOf, colo
   }
   lastEngaged = sig;
 }
-export function resetStep() { lastEngaged = ''; engagedTxt = ''; const el = $('engageInfo'); if (el) { el.className = 'engage hidden'; el.innerHTML = ''; } }
+let beatT = 0;
+/** Director focus beat ("Squad 7 is moving"): flashes the engagement chip for a moment. */
+export function focusBeat({ name, color }) {
+  const el = $('engageInfo');
+  if (!el || !name) return;
+  clearTimeout(beatT);
+  if (!el._beat) el._beat = { html: el.innerHTML, cls: el.className };
+  el.className = 'engage beat';
+  el.style.setProperty('--bc', color || 'var(--line-hi)');
+  el.innerHTML = `<span class="fb"><i></i>${esc(String(name).toUpperCase())} MOVING</span>`;
+  beatT = setTimeout(() => { const b = el._beat; el._beat = null; if (b) { el.className = b.cls; el.innerHTML = b.html; } }, 1500);
+}
+export function resetStep() {
+  clearTimeout(beatT); lastEngaged = ''; engagedTxt = ''; const el = $('engageInfo'); if (el) { el._beat = null; el.className = 'engage hidden'; el.innerHTML = ''; } }
 
 // ------------------------------------------------------------------ The Pit
 

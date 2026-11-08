@@ -1221,7 +1221,14 @@ export class Battlefield {
     }
     // cinematic: pull wide on the run line, jets scream in low, bombs walk the line
     const cam = R._cine;
-    if (cam) {
+    const dir5 = cam && typeof R.cineBegin === 'function';
+    if (dir5) {
+      await R.cineBegin({ kind: 'airstrike', name: 'AIRSTRIKE', sub: 'Danger close', tiles, light: true });
+      if (g !== R.gen) return;
+      await R._sleepReal((R.pacing?.cine.pre ?? 400) * 0.4);
+      if (g !== R.gen) return;
+      R.director.slowmo(Math.max(0.75, R.pacing?.slow ?? 0.75));
+    } else if (cam) {
       R._camPush('setpiece');
       R.goal.set(cx, 0, cz); R.followId = null;
       R.viewGoal = Math.max(10, R._fitView(A, B, 5, 6));
@@ -1270,6 +1277,7 @@ export class Battlefield {
     await R._wait(650);
     if (g !== R.gen) return;
     R.hitStop = 0.05;
+    if (dir5) { R.slowGoal = 1; if (!R.cineManaged) await R.cineEnd(R.pacing?.cine.post ?? 800); return; }
     if (cam) { const s = R.camStack[R.camStack.length - 1]; if (s && s.tag === 'setpiece') s.until = Math.min(s.until, R.playT + 1.6); }
   }
 
@@ -1692,14 +1700,37 @@ export class Battlefield {
     this.call('stageEventWarn', kind);
     this.feed(`Warning: ${title.toLowerCase()} next round`);
     if (!geo) return;
-    const cam = R._pointCam('setpiece', geo.cx, geo.cz, 15);
+    // 5.1: a letterboxed flyover of the danger area (the set piece hits next round)
+    const cine = R._cine && typeof R.cineBegin === 'function';
+    const P = R.pacing || { cine: { warnFly: 1500, post: 800 } };
+    if (cine) {
+      await R.cineBegin({ kind: 'warn', name: title, sub: 'Next round · clear the danger zone', tiles, light: true });
+      if (g !== R.gen) return;
+    }
+    const cam = cine ? false : R._pointCam('setpiece', geo.cx, geo.cz, 15);
     // a beat of foreshadowing per kind
     if (kind === 'redtide') this._setRedTide(tiles.slice(0, Math.ceil(tiles.length * 0.25)), false, 0.5);
     if (kind === 'collapse') for (const [x, y] of tiles) if (Math.random() < 0.4) R.fx.sparks(this.wx(x), 0.1, this.wz(y), 5, 5, 3.4, 1.6, 2);
     if (kind === 'wave') for (let i = 0; i < 3; i++) R.fx.ring(geo.start.x - geo.dir.x * (4 + i * 2), WATER_Y + 0.02, geo.start.z - geo.dir.z * (4 + i * 2), 1, geo.width * 1.2, 0xdff4ee, 1.4, 0.5);
     if (kind === 'tower' && this.warn?.prop) { const tw = this.warn.prop; R.fx.timed(1.6, (t) => { tw.rotation.x = Math.sin(t * 20) * 0.015 * (1 - t); }); }
+    for (const [x, y] of tiles) if (Math.random() < 0.5) R.fx.ring(this.wx(x), this.gy(x, y) + 0.08, this.wz(y), 0.2, 0.75, 0xffb04a, 0.5, 1.1);
     R._text(Math.round((geo.cx + R.S / 2 - 0.5)), Math.round((geo.cz + R.S / 2 - 0.5)), title, '#ffb04a', 1.25, 1.6);
     R.fx.shake = Math.max(R.fx.shake, 0.25);
+    if (cine) {
+      // fly the lane: push in at its start, glide to its end, pull back out
+      const wide = R.viewGoal;
+      const A = geo.start.clone(), B = geo.start.clone().addScaledVector(geo.dir, Math.max(1, geo.len - 1));
+      if (this.camFree) { R.goal.set(A.x, 0, A.z); R.viewGoal = Math.max(9, wide * 0.72); }
+      await R.cameraArrive(700);
+      if (g !== R.gen) return;
+      await R._anim(P.cine.warnFly, (t) => { if (this.camFree) R.goal.set(lerp(A.x, B.x, easeInOutCubic(t)), 0, lerp(A.z, B.z, easeInOutCubic(t))); });
+      if (g !== R.gen) return;
+      if (this.camFree) { R.goal.set(geo.cx, 0, geo.cz); R.viewGoal = wide; }
+      await R.cameraArrive(800);
+      if (g !== R.gen) return;
+      if (!R.cineManaged) await R.cineEnd(P.cine.post * 0.5);
+      return;
+    }
     await R._wait(1500);
     if (g !== R.gen) return;
     if (cam) R._camRelease('setpiece');
@@ -1715,7 +1746,21 @@ export class Battlefield {
     const geo = this._laneGeo(tiles);
     this.call('stageEvent', kind);
     const cine = R._cine && !R._fast;
-    if (cine) {
+    const P = R.pacing || { cine: { pre: 600, post: 1200 }, slow: 0.6 };
+    const dir5 = cine && typeof R.cineBegin === 'function';
+    if (dir5) {
+      // 5.1: everything stops. Bars in, title card, pull out over the whole affected area.
+      const title = { ship: 'SHIP ADRIFT', redtide: 'RED TIDE', collapse: 'PLATFORM COLLAPSE', tower: 'TOWER DOWN', wave: 'ROGUE WAVE' }[kind];
+      const sub = { ship: 'A container ship ploughs the harbor', redtide: 'Toxic algae floods the kelp', collapse: 'The rig deck is giving way', tower: 'The spire is coming down', wave: 'A wall of water sweeps inland' }[kind] || '';
+      await R.cineBegin({ kind, name: title, sub, tiles });
+      if (g !== R.gen) return;
+      await R._sleepReal(P.cine.pre);
+      if (g !== R.gen) return;
+      R.director.slowmo(); // the set piece plays in slow motion
+      // slow dolly in while it happens
+      const v0 = R.viewGoal;
+      R.fx.timed(6, (t) => { if (g === R.gen && R.inCinematic && this.camFree) R.viewGoal = v0 * (1 - 0.14 * easeInOutCubic(t)); });
+    } else if (cine) {
       R._camPush('setpiece');
       R.followId = null;
       R.goal.set(geo.cx, 0, geo.cz);
@@ -1732,6 +1777,15 @@ export class Battlefield {
       if (prop && prop.parent && kind !== 'ship' && kind !== 'tower') this.drop(prop);
     }
     if (g !== R.gen) return;
+    if (dir5) {
+      R.slowGoal = 1;
+      R.hitStop = 0.06;
+      R.fx.shake = Math.max(R.fx.shake, 0.6);
+      // the aftermath (damage, knockback, rubble) plays inside the cinematic when the match
+      // controller manages it; on its own (attract loop, debug) we close it ourselves
+      if (!R.cineManaged) await R.cineEnd(P.cine.post);
+      return;
+    }
     if (cine) { const s = R.camStack[R.camStack.length - 1]; if (s && s.tag === 'setpiece') s.until = Math.min(s.until, R.playT + 1.8); }
   }
 
@@ -1973,7 +2027,9 @@ export class Battlefield {
       if (!vis) { this.call('buildingCollapse', 1); this.feed(`A building collapsed to the ${compass(R.myRef(), cx, cy)}`); }
       return;
     }
-    const cam = R._pointCam('blast', this.wx(cx), this.wz(cy), 11);
+    const dir5 = R._cine && typeof R.cineBegin === 'function';
+    if (dir5) { await R.cineBegin({ kind: 'building', name: 'BUILDING COLLAPSE', tiles, light: true }); if (g !== R.gen) return; }
+    const cam = dir5 ? false : R._pointCam('blast', this.wx(cx), this.wz(cy), 11);
     this.call('buildingCollapse', R._far(cx, cy));
     // rumble: shaking dust off the walls
     for (let i = 0; i < 5; i++) {
@@ -2002,6 +2058,7 @@ export class Battlefield {
     R.fx.ring(this.wx(cx), 0.1, this.wz(cy), 0.5, 4.5, 0xd8cdb0, 1.4, 0.6);
     await R._wait(600);
     if (g !== R.gen) return;
+    if (dir5) { if (!R.cineManaged) await R.cineEnd(R.pacing?.cine.post ?? 800); return; }
     if (cam) { const s = R.camStack[R.camStack.length - 1]; if (s && s.tag === 'blast') s.until = Math.min(s.until, R.playT + 1.2); }
   }
 

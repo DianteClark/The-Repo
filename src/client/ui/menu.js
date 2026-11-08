@@ -153,27 +153,15 @@ export function initMenu({ MODES, K, onDeploy, onClick, onHover, onEnter, qualit
     $('modeDesc').textContent = (MODE_INFO[settings.mode] || {}).desc || '';
   }
 
-  // ---- stages
+  // ---- stages: always random (5.1). The Play page shows the rotation; the stage
+  // wheel before each match lands on whichever stage the match seed picked.
   const STAGES = stageList(K);
-  if (settings.stage !== 'random' && !STAGES.some((x) => x.key === settings.stage)) settings.stage = 'random';
+  if (settings.stage !== 'random') settings.stage = 'random';
   function renderStages() {
     const row = $('stageChoices');
-    const opts = [...STAGES, { key: 'random', name: 'Random', tagline: 'Let the tide decide.', twist: 'A different stage every drop.', short: 'Any stage', icon: 'dice' }];
-    row.innerHTML = opts.map((st) => `<button class="stage-card st-${st.key}${settings.stage === st.key ? ' sel' : ''}" data-stage="${st.key}" role="radio" aria-checked="${settings.stage === st.key}" title="${esc(st.tagline)}">
-        ${stageArt(st.key)}<span class="st-meta"><b>${esc(st.name)}</b><small>${stageIcon(st)}${esc(st.short || '')}</small></span></button>`).join('');
-    row.querySelectorAll('.stage-card').forEach((b) => {
-      b.onclick = click(() => { settings.stage = b.dataset.stage; renderStages(); });
-      b.onpointerenter = () => onHover?.();
-    });
-    const cur = opts.find((x) => x.key === settings.stage) || opts[opts.length - 1];
-    $('stageDesc').textContent = cur.name;
-    $('stageDetail').innerHTML = `<span class="sd-ic">${stageIcon(cur)}</span><div><b>${esc(cur.tagline)}</b><p>${esc(cur.twist)}</p></div>`;
-    // Keep the chosen card in view on narrow, scrolling rows.
-    const sel = row.querySelector('.sel');
-    if (sel && row.scrollWidth > row.clientWidth) {
-      const l = sel.offsetLeft - (row.clientWidth - sel.offsetWidth) / 2;
-      row.scrollTo?.({ left: l, behavior: 'smooth' });
-    }
+    if (!row) return;
+    row.innerHTML = STAGES.map((st, i) => `<div class="stage-mini st-${st.key}" style="--i:${i}" title="${esc(st.name)}: ${esc(st.twist)}">
+        ${stageArt(st.key)}<span class="st-meta"><b>${esc(st.name)}</b><small>${stageIcon(st)}${esc(st.short || '')}</small></span></div>`).join('');
   }
 
   // ---- wallet
@@ -342,8 +330,8 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
       ${row('Camera follow', 'Track whoever is acting', seg('follow', [[true, 'On'], [false, 'Off']], settings.follow))}
       ${row('Cover fade', 'Fade walls and crates while you pick a move', seg('coverFade', [[true, 'On'], [false, 'Off']], settings.coverFade))}
       <div class="set-group">Gameplay</div>
-      ${row('Turn timer', 'How the 20s clock is shown', seg('timer', [['ring', 'Ring'], ['bar', 'Bar']], settings.timer))}
-      ${row('Enemy turns', 'Playback speed of bot actions', seg('botSpeed', [['normal', 'Normal'], ['fast', 'Fast']], settings.botSpeed))}
+      ${row('Turn timer', 'How your 20-second clock is shown', seg('timer', [['ring', 'Ring'], ['bar', 'Bar']], settings.timer))}
+      ${row('Pacing', 'Camera and action rhythm. Cinematic frames every action and set piece', seg('pacing', [['cinematic', 'Cinematic'], ['normal', 'Normal'], ['fast', 'Fast']], settings.pacing), 'wide')}
       ${row('Hitmarkers', 'Hit ticks, kill confirms and XP popups', seg('hitmarkers', [[true, 'On'], [false, 'Off']], settings.hitmarkers))}
       <div class="set-group">Accessibility</div>
       ${row('Squad colours', 'Colourblind-safe palettes. You stay amber, signals stay cyan', seg('colorPreset', [['standard', 'Std'], ['deutan', 'Deut'], ['protan', 'Prot'], ['tritan', 'Trit'], ['high', 'High']], settings.colorPreset), 'wide')}
@@ -409,49 +397,63 @@ export function setSwatchSource(fn) { squadColorFor = fn; }
 
 function buildHowTo() {
   const card = (ic, title, text, cls = '') => `<div class="how ${cls}"><span class="how-ic">${ICON[ic]}</span><div><b>${title}</b><p>${text}</p></div></div>`;
+  const classes = `<div class="how wide how-classes"><span class="how-ic">${ICON.helmet || ICON.squads}</span><div><b>Seven classes</b><div class="hc-grid">${CLASS_LINES.map(([k, n, t]) => `<span class="hc">${badgeSVG(k, 0, { size: 34, title: false, animated: false })}<span><b>${n}</b><small>${t}</small></span></span>`).join('')}</div></div></div>`;
   $('howBody').innerHTML = [
-    card('clock', 'Engagement turns', 'Squads that can see each other are <b>engaged</b> and take turns in order. Everyone else moves <b>at the same time</b>. Your soldier has <b>2 AP</b> and 20 seconds; when the clock runs out you go on overwatch.'),
+    card('clock', 'Engagement turns', 'Squads that can see each other are <b>engaged</b> and take turns in order. Every squad out of contact moves <b>at the same time</b>. You get <b>2 AP</b> and a 20-second clock; if it runs out you go on overwatch.'),
+    card('tap', 'Tap, then tap again', 'Tap a tile to preview the route and the cover waiting there. Tap it again, or press <b>Confirm</b>. Cyan tiles cost 1 AP, gold tiles are a 2 AP dash. Walls fade while you choose.'),
+    card('shoot', 'Shooting ends your turn', 'Every target shows its hit chance, graze odds and damage. <b>Firing ends your turn</b>, so move first. Near-misses graze for half damage. Throwing gear, reloading and abilities like Patch or Scan don\'t end it.'),
+    card('shield', 'Cover is life', 'Half cover is -20 aim against you, full cover -40. Shots from an open side <b>flank</b> you: +10 aim and +1 damage. Hunker doubles your cover until your next turn.'),
+    classes,
     card('rifle', 'Create-a-Class', 'In the <b>Barracks</b>, build 5 loadouts: class, primary with up to 5 <b>Gunsmith</b> attachments, secondary, lethal, tactical, 3 perks and 3 killstreaks. Every unlock is a sidegrade.'),
-    card('reload', 'Ammo, reload, swap', 'Every shot uses a round. <b>Reload</b> costs 1 AP and doesn\'t end your turn. <b>Swap</b> to your secondary once per turn for free. The sidearm never runs dry.'),
-    card('airstrike', 'Killstreaks', 'Earn kills to unlock your three streaks: UAV, Care Package, Counter-UAV, Airstrike, Sentry, Gunship. Tap a glowing streak to call it in: 0 AP, one per turn.'),
-    card('pit', 'The Pit', 'Your first death before round 8 sends you to the <b>Pit</b>: a 1v1 duel with pistols. Win it and you parachute back in.'),
-    card('tap', 'Tap, then tap again', 'Tap a tile to preview the route and the cover you will have there. Tap it again, or press <b>Confirm</b>, to commit. Cyan tiles cost 1 AP; gold is a 2 AP dash. Walls and crates <b>fade</b> while you pick a move, leaving shield outlines on the ground.'),
-    card('shield', 'Cover is life', 'Shields show half and full cover at your destination. Shots from an open side <b>flank</b> you for +10 aim.'),
-    card('shoot', 'Shooting ends your turn', 'Pick <b>Shoot</b> and every target shows its hit chance. Tap one to see graze odds and damage, then fire. <b>Firing always ends your turn</b>, so move first. Near-misses graze for half damage.'),
-    card('grenade', 'Frags, Aimed Shot, Breach', 'Grenades blast a 3×3 area and wreck cover, friendly fire included. Marksmen line up Aimed Shots; Breachers blow cover apart.'),
-    card('smoke', 'Smoke hides you', 'Anyone inside a smoke cloud is <b>invisible</b> to enemies more than a tile away. Shots into or out of smoke take <b>-20 aim</b>. Throwing smoke does not end your turn.'),
-    card('patch', 'Medic: Patch', 'Heal yourself or an adjacent squadmate for 5, or pick a downed one straight back up at 4 HP.'),
-    card('scan', 'Recon: Scan', 'Scan reveals everyone within 5 tiles of a point, through walls and smoke, until your next turn.'),
-    card('revive', 'Downed, not out', 'In squad modes a soldier at 0 HP goes <b>down</b>. Any adjacent squadmate can revive for 1 AP. Downed soldiers bleed out after 2 of their turns, and any hit finishes them.'),
-    card('hunker', 'Hunker and Overwatch', 'Hunker doubles your cover until your next turn. Overwatch fires at the first enemy that moves in your sight.'),
-    card('tide', 'The tide rises', 'Every 2 rounds the water closes in. The <span class="c-cyan">cyan ring</span> is the next safe edge. Ending your turn in the water hurts, and it gets worse.'),
-    card('stage', 'Five stages, five twists', '<b>Drowned Harbor</b>: the classic. <b>Kelp Shallows</b>: weed beds hide you. <b>Rig Graveyard</b>: barrels explode. <b>Night Spires</b>: dark, and gunfire lights flares. <b>Surge Point</b>: the safe zone drifts.', 'wide'),
-    card('kelp', 'Kelp', 'Standing in kelp hides you from anyone more than <b>3 tiles</b> away and gives -10 aim against you. It is not cover: a close shooter still sees you in the open.'),
-    card('barrelx', 'Explosive barrels', 'Red-banded barrels deal <b>4 damage</b> in a 3×3 when a frag, breach or blast hits them, and they chain. In Shoot mode you can fire at one: 1 AP, always hits, ends your turn.'),
-    card('flare', 'Night and flares', 'At night you see 6 tiles. Firing lights a <b>flare</b> over the shooter: every squad can see them until their next turn. Shoot, then expect company.'),
-    card('drift', 'Drifting zone', 'On Surge Point the safe circle moves each time it shrinks. Watch the dashed <span class="c-cyan">cyan ring</span> on the minimap and rotate early.'),
-    card('crate', 'Crates and supply drops', 'Crates hold medkits, armor, scopes, heavy barrels, frags and smoke. Supply caches land inside the next ring on rounds 4, 8 and 12.'),
-    card('medal', 'Prestige and Salvage', 'Every match earns <b>XP for the class you played</b>: placement, kills, damage and revives. Its badge grows through Recruit, Veteran, Elite, Master and Legend. You also earn <b>Salvage</b> to spend in the Shop on skins, kill effects and drop-ins.'),
-    `<div class="how keys"><span class="how-ic">${ICON.gear}</span><div><b>Keyboard</b><p><kbd>1</kbd>–<kbd>9</kbd> actions · <kbd>Space</kbd> end turn · <kbd>Q</kbd>/<kbd>E</kbd> rotate · <kbd>Tab</kbd> next target · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> cancel · <kbd>F</kbd> find me · <kbd>R</kbd> revive</p></div></div>`,
+    card('reload', 'Ammo, reload, swap', 'Every shot uses a round; burst weapons use one per bullet. <b>Reload</b> costs 1 AP and doesn\'t end your turn. <b>Swap</b> to your secondary once per turn for free. The pistol never runs dry.'),
+    card('grenade', 'Gear', 'Open <b>Gear</b> on the action bar for your lethal (frag, semtex, claymore, throwing knife), your tactical (smoke, flashbang, stim, decoy) and medkits.'),
+    card('airstrike', 'Killstreaks', 'Kills unlock your three streaks: UAV (3), Care Package (4), Counter-UAV (4), Airstrike (5), Sentry (5), Gunship (7). Tap a glowing streak to call it in: 0 AP, one per turn. Hardline makes them 1 cheaper.'),
+    card('water', 'Boats', 'Step onto a boat to board it. The first soldier aboard drives: up to 8 tiles of water for 1 AP and 1 fuel, ending the turn. Aboard you get half cover and no tide damage. Engineers repair hulls.'),
+    card('warn', 'Stage events', 'Once per match the stage turns on you: a container ship breaks loose, a red tide spreads, a platform collapses, a tower topples or a rogue wave hits. It\'s <b>telegraphed a round before</b>: get off the marked tiles.'),
+    card('pit', 'The Pit', 'Your first death up to round 8 sends you to the <b>Pit</b>: a 1v1 duel with pistols and a frag. Win and you parachute back in at 6 HP.'),
+    card('revive', 'Downed, not out', 'In squad modes 0 HP means <b>downed</b>. An adjacent squadmate revives you for 1 AP (back at 3 HP; a Medic\'s Patch brings you to 4). You bleed out after 2 of your squad\'s turns, and any hit finishes you.'),
+    card('smoke', 'Smoke and kelp hide you', 'Inside smoke, enemies more than a tile away can\'t see you, and shots into or out of it take -20 aim. Kelp hides you from anyone more than 3 tiles away.'),
+    card('tide', 'The tide rises', 'Every 2 rounds the water closes in. The <span class="c-cyan">cyan ring</span> is the next safe edge. Ending your turn in the water hurts, more as the match goes on. On Surge Point the ring drifts.'),
+    card('stage', 'Five stages, picked at random', '<b>Drowned Harbor</b>: dense cover. <b>Kelp Shallows</b>: weed beds hide you. <b>Rig Graveyard</b>: barrels explode and chain. <b>Night Spires</b>: dark, and gunfire lights a flare over you. <b>Surge Point</b>: the safe zone drifts. The stage wheel spins before every drop.', 'wide'),
+    card('crate', 'Crates and supply drops', 'Crates hold medkits, armor, ammo, field attachments and extra lethals or tacticals. Supply caches land inside the next ring on rounds 4, 8 and 12; about one in four is a <b>gold crate</b> with a legendary weapon.'),
+    card('medal', 'Levels, camos and Salvage', 'Matches earn player XP (level 1–100), <b>weapon XP</b> that unlocks attachments, and <b>class XP</b> that grows its badge from Recruit to Legend. Camo challenges lead to Gold, Diamond and the animated Tidal. Salvage buys skins and effects in the Store.'),
+    `<div class="how keys wide"><span class="how-ic">${ICON.gear}</span><div><b>Keyboard</b><p><kbd>1</kbd> move · <kbd>2</kbd> shoot · <kbd>3</kbd> ability · <kbd>4</kbd> lethal · <kbd>5</kbd> tactical · <kbd>6</kbd> hunker · <kbd>7</kbd> overwatch · <kbd>8</kbd> medkit · <kbd>G</kbd> gear · <kbd>R</kbd> reload · <kbd>X</kbd> swap · <kbd>V</kbd> revive · <kbd>Space</kbd> end turn · <kbd>Q</kbd>/<kbd>E</kbd> rotate · <kbd>Tab</kbd> next target · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> cancel · <kbd>F</kbd> find me</p></div></div>`,
   ].join('');
 }
+
+/** The seven classes in one line each (How to Play + tutorial). */
+const CLASS_LINES = [
+  ['assault', 'Assault', '+1 lethal · Run & Gun after a dash'],
+  ['marksman', 'Marksman', 'Aimed Shot: +15 aim, +2 dmg'],
+  ['breacher', 'Breacher', 'Breach: blow open adjacent cover'],
+  ['medic', 'Medic', 'Patch: heal 5 or revive at 4 HP'],
+  ['recon', 'Recon', 'Scan: see through walls, 5 tiles'],
+  ['engineer', 'Engineer', 'Deploy Cover · repairs boats'],
+  ['gunner', 'Gunner', 'Suppress: -25 aim, LMG only'],
+];
 
 // ------------------------------------------------------------------ tutorial
 
 const TUT = [
-  { ic: 'clock', title: 'Engagement turns', art: 'tide', text: 'Squads that can see each other are <b>engaged</b> and take turns in order. Squads out of contact all move <b>at once</b>. The bar under the turn label shows who you\'re fighting.' },
-  { ic: 'airstrike', title: 'Loadouts and killstreaks', art: 'prestige', text: 'Build 5 classes in the <b>Barracks</b>. Kills unlock your 3 streaks: tap a glowing one on the streak bar to call in a UAV, care package, airstrike, sentry or gunship.' },
-  { ic: 'tap', title: 'Tap, then tap again', art: 'move', text: 'Tap a tile to <b>preview</b> your route and the cover waiting there. Tap the same tile again to <b>commit</b>. Cover fades while you choose, so every tile stays readable.' },
-  { ic: 'shield', title: 'Cover is life', art: 'cover', text: 'Full cover blocks 40 aim, half cover 20. Enemies on an open side <b>flank</b> you: +10 aim and extra damage. Hunker to double your cover.' },
-  { ic: 'shoot', title: 'Firing ends your turn', art: 'shoot', text: 'You get <b>2 AP</b> and 20 seconds. Move first: <b>shooting always ends your turn</b>. Frags, smoke, Patch and Scan cost 1 AP and let you keep going.' },
-  { ic: 'smoke', title: 'Smoke hides you', art: 'smoke', text: 'Inside smoke, enemies more than a tile away <b>can\'t see you</b>. Shots into or out of it take <b>-20 aim</b>. Use it to cross open ground.' },
-  { ic: 'revive', title: 'Nobody left behind', art: 'revive', text: 'In squad modes, 0 HP means <b>downed</b>, not dead. Stand next to a downed squadmate and press <b>Revive</b>. They bleed out after 2 of their turns.' },
-  { ic: 'stage', title: 'Every stage has a twist', art: 'stages', text: '<b>Kelp</b> hides you beyond 3 tiles. <b>Barrels</b> explode and chain. At <b>night</b>, firing lights a flare over you. On <b>Surge Point</b> the safe zone drifts.' },
-  { ic: 'tide', title: 'The tide rises', art: 'tide', text: 'Every 2 rounds the safe ring shrinks. The <span class="c-cyan">cyan ring</span> shows where it goes next. Be the last squad above the water.' },
-  { ic: 'medal', title: 'Badges grow with you', art: 'prestige', text: 'Each class earns its own XP. Its badge climbs from <b>Recruit</b> to an animated <b>Legend</b>. Salvage from every match buys skins, kill effects and drop-ins.' },
+  { ic: 'clock', title: 'Engagement turns', art: 'engage', text: 'Squads that can see each other are <b>engaged</b> and take turns in order. Everyone out of contact moves <b>at once</b>. The bar at the top shows who is moving and who you\'re fighting.' },
+  { ic: 'squads', title: 'Seven classes', art: 'classes', text: 'Assault, Marksman, Breacher, Medic, Recon, <b>Engineer</b> and <b>Gunner</b>. Each brings its own ability, health and weapon types.' },
+  { ic: 'tap', title: 'Tap, then tap again', art: 'move', text: 'Tap a tile to <b>preview</b> your route and the cover waiting there. Tap the same tile again to <b>commit</b>. Cyan costs 1 AP, gold is a 2 AP dash.' },
+  { ic: 'shield', title: 'Cover is life', art: 'cover', text: 'Full cover is -40 aim against you, half cover -20. Enemies on an open side <b>flank</b> you: +10 aim and +1 damage. Hunker to double your cover.' },
+  { ic: 'shoot', title: 'Firing ends your turn', art: 'shoot', text: 'You get <b>2 AP</b> and 20 seconds. Move first: <b>shooting ends your turn</b>. Every shot uses a round: <b>Reload</b> costs 1 AP, <b>Swap</b> to your sidearm is free once a turn.' },
+  { ic: 'grenade', title: 'Loadouts and gear', art: 'prestige', text: 'Build 5 classes in the <b>Barracks</b>: weapon, Gunsmith attachments, perks, a lethal and a tactical. In a match, open <b>Gear</b> to throw a frag, pop smoke or use a medkit.' },
+  { ic: 'airstrike', title: 'Killstreaks', art: 'streaks', text: 'Kills unlock your 3 streaks. Tap a glowing one to call in a UAV, care package, counter-UAV, airstrike, sentry or gunship. 0 AP, one per turn.' },
+  { ic: 'water', title: 'Boats and stage events', art: 'stages', text: 'Board a boat to cross water with half cover. Once a match the stage strikes: a ship, a red tide, a collapse, a falling tower or a rogue wave. It\'s <b>marked a round early</b>.' },
+  { ic: 'revive', title: 'Downed, then the Pit', art: 'revive', text: 'In squads, 0 HP means <b>downed</b>: a squadmate next to you can revive you. Your first death up to round 8 sends you to <b>the Pit</b>, a 1v1 duel to get back in.' },
+  { ic: 'tide', title: 'The tide rises', art: 'tide', text: 'Every 2 rounds the safe ring shrinks. The <span class="c-cyan">cyan ring</span> shows where it goes next. The stage is picked at random. Be the last squad above the water.' },
 ];
 
 function tutArt(kind) {
+  if (kind === 'classes') {
+    return `<div class="tut-art tut-classes" aria-hidden="true">${CLASS_LINES.map(([k, n], i) => `<span style="--i:${i}">${badgeSVG(k, 0, { size: 48, title: false, animated: false })}<small>${n}</small></span>`).join('')}</div>`;
+  }
+  if (kind === 'streaks') {
+    return `<div class="tut-art tut-streaks" aria-hidden="true">${[['uav', 'UAV', 3], ['care', 'Care', 4], ['airstrike', 'Airstrike', 5], ['gunship', 'Gunship', 7]].map(([k, n, c], i) => `<span style="--i:${i}"><i>${ICON[k] || ICON.bolt}</i><b>${n}</b><small>${c} kills</small></span>`).join('')}</div>`;
+  }
   if (kind === 'prestige') {
     return `<div class="tut-art tut-badges" aria-hidden="true">${[0, 2, 4].map((t, i) => `<span style="--i:${i}">${badgeSVG(['assault', 'medic', 'recon'][i], t, { size: i === 2 ? 96 : 76, title: false })}<small>${M.TIER_NAMES[t]}</small></span>`).join('')}</div>`;
   }
@@ -472,6 +474,7 @@ function tutArt(kind) {
       <g transform="translate(96,52)"><rect x="-9" y="-12" width="18" height="24" rx="3" class="t-barrel"/><rect x="-9" y="-4" width="18" height="5" class="t-band"/><path d="M-20 -22 l6 6 M20 -22 l-6 6 M0 -30 v8" class="t-burst"/></g>
       <g transform="translate(176,58)"><circle r="7" class="t-foe-c"/><circle cy="-34" r="5" class="t-flare"/><circle cy="-34" r="14" class="t-flare-glow"/><path d="M0 -26 V-10" class="t-flare-line"/></g>
       <text x="34" y="112" class="t-txt">KELP</text><text x="96" y="112" class="t-txt">BARREL</text><text x="176" y="112" class="t-txt">FLARE</text>`,
+    engage: `${you(48, 40)}${you(60, 84)}${foe(170, 36)}${foe(160, 82)}<path d="M58 44 L160 38 M70 82 L150 82" class="t-aim"/><g transform="translate(111,20)"><rect x="-30" y="-9" width="60" height="16" rx="4" class="t-badge"/><text y="3" class="t-txt">ENGAGED</text></g><text x="111" y="112" class="t-txt cyan">OTHERS MOVE AT ONCE</text>`,
     tide: `<circle cx="111" cy="61" r="62" class="t-ring now"/><circle cx="111" cy="61" r="38" class="t-ring next"/>${you(95, 66)}${foe(40, 30)}${foe(175, 90)}`,
   }[kind] || '';
   return `<svg class="tut-art" viewBox="0 0 222 122" aria-hidden="true">${kind === 'stages' ? '' : grid}${body}</svg>`;

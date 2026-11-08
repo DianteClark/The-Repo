@@ -19,10 +19,12 @@ import { initShop } from './ui/shop.js';
 import { squadColor } from './ui/squads.js';
 import * as P from './ui/progress.js';
 import * as AR from './ui/arsenal.js';
-import { initHubPages, medalArt, equipIcon, streakIcon } from './ui/hubpages.js';
+import { initHubPages, medalArt, equipIcon, streakIcon, weaponImg } from './ui/hubpages.js';
+import { hydrateThumbs } from './ui/weaponthumbs.js';
 import { openTransfer } from './ui/xferui.js';
 import { cardSVG, emblemSVG, CARDS, EMBLEMS } from '../shared/cards.js';
-import { stageInfo } from './ui/stages.js';
+import { stageInfo, stageList } from './ui/stages.js';
+import { spinStageWheel } from './ui/stagewheel.js';
 import { Ambient } from './ui/ambient.js';
 import { career, recordMatch } from './ui/career.js';
 import { buzz } from './ui/haptics.js';
@@ -327,7 +329,7 @@ async function openOnline(kind, code = null) {
     }
     lobby = mount(root, {
       intent: kind === 'join' ? 'join' : 'host', code: code || (mod.joinCodeFromUrl?.() ?? null), profile, sfx,
-      get mode() { return settings.mode; }, get stage() { return settings.stage || 'random'; }, // read when hosting
+      get mode() { return settings.mode; }, get stage() { return 'random'; }, // 5.1: always random (the stage wheel reveals it)
       ui: { badgeSVG, cardSVG, emblemSVG, squadColor },
       onExit: close,
       onStart: ({ kind: k, net, lobby: l }) => {
@@ -388,6 +390,9 @@ function applyQuality(changed = false) {
     else if (R) { R.qualityPinned = false; if (R.perf) R.perf.bad = 0; }
   } else Rcall('setQuality', settings.quality);
 }
+function applyPacing() {
+  if (hasR('setPacing')) Rcall('setPacing', settings.pacing || 'cinematic');
+}
 function applyVisualSettings() {
   Rcall('setCinematic', !!settings.cinematic);
   $('timer').dataset.style = settings.timer;
@@ -398,11 +403,25 @@ onSettingChange((k) => {
   if (k === 'quality') applyQuality(true);
   if (k === 'cinematic' || k === 'timer') applyVisualSettings();
   if (k === 'botSpeed') applySpeed();
+  if (k === 'pacing') applyPacing();
   if (k === 'coverFade') syncCoverFade();
 });
 applyAudio();
 applyQuality(false);
 applyVisualSettings();
+applyPacing();
+// 5.1 director hooks: set-piece title cards in the letterbox, "Squad 7 is moving" beats.
+if (R) {
+  R.onCinematic = (p) => {
+    if (attract || !state || fastForward) { if (p?.phase === 'end') H.cineCard(p); return; }
+    H.cineCard(p || {});
+    if (p?.phase === 'start') { H.hideBanner(); if (!p.light) buzz('tap'); }
+  };
+  R.onFocus = (f) => {
+    if (attract || !state || fastForward || turnCtx || pitView || !f || f.team === myTeam()) return;
+    J.focusBeat?.({ name: f.name || squadName(f.team), color: teamColor(f.team) });
+  };
+}
 
 // static icons
 $('rotL').innerHTML = ICON.rotL;
@@ -464,10 +483,10 @@ function focusMe() {
 new ResizeObserver(() => {
   document.body.style.setProperty('--dock-h', $('dock').offsetHeight + 'px');
 }).observe($('dock'));
+// The top bar's height feeds the left / right columns (it grows with text size).
 new ResizeObserver(() => {
-  const h = $('squadAlert').classList.contains('hidden') ? 0 : $('squadAlert').offsetHeight + 6;
-  document.body.style.setProperty('--sa-h', h + 'px');
-}).observe($('squadAlert'));
+  document.body.style.setProperty('--top-h', $('top').offsetHeight + 'px');
+}).observe($('top'));
 
 // ---------------------------------------------------------------- minimap
 
@@ -677,7 +696,7 @@ async function startGame({ online = null } = {}) {
   myLoadout = cosmeticsFor(lo);
   const kind = online?.kind || 'local';
   const opts = kind === 'local' ? {
-    mode: settings.mode, stage: settings.stage || 'random', cls: lo.cls, callsign: callsign(), loadout: lo,
+    mode: settings.mode, stage: 'random', cls: lo.cls, callsign: callsign(), loadout: lo,
     loneWolf: settings.mode === 'trios' && !!settings.loneWolf, cosmetics: myLoadout,
     noTimer: NO_TIMER, follow: settings.follow, botSpeed: settings.botSpeed,
   } : { noTimer: NO_TIMER, follow: settings.follow, botSpeed: settings.botSpeed };
@@ -727,6 +746,8 @@ function matchHooks(token) {
       zoneCenter = { x: state.zone.x, y: state.zone.y };
       focusMe();
       updateHud();
+      await stageWheel(token);
+      if (!live()) return;
       await dropIn(token);
       if (!live()) return;
       document.body.classList.remove('intro');
@@ -758,6 +779,21 @@ function matchHooks(token) {
   };
 }
 
+// ----- STAGE WHEEL: the reel lands on the stage the match seed picked (same for every player).
+
+function stageWheel(token) {
+  const key = state?.stage;
+  if (!key || PARAMS.has('nowheel')) return Promise.resolve(false);
+  const fast = DEBUG && PARAMS.has('fast');
+  const w = spinStageWheel({
+    stages: stageList(K), target: key, sfx, buzz, fast,
+    reduced: document.body.classList.contains('reduce-motion'),
+    kicker: `${MODES[state.mode]?.name || ''}${onlineCfg ? ' · Online' : ''}`,
+  });
+  introCtx = { cancel: () => w.cancel(), skip: () => w.skip() };
+  return w.done.then((r) => { if (introCtx && token === gameToken) introCtx = null; return r; });
+}
+
 // ----- DROP IN intro: squad cards + countdown. Tap to skip.
 
 const CLASS_TIP = {
@@ -766,6 +802,8 @@ const CLASS_TIP = {
   breacher: 'Breach adjacent cover to expose whoever hides behind it.',
   medic: 'Patch revives a downed squadmate at 4 HP from the next tile.',
   recon: 'Scan before you push: it sees through walls for a full round.',
+  engineer: 'Deploy Cover turns open ground into a firing line. You also repair boats.',
+  gunner: 'Suppress pins a target: -25 aim, and moving draws your fire.',
 };
 
 function dropIn(token) {
@@ -878,7 +916,7 @@ function onStep({ active = [], engagements = [] } = {}) {
   if (pitView) { queueHud(); return; } // the main match's squads aren't what the duel HUD shows
   const mt = myTeam();
   renderStepInfo();
-  if (active.includes(mt) && !playerUp() && !fastForward) H.feedInfo('Your squad is moving', 'signal');
+  void 0; // the turn label already says "YOUR SQUAD"; no feed line needed
   document.body.dataset.turn = active.includes(mt) ? 'mine' : 'enemy';
   handoff();
   queueHud();
@@ -990,6 +1028,7 @@ function resumeTimer() { if (turnCtx) turnCtx.paused = 0; ctl?.resume?.(); }
 function finishTurn() {
   if (turnCtx) tracker.turnEnd();
   turnCtx = null;
+  ui.gearOpen = false;
   clearPreviews();
   ui.mode = 'move';
   ui.pending = null;
@@ -1391,6 +1430,11 @@ const CLASS_ACTION = {
   gunner: { key: 'suppress', icon: 'suppress', label: 'Suppress' },
 };
 const HOTKEYS = { move: '1', shoot: '2', aimed: '3', breach: '3', patch: '3', scan: '3', cover: '3', suppress: '3', grenade: '4', lethal: '4', smoke: '5', tactical: '5', hunker: '6', overwatch: '7', medkit: '8', reload: 'R', swap: 'X', revive: 'V' };
+/** One-line effect for each piece of gear in the Gear tray. */
+const GEAR_SUB = {
+  frag: '3 dmg · 3×3 blast', semtex: 'Sticks · +2 to a unit', claymore: 'Trap · 5 dmg', knife: 'Silent · 4 dmg · range 4',
+  smoke: 'Hides you · -20 aim', flashbang: '-1 AP · -30 aim', stim: '+1 AP · heal 2 · free', decoy: 'Fake gunfire ping',
+};
 
 function actionList(u) {
   const av = availability(u);
@@ -1405,20 +1449,20 @@ function actionList(u) {
     for (const slot of ['lethal', 'tactical']) {
       const a = av[slot];
       if (!a) continue;
-      list.push({ key: slot, icon: { grenade: 'grenade', semtex: 'semtex', claymore: 'claymore', knife: 'knife', smoke: 'smoke', flashbang: 'flash', stim: 'stim', decoy: 'decoy' }[a.e.action] || (slot === 'lethal' ? 'grenade' : 'smoke'), label: a.e.name.replace(/ Grenade$/, '').replace('Throwing ', ''), badge: a.charges, badgeKind: a.charges > 0 ? 'ch' : 'zero', cls: slot });
+      list.push({ key: slot, group: 'gear', icon: { grenade: 'grenade', semtex: 'semtex', claymore: 'claymore', knife: 'knife', smoke: 'smoke', flashbang: 'flash', stim: 'stim', decoy: 'decoy' }[a.e.action] || (slot === 'lethal' ? 'grenade' : 'smoke'), label: a.e.name.replace(/ Grenade$/, '').replace('Throwing ', ''), sub: GEAR_SUB[a.e.id] || (slot === 'lethal' ? 'Lethal' : 'Tactical'), badge: a.charges, badgeKind: a.charges > 0 ? 'ch' : 'zero', cls: slot });
     }
   } else {
     const frags = av.grenade.charges ?? 0;
-    if (frags > 0 || u.cls === 'assault') list.push({ key: 'grenade', icon: 'grenade', label: 'Frag', badge: frags, badgeKind: frags > 0 ? 'ch' : 'zero' });
+    if (frags > 0 || u.cls === 'assault') list.push({ key: 'grenade', group: 'gear', icon: 'grenade', label: 'Frag', sub: GEAR_SUB.frag, badge: frags, badgeKind: frags > 0 ? 'ch' : 'zero', cls: 'lethal' });
     const smokes = av.smoke.charges ?? 0;
-    if (smokes > 0 || u.cls === 'recon') list.push({ key: 'smoke', icon: 'smoke', label: 'Smoke', badge: smokes, badgeKind: smokes > 0 ? 'ch' : 'zero' });
+    if (smokes > 0 || u.cls === 'recon') list.push({ key: 'smoke', group: 'gear', icon: 'smoke', label: 'Smoke', sub: GEAR_SUB.smoke, badge: smokes, badgeKind: smokes > 0 ? 'ch' : 'zero', cls: 'tactical' });
   }
-  if (av.repair) list.push({ key: 'repair', icon: 'water', label: 'Repair', cls: 'ability' });
+  if (av.repair) list.push({ key: 'repair', icon: 'boat', label: 'Repair', cls: 'ability boatact' });
   if (av.revive && av.revive.count > 0) list.push({ key: 'revive', icon: 'revive', label: 'Revive', badge: av.revive.count, badgeKind: av.revive.ok ? 'rv' : 'zero', cls: av.revive.ok ? 'urgent' : '' });
   list.push(
     { key: 'hunker', icon: 'hunker', label: 'Hunker', endsTurn: true },
     { key: 'overwatch', icon: 'overwatch', label: 'Watch', endsTurn: true },
-    { key: 'medkit', icon: 'medkit', label: 'Medkit', badge: u.items?.medkit ?? 0, badgeKind: u.items?.medkit ? 'ch' : 'zero' },
+    { key: 'medkit', group: 'gear', icon: 'medkit', label: 'Medkit', sub: `Heal ${K.MEDKIT_HEAL ?? 5} HP · 1 AP`, badge: u.items?.medkit ?? 0, badgeKind: u.items?.medkit ? 'ch' : 'zero', cls: 'medkit' },
   );
   for (const a of list) { a.state = st(a.key); a.reason = av[a.key]?.reason; a.hotkey = HOTKEYS[a.key]; }
   return { list, av };
@@ -1434,6 +1478,7 @@ function pressAction(a) {
     return;
   }
   sfx.uiClick();
+  if (a.group === 'gear') ui.gearOpen = false;
   switch (a.key) {
     case 'move': setMode('move'); break;
     case 'shoot': case 'aimed': case 'grenade': case 'breach': case 'smoke': case 'scan': case 'patch': case 'revive': case 'cover': case 'suppress': {
@@ -1455,6 +1500,7 @@ function pressAction(a) {
     }
     case 'hunker': doAction({ type: 'hunker' }); break;
     case 'repair': { const id = availability(u).repair?.ids?.[0]; if (id !== undefined) doAction({ type: 'repair', vehicleId: id }); break; }
+    case 'gear': toggleGear(); break;
     case 'overwatch': doAction({ type: 'overwatch' }); break;
     case 'medkit': doAction({ type: 'medkit' }); break;
     case 'reload': doAction({ type: 'reload' }).then((ok) => { if (ok) { sfx.reload?.(); buzz('tap'); } }); break;
@@ -1462,6 +1508,16 @@ function pressAction(a) {
     case 'end': endTurnPressed(); break;
     default:
   }
+  updateHud();
+}
+
+/** The Gear tray (lethal · tactical · medkit) opens above the action bar. */
+function toggleGear(force) {
+  const u = me();
+  if (!standing(u)) return;
+  ui.gearOpen = typeof force === 'boolean' ? force : !ui.gearOpen;
+  if (ui.gearOpen && (ui.mode === 'equip' || ui.mode === 'knife' || ui.mode === 'grenade' || ui.mode === 'smoke')) cancelMode();
+  sfx.uiClick();
   updateHud();
 }
 
@@ -1523,6 +1579,7 @@ function clearPreviews() {
 
 function setMode(mode, preselect = null, extra = null) {
   const u = turnCtx?.u;
+  if (mode !== 'move') ui.gearOpen = false;
   clearPreviews();
   H.hideContext();
   $('targetHint').classList.add('hidden');
@@ -1580,7 +1637,7 @@ function setMode(mode, preselect = null, extra = null) {
     const hl = new Map();
     for (const k of ui.valid) hl.set(k, 2);
     Rcall('setHighlights', hl);
-    if (mode === 'streak' && ui.streak.target === 'line') showTargetHint('Tap where the airstrike starts, then tap its direction');
+    if (mode === 'streak' && ui.streak.target === 'line') showTargetHint('Airstrike: tap the start, then the direction');
     else if (mode === 'streak') showTargetHint(`Tap a highlighted tile for the ${AR.streakByKey(ui.streak.key)?.name || 'drop'}`);
     if ((mode === 'breach' || mode === 'cover') && ui.valid.size === 1) {
       const [k] = ui.valid; const S = state.map.size;
@@ -2210,7 +2267,7 @@ window.addEventListener('keydown', (e) => {
     if (!$('tierUp').classList.contains('hidden')) { closeTierUp(); return; }
     if (introCtx) { introCtx.skip(); return; }
     if (state && !$('hud').classList.contains('hidden') && $('endScreen').classList.contains('hidden')) {
-      if (ui.mode !== 'move' || ui.pending) cancelMode();
+      if (ui.gearOpen) { ui.gearOpen = false; updateHud(); } else if (ui.mode !== 'move' || ui.pending) cancelMode();
       else openPause();
     }
     return;
@@ -2240,20 +2297,24 @@ window.addEventListener('keydown', (e) => {
   if (lower === 'e') { Rcall('rotate', 1); return; }
   if (lower === 'f') { focusMe(); return; }
   if (lower === 'm') { settings.muted = !settings.muted; return; }
-  if (lower === 'r') { pressByKey('revive'); return; }
+  if (lower === 'r') { pressByKey('reload'); return; }
+  if (lower === 'v') { pressByKey('revive'); return; }
+  if (lower === 'x') { pressByKey('swap'); return; }
+  if (lower === 'g') { if (turnCtx) toggleGear(); return; }
   if (k === ' ' || k === 'Spacebar') { e.preventDefault(); if (turnCtx) endTurnPressed(true); else endTurnPressed(); return; }
   if (k === 'Enter') { e.preventDefault(); confirmPending(); return; }
   if (k === 'Tab') { e.preventDefault(); if (ui.mode === 'shoot' || ui.mode === 'aimed') cycleTarget(e.shiftKey ? -1 : 1); else if (turnCtx) pressByKey('shoot'); return; }
   const cls = me()?.cls;
-  const map = { 1: 'move', 2: 'shoot', 3: CLASS_ACTION[cls]?.key, 4: 'grenade', 5: 'smoke', 6: 'hunker', 7: 'overwatch', 8: 'medkit' };
+  const u5 = me();
+  const map = { 1: 'move', 2: 'shoot', 3: CLASS_ACTION[cls]?.key, 4: u5?.lethal ? 'lethal' : 'grenade', 5: u5?.tactical ? 'tactical' : 'smoke', 6: 'hunker', 7: 'overwatch', 8: 'medkit' };
   if (map[k]) pressByKey(map[k]);
 });
 
 function pressByKey(key) {
   const u = me();
   if (!standing(u)) return;
-  const { list } = actionList(u);
-  const a = list.find((x) => x.key === key);
+  const { list, av } = actionList(u);
+  const a = list.find((x) => x.key === key) || (av[key] && (key === 'reload' || key === 'swap') ? { key, label: key === 'reload' ? 'Reload' : 'Swap', state: av[key].ok ? 'on' : 'off', reason: av[key].reason } : null);
   if (a) pressAction(a);
 }
 
@@ -2311,14 +2372,11 @@ function updateHud() {
 
   // unit card + actions
   const mates = state.teams[mt]?.members.map((id) => state.units[id]).filter((m) => standing(m) && !isMe(m)).length || 0;
-  const ws = u ? {
-    range: RU.weaponRange ? RU.weaponRange(u) : u.weapon.range,
-    aim: u.weapon.aim + (u.mods?.scope || 0) * 5,
-    dmg: [u.weapon.dmg[0] + (u.mods?.barrel || 0), u.weapon.dmg[1] + (u.mods?.barrel || 0)],
-  } : null;
+  const boatV = u?.alive && u.vehicle != null ? (state.vehicles || []).find((v) => v.id === u.vehicle) : null;
+  const boat = boatV ? { hp: boatV.hp, maxHp: boatV.maxHp ?? 12, fuel: boatV.fuel, driver: boatV.seats?.[0] === u.id } : null;
   const spotted = !!u?.alive && !!state.reveals?.some((r) => r.team !== mt && r.ids?.includes(u.id));
   H.renderUnitCard(u, {
-    CLASSES, myTurn: !!turnCtx, weaponStats: ws, callsign: callsign(),
+    CLASSES, myTurn: !!turnCtx, callsign: callsign(), boat,
     outside: u?.alive && !G.insideZone(state, u.x, u.y),
     nextOutside: u?.alive && !insideNext(u.x, u.y),
     spectating: !u?.alive, aliveMates: mates,
@@ -2331,10 +2389,11 @@ function updateHud() {
   });
   if (standing(u)) {
     const { list, av } = actionList(u);
-    H.renderActions(list, pressAction);
+    if (!turnCtx) ui.gearOpen = false;
+    H.renderActions(list, pressAction, { open: !!ui.gearOpen, onToggle: () => toggleGear() });
     renderWeaponBar(u, av);
     renderStreakBar(u);
-  } else { H.renderActions([], pressAction); $('wpnBar').classList.add('hidden'); $('streakBar').classList.add('hidden'); }
+  } else { ui.gearOpen = false; H.renderActions([], pressAction, {}); $('wpnBar').classList.add('hidden'); $('streakBar').classList.add('hidden'); }
   updateEndBtn();
   document.body.classList.toggle('my-turn', !!turnCtx);
   document.body.classList.toggle('dead', !u?.alive);
@@ -2344,7 +2403,7 @@ function updateHud() {
   const downed = state.winner === null ? downedMates() : [];
   const canAct = !!turnCtx && !turnCtx.busy && standing(u) && u.ap > 0;
   const rset = canAct && downed.length ? reviveSet(u) : null;
-  H.renderSquadAlert(downed.map((m) => ({
+  H.renderSquadAlert(downed.filter((m) => !isMe(m)).map((m) => ({
     id: m.id, name: m.name, cls: m.cls, bleed: m.bleed ?? 0, isPlayer: isMe(m),
     adjacent: !!rset?.has(keyOf(m.x, m.y)),
   })), {
@@ -2387,10 +2446,11 @@ function renderWeaponBar(u, av) {
   el.classList.remove('hidden');
   el.classList.toggle('low', low);
   el.classList.toggle('empty', !inf && ammo === 0);
-  el.innerHTML = `<div class="wb-w"><small>${u.slot ? 'Secondary' : 'Primary'}</small><b>${esc(u.weapon?.name || '')}</b></div>
-    <div class="wb-ammo">${inf ? '<b class="inf">∞</b>' : `<b>${ammo ?? '–'}</b><small>/${mag ?? '–'}</small>`}${pips ? `<span class="wb-pips${mag > 10 ? ' dense' : ''}">${pips}</span>` : ''}${!inf && Number.isFinite(spare) ? `<em>${spare} spare</em>` : ''}</div>
-    ${rl ? `<button class="wb-btn${rl.ok ? '' : ' off'}${!inf && ammo === 0 ? ' urgent' : ''}" data-k="reload" title="${esc(rl.reason || 'Reload [R]')}">${ICON.reload}<span>Reload</span><small>${rl.free ? 'free' : '1 AP'}</small></button>` : ''}
-    ${sw && other ? `<button class="wb-btn${sw.ok ? '' : ' off'}" data-k="swap" title="${esc(sw.reason || 'Swap weapon [X]')}">${ICON.swap}<span>${esc(other.name)}</span><small>free</small></button>` : ''}`;
+  const wname = u.weapon?.name || '';
+  el.innerHTML = `<div class="wb-w" title="${esc(wname)}"><b>${esc(wname)}</b><small>${u.slot ? 'Sidearm' : 'Primary'}</small></div>
+    <div class="wb-ammo" title="${inf ? 'Infinite ammo' : `${ammo}/${mag} in the magazine${Number.isFinite(spare) ? ` · ${spare} spare` : ''}`}">${inf ? '<b class="inf">∞</b>' : `<b>${ammo ?? '–'}</b><small>/${mag ?? '–'}</small>`}${pips ? `<span class="wb-pips${mag > 10 ? ' dense' : ''}">${pips}</span>` : ''}${!inf && Number.isFinite(spare) ? `<em>+${spare}</em>` : ''}</div>
+    ${rl ? `<button class="wb-btn${rl.ok ? '' : ' off'}${!inf && ammo === 0 ? ' urgent' : ''}" data-k="reload" title="${esc(rl.reason ? `Reload: ${rl.reason}` : `Reload [R] · ${rl.free ? 'free' : '1 AP'}`)}" aria-label="Reload">${ICON.reload}<span>Reload</span></button>` : ''}
+    ${sw && other ? `<button class="wb-btn${sw.ok ? '' : ' off'}" data-k="swap" title="${esc(sw.reason ? `Swap: ${sw.reason}` : `Swap to ${other.name} [X] · free`)}" aria-label="Swap to ${esc(other.name)}">${ICON.swap}<span>${esc(other.name)}</span></button>` : ''}`;
   el.querySelectorAll('.wb-btn').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); const k = b.dataset.k; const a = av[k]; pressAction({ key: k, label: k === 'reload' ? 'Reload' : 'Swap', state: a?.ok ? 'on' : 'off', reason: a?.reason }); };
   });
@@ -2411,9 +2471,10 @@ function renderStreakBar(u) {
     const have = s.points ?? s.kills ?? pts;
     const frac = Math.max(0, Math.min(1, have / Math.max(1, s.cost)));
     const st = s.used ? 'used' : s.ready ? 'ready' : s.earned ? 'earned' : 'locked';
-    return `<button class="sk ${st}${ui.streak?.key === s.key ? ' active' : ''}" data-key="${esc(s.key)}" title="${esc(s.name)}: ${esc(s.reason || s.desc || '')}" style="--f:${frac}">
+    const prog = s.used ? 'Used' : s.ready ? 'Ready' : s.earned ? 'Earned' : `${Math.min(have, s.cost)}/${s.cost}`;
+    return `<button class="sk ${st}${ui.streak?.key === s.key ? ' active' : ''}" data-key="${esc(s.key)}" title="${esc(s.name)}: ${esc(s.reason || s.desc || '')}" aria-label="${esc(s.name)} · ${prog}" style="--f:${frac}">
       <span class="sk-ring"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" class="trk"/><circle cx="18" cy="18" r="16" class="arc"/></svg><span class="sk-ic">${streakIcon(s.key)}</span></span>
-      <span class="sk-t"><b>${esc(String(s.name || '').replace(/^Care Package$/i, 'Care Drop').replace(/^Counter-UAV$/i, 'C-UAV'))}</b><small>${s.used ? 'Used' : s.ready ? 'Ready' : `${Math.min(have, s.cost)}/${s.cost}`}</small></span></button>`;
+      <span class="sk-t"><b>${esc(String(s.name || '').replace(/^Care Package$/i, 'Care Drop').replace(/^Counter-UAV$/i, 'C-UAV'))}</b><small>${prog}</small></span><em class="sk-n">${s.used ? '✓' : s.ready || s.earned ? '!' : `${Math.min(have, s.cost)}/${s.cost}`}</em></button>`;
   }).join('');
   el.querySelectorAll('.sk').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); const s = list.find((x) => x.key === b.dataset.key); if (s) pressStreak(s); }; });
   const ready = list.filter((s) => s.earned && !s.used).map((s) => s.key).join(',');
@@ -2626,7 +2687,8 @@ function meta(ev) {
       const k = ev.by !== null && ev.by !== undefined ? st.units[ev.by] : null;
       if (isMe(k)) stats.downs++;
       if (ff) break;
-      H.feedLine({ a: k ? unitName(k) : null, aMine: k?.team === mt, aColor: k ? teamColor(k.team) : null, icon: 'downed', b: unitName(u), bMine: u.team === mt, bColor: teamColor(u.team), note: k ? 'downed' : 'went down', kind: 'down' });
+      // My own downing is the banner + the unit card; the feed reports everyone else's.
+      if (!isMe(u)) H.feedLine({ a: k ? unitName(k) : null, aMine: k?.team === mt, aColor: k ? teamColor(k.team) : null, icon: 'downed', b: unitName(u), bMine: u.team === mt, bColor: teamColor(u.team), note: k ? 'downed' : 'went down', kind: 'down' });
       if (isMe(u)) {
         // The 'downed' stinger + sfx come from render.js (_evDowned) with the animation.
         H.banner('YOU\'RE DOWN', 'bad', `Bleed out in ${u.bleed ?? 2} turns · a squadmate can revive you`, 2200);
@@ -2684,7 +2746,7 @@ function meta(ev) {
       break;
     }
     case 'reveal_end':
-      if (!ff && ev.team === mt) H.feedInfo('Scan faded', 'signal');
+      if (!ff && ev.team === mt) H.toast('Scan faded', 'info', 'scan');
       break;
     case 'smoke': {
       const s = st.units[ev.id];
@@ -2701,10 +2763,12 @@ function meta(ev) {
       if (k && k.team === mt && u.team !== mt) stats.squadKills++;
       if (!ff) {
         const cause = lastCause[ev.id] === 'bleed' ? 'bleed' : k ? (lastCause[ev.id] || 'shoot') : (lastCause[ev.id] || 'tide');
+        const wpn = k && (cause === 'shoot' || cause === 'aimed' || cause === 'overwatch') ? (ev.weapon && Array.isArray(k.weapons) ? k.weapons.find((w) => w?.id === ev.weapon)?.name : null) || k.weapon?.name : null;
         H.feedKill({
           killer: k ? unitName(k) : null,
           victim: unitName(u),
-          cause,
+          cause: ev.source === 'knife' ? 'knife' : ['airstrike', 'gunship', 'sentry'].includes(ev.source) ? 'streak' : cause,
+          weapon: wpn || null,
           killerMine: k?.team === mt, victimMine: u.team === mt,
           killerColor: k ? teamColor(k.team) : null, victimColor: teamColor(u.team),
         });
@@ -2746,7 +2810,6 @@ function meta(ev) {
     case 'supply_drop':
       if (!ff) {
         H.toast('Supply cache inbound inside the next ring', 'loot', 'drop');
-        H.feedInfo('Supply drop spotted', 'signal');
       }
       break;
     case 'overwatch_trigger':
@@ -2765,7 +2828,6 @@ function meta(ev) {
       if (!ff) {
         if (drifting) {
           H.banner('THE ZONE DRIFTS', 'tide', outN ? 'The next ring is moving away from you. Rotate now' : 'Follow the cyan ring on the minimap', 2000);
-          H.feedInfo('Safe zone drifting', 'signal');
         } else H.banner('THE TIDE RISES', 'tide', `Safe radius ${ev.r} · next ${typeof ev.next === 'number' ? ev.next : nz.r}`, 1800);
       }
       queueHud();
@@ -3030,7 +3092,8 @@ function showLevelUp(it) {
   } else if (it.kind === 'weapon') {
     const wd = AR.weaponById(it.weapon.id);
     $('luKick').textContent = `${wd?.name || ''} · weapon level`;
-    $('luBadge').innerHTML = `<div class="lu-w">${hub.weaponArt(it.weapon.id, {}, { w: 260 })}</div>`;
+    $('luBadge').innerHTML = `<div class="lu-w">${weaponImg(it.weapon.id, {}, { w: 260 })}</div>`;
+    hydrateThumbs($('luBadge'));
     $('luName').textContent = `LEVEL ${it.level}`;
     $('luName').className = 'tu-name t2';
     $('luSub').textContent = 'New attachments in the Gunsmith:';
@@ -3189,6 +3252,7 @@ if (DEBUG) {
     ui,
     sfx,
     career,
+    settings,
     get myTurn() { return !!turnCtx && !turnCtx.busy; },
     info: () => ({
       mode: ui.mode, myTurn: !!turnCtx, busy: !!turnCtx?.busy, pending: ui.pending && { ...ui.pending, path: undefined },
@@ -3199,7 +3263,7 @@ if (DEBUG) {
     me: () => me(),
     pitView: () => pitView,
     tap: (x, y) => { onTileTap(x, y); return ui.pending ? ui.pending.kind + (ui.pending.boat ? ':' + ui.pending.boat : '') : ui.mode; },
-    press: (key) => { const a = standing(me()) ? actionList(me()).list.find((x) => x.key === key) : null; if (!a) return 'none'; pressAction(a); return a.state === 'off' ? 'off: ' + a.reason : ui.mode; },
+    press: (key) => { if (key === 'gear') { if (!turnCtx) return 'not my turn'; toggleGear(); return ui.gearOpen ? 'gear:open' : 'gear:closed'; } const a = standing(me()) ? actionList(me()).list.find((x) => x.key === key) : null; if (!a) return 'none'; pressAction(a); return a.state === 'off' ? 'off: ' + a.reason : ui.mode; },
     streakBar: () => streakBar(me()).map((s) => `${s.key}:${s.ready ? 'ready' : s.reason}`),
     deploy: () => { startGame(); return 'ok'; },
     skipIntro: () => { introCtx?.skip(); return 'ok'; },
@@ -3300,6 +3364,16 @@ if (DEBUG) {
       if (turnCtx) setMode('move');
       return `downed ${m.name}`;
     },
+    /** Debug only: eliminate the player outright (spectator UI). */
+    killMe() {
+      const u = me(); if (!u) return 'n/a';
+      u.hp = 0; u.alive = false; u.downed = false;
+      Rcall('syncFromState');
+      meta({ type: 'death', id: u.id, by: null });
+      safePlay({ type: 'death', id: u.id, by: null });
+      if (turnCtx) finishTurn(); else updateHud();
+      return 'dead';
+    },
     /** Debug only: knock the player down (team modes), as if shot. */
     downMe() {
       const u = me();
@@ -3367,6 +3441,38 @@ if (DEBUG) {
       if (turnCtx) setMode('move'); else updateHud();
       return `at ${u.x},${u.y}`;
     },
+    /** Debug only: push a burst of typical feed traffic (merges, kills, intel). */
+    feedDemo() {
+      const mt = myTeam(); const st = state; const foe = st.units.find((x) => x.team !== mt); const mate = st.units.find((x) => x.team === mt && !isMe(x));
+      for (const d of ['N', 'NE', 'N', 'E']) H.feedInfo(`Gunfire to the ${d}`);
+      H.feedInfo('Explosion to the SW');
+      H.feedKill({ killer: unitName(me()), victim: foe.name, cause: 'shoot', weapon: me().weapon?.name, killerMine: true, victimColor: teamColor(foe.team) });
+      H.feedLine({ a: mate?.name, aMine: true, icon: 'revive', b: 'You', bMine: true, note: 'revived', kind: 'revive' });
+      H.feedKill({ killer: foe.name, killerColor: teamColor(foe.team), victim: mate?.name || 'Mate', victimMine: true, cause: 'aimed', weapon: 'Longbow' });
+      return 'ok';
+    },
+    cine: (kind = 'ship', name = 'Container ship', light = false) => { R.onCinematic?.({ phase: 'start', kind, name, sub: 'Get off the marked lane', light }); return 'ok'; },
+    cineEnd: () => { R.onCinematic?.({ phase: 'end' }); return 'ok'; },
+    /** Debug only: bring the nearest enemy into a clear 4-tile shot. */
+    enemyNear() {
+      const u = me(); if (!u) return 'no me';
+      const S = state.map.size;
+      const foe = state.units.filter((e) => standing(e) && e.team !== u.team).sort((a, b) => RU.dist(a.x, a.y, u.x, u.y) - RU.dist(b.x, b.y, u.x, u.y))[0];
+      for (let r = 3; r <= 6; r++) for (const [dx, dy] of [[r, 0], [0, r], [-r, 0], [0, -r], [r, 1], [1, r]]) {
+        const x = u.x + dx, y = u.y + dy;
+        if (x < 0 || y < 0 || x >= S || y >= S || state.map.cover[y * S + x] || unitAt(x, y) || (state.map.terrain?.[y * S + x] === 2)) continue;
+        if (!RU.los(state.map, u.x, u.y, x, y)) continue;
+        foe.x = x; foe.y = y; Rcall('syncFromState'); if (turnCtx) setMode('move'); updateHud(); return `${foe.name} at ${x},${y}`;
+      }
+      return 'no tile';
+    },
+    /** Debug only: seat me on the nearest boat as its driver (exercises the boat HUD). */
+    board() {
+      const u = me(); const v = (state.vehicles || [])[0]; if (!u || !v) return 'no boat';
+      v.seats = [u.id, ...(v.seats || []).filter((x) => x !== u.id)]; u.vehicle = v.id; u.x = v.x; u.y = v.y;
+      Rcall('syncFromState'); if (turnCtx) setMode('move'); updateHud(); return `aboard ${v.id}`;
+    },
+    wheel: (key = 'rig') => { const w = spinStageWheel({ stages: stageList(K), target: key, sfx, buzz, kicker: 'Quads' }); introCtx = { skip: w.skip, cancel: w.cancel }; w.done.then(() => { introCtx = null; }); return 'ok'; },
     tierUp: (cls = 'assault', t = 2) => { const P = M.classProgress(cls); showTierUp({ cls, after: { ...P, tier: t, name: M.TIER_NAMES[t], next: M.TIER_XP[t + 1] ?? null } }); return 'ok'; },
   };
 }

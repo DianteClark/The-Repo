@@ -40,12 +40,12 @@
     <div class="sp-streaks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
     <div class="sp-center">
       <div class="kicker sp-kick"><span>16 players</span><span>Turn-based</span><span>Battle royale</span></div>
-      <h1 class="logo big" aria-label="Tidefall 5.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>5.0</b></span></h1>
+      <h1 class="logo big" aria-label="Tidefall 5.1"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span><span class="v2" aria-hidden="true"><b>5.1</b></span></h1>
       <p class="tagline">Tactics. Loadouts. Killstreaks. The tide takes everyone eventually.</p>
       <div class="sp-pillars" aria-hidden="true"><span>Engagement turns</span><span>Create-a-Class</span><span>Killstreaks</span><span>Online squads</span></div>
       <div class="sp-start"><span class="sp-ring"></span><span id="spStartTxt">Tap to start</span></div>
     </div>
-    <div class="sp-foot"><span class="dot"></span><span>Solo vs bots · Online with friends</span><span class="sep"></span><span>Seven classes</span><span class="sep"></span><span>v5.0</span></div>
+    <div class="sp-foot"><span class="dot"></span><span>Solo vs bots · Online with friends</span><span class="sep"></span><span>Seven classes</span><span class="sep"></span><span>v5.1</span></div>
     <svg class="waves" viewBox="0 0 1200 200" preserveAspectRatio="none" aria-hidden="true">
       <path class="w1" d="M0 120 C150 90 300 150 450 120 S750 90 900 120 S1100 150 1200 120 V200 H0Z" />
       <path class="w2" d="M0 140 C150 115 300 165 450 140 S750 115 900 140 S1100 165 1200 140 V200 H0Z" />
@@ -57,7 +57,7 @@
   <div id="menu" class="screen hidden" data-page="play">
     <div class="menu-fx" aria-hidden="true"><div class="scan"></div></div>
     <header id="hubTop">
-      <h1 class="logo hub-logo" aria-label="Tidefall 5.0"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span></h1>
+      <h1 class="logo hub-logo" aria-label="Tidefall 5.1"><span class="lg-wrap"><span class="lg-base" aria-hidden="true"><i style="--i:0">T</i><i style="--i:1">I</i><i style="--i:2">D</i><i style="--i:3">E</i><i style="--i:4">F</i><i style="--i:5">A</i><i style="--i:6">L</i><i style="--i:7">L</i></span><span class="lg-water" aria-hidden="true">TIDEFALL</span><span class="lg-shine" aria-hidden="true">TIDEFALL</span></span></h1>
       <button id="profileBtn" class="ht-profile" aria-label="Your profile"></button>
       <div class="ht-right">
         <span id="menuSalvage" class="wallet" title="Salvage: earned in matches, spent in the Store"></span>
@@ -94,9 +94,8 @@
               <span class="switch"><i></i></span>
               <span class="wolf-txt"><b>Volunteer as Lone Wolf</b><small>Drop solo with +1 AP, +50% HP and +1 armor</small></span>
             </label>
-            <div class="sec-h"><span class="n">02</span>Stage<small id="stageDesc"></small></div>
-            <div id="stageChoices" class="stage-row" role="radiogroup" aria-label="Stage"></div>
-            <div id="stageDetail" class="stage-detail" aria-live="polite"></div>
+            <div class="sec-h"><span class="n">02</span>Stages<small>Random every drop</small></div>
+            <div id="stageChoices" class="stage-strip" aria-label="Stage rotation"></div>
             <div class="sec-h"><span class="n">03</span>Today<small id="dailyReset"></small></div>
             <div id="playDailies" class="daily-mini"></div>
           </div>
@@ -125,9 +124,11 @@
   <!-- ============ TRANSITION WIPE ============ -->
   <div id="wipe" aria-hidden="true"><i></i><i></i><i></i></div>
 
-  <!-- ============ HUD ============ -->
+  <!-- ============ HUD (5.1: strict layout grid) ============
+       top bar · left column (engagement + feed) · right column (minimap + camera)
+       · centre FX · over-dock stack (toasts, alerts, context) · bottom dock -->
   <div id="hud" class="hidden">
-    <div id="top">
+    <div id="top" class="hud-bar">
       <div id="timer" class="timer ring idle">
         <svg class="tring" viewBox="0 0 52 52" aria-hidden="true">
           <circle class="trk" cx="26" cy="26" r="22" />
@@ -140,63 +141,80 @@
       <div id="topMid">
         <div id="turnInfo" class="turn-label"></div>
         <div id="turnStrip"></div>
-        <div id="engageInfo" class="engage hidden" aria-live="polite"></div>
       </div>
-      <button id="pauseBtn" class="icon-btn" title="Menu [Esc]"></button>
+      <div id="roundInfo" class="top-stats"></div>
+      <button id="pauseBtn" class="icon-btn" title="Menu [Esc]" aria-label="Menu"></button>
     </div>
-    <div id="roundInfo" class="chips"></div>
+
+    <div id="colL">
+      <div id="engageInfo" class="engage hidden" aria-live="polite"></div>
+      <div id="feed" aria-live="off"></div>
+    </div>
 
     <div id="sideR">
       <div id="minimapWrap"><canvas id="minimap"></canvas><span class="mm-n">N</span></div>
       <div id="camBtns">
-        <button id="rotL" class="icon-btn" title="Rotate left [Q]"></button>
-        <button id="rotR" class="icon-btn" title="Rotate right [E]"></button>
-        <button id="focusBtn" class="icon-btn" title="Find me [F]"></button>
-        <button id="muteBtn" class="icon-btn" title="Sound"></button>
+        <button id="rotL" class="icon-btn" title="Rotate left [Q]" aria-label="Rotate left"></button>
+        <button id="rotR" class="icon-btn" title="Rotate right [E]" aria-label="Rotate right"></button>
+        <button id="focusBtn" class="icon-btn" title="Find me [F]" aria-label="Find me"></button>
+        <button id="muteBtn" class="icon-btn" title="Sound [M]" aria-label="Sound"></button>
       </div>
     </div>
+    <div id="medalStack" aria-live="polite"></div>
 
-    <div id="netStatus" class="net-status hidden" aria-live="polite"></div>
     <div id="dmgDir" aria-hidden="true"></div>
     <div id="hitmarker" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <div id="xpPops" aria-hidden="true"></div>
-    <div id="medalStack" aria-live="polite"></div>
     <div id="killConfirm" aria-hidden="true"></div>
     <div id="edgeGlow" aria-hidden="true"></div>
-    <div id="feed"></div>
-    <div id="squadAlert" class="hidden" aria-live="assertive"></div>
-    <div id="toasts"></div>
     <div id="banner" class="banner"></div>
+    <div id="cineCard" class="cine-card" aria-live="polite"><div class="cc-top"><span id="cineKick"></span></div><div class="cc-bot"><b id="cineName"></b><small id="cineSub"></small></div></div>
 
-    <div id="targetPanel" class="panel ctx hidden">
-      <div id="ctxBody"></div>
-      <div class="ctx-btns">
-        <button id="tpClose" class="btn ghost">Cancel</button>
-        <button id="fireBtn" class="btn primary">Confirm</button>
+    <div id="overDock">
+      <div id="toasts"></div>
+      <div id="netStatus" class="net-status hidden" aria-live="polite"></div>
+      <div id="targetHint" class="target-hint hidden" aria-live="polite"></div>
+      <div id="squadAlert" class="hidden" aria-live="assertive"></div>
+      <div id="specBar" class="panel hidden">
+        <div class="spec-top">
+          <span class="spec-l"><i class="live"></i><span id="specText">Spectating</span></span>
+          <div class="spec-speed seg" role="radiogroup" aria-label="Playback speed"><button data-speed="1" role="radio">1×</button><button data-speed="2" role="radio">2×</button><button data-speed="4" role="radio">4×</button></div>
+        </div>
+        <div class="spec-cycle">
+          <button id="specPrev" class="icon-btn sm" aria-label="Previous player"></button>
+          <div id="specWho" class="spec-who"></div>
+          <button id="specNext" class="icon-btn sm" aria-label="Next player"></button>
+          <button id="skipBtn" class="btn primary sm">Skip to results</button>
+        </div>
+      </div>
+      <div id="targetPanel" class="panel ctx hidden">
+        <div id="ctxBody"></div>
+        <div class="ctx-btns">
+          <button id="tpClose" class="btn ghost">Cancel</button>
+          <button id="fireBtn" class="btn primary">Confirm</button>
+        </div>
       </div>
     </div>
-
-    <div id="specBar" class="panel hidden">
-      <div class="spec-top">
-        <span class="spec-l"><i class="live"></i><span id="specText">Spectating</span></span>
-        <div class="spec-speed seg" role="radiogroup" aria-label="Playback speed"><button data-speed="1" role="radio">1×</button><button data-speed="2" role="radio">2×</button><button data-speed="4" role="radio">4×</button></div>
-      </div>
-      <div class="spec-cycle">
-        <button id="specPrev" class="icon-btn sm" aria-label="Previous player"></button>
-        <div id="specWho" class="spec-who"></div>
-        <button id="specNext" class="icon-btn sm" aria-label="Next player"></button>
-        <button id="skipBtn" class="btn primary sm">Skip to results</button>
-      </div>
-    </div>
-
-    <div id="targetHint" class="target-hint hidden" aria-live="polite"></div>
 
     <div id="dock" class="panel">
       <div id="unitCard"></div>
-      <div id="wpnBar" class="wpn-bar hidden"></div>
       <button id="endBtn" class="act end off"></button>
-      <div id="actions"></div>
+      <div id="wpnBar" class="wpn-bar hidden"></div>
       <div id="streakBar" class="streak-bar hidden"></div>
+      <div id="gearTray" class="gear-tray hidden" role="group" aria-label="Gear"></div>
+      <div id="actions" role="toolbar" aria-label="Actions"></div>
+    </div>
+  </div>
+
+  <!-- ============ STAGE WHEEL (before every match) ============ -->
+  <div id="stageWheel" class="screen hidden" aria-live="polite" role="dialog" aria-label="Stage selection">
+    <div class="sw-bg" aria-hidden="true"></div>
+    <div class="sw-card">
+      <div class="kicker sw-kick"><span id="swKick">Stage roulette</span><span id="swMode"></span></div>
+      <h1 class="sw-title">Choosing your <span>battleground</span></h1>
+      <div class="sw-reel" aria-hidden="true"><div class="sw-strip" id="swStrip"></div><i class="sw-ptr top"></i><i class="sw-ptr bot"></i><i class="sw-fade l"></i><i class="sw-fade r"></i></div>
+      <div id="swReveal" class="sw-reveal"></div>
+      <div class="sw-skip">Tap to skip</div>
     </div>
   </div>
 

@@ -378,7 +378,7 @@ export function equipped(slotKey, cls) {
 
 export function equip(slotKey, id, cls) {
   const it = itemById(slotKey, id);
-  if (!it || !owns(slotKey, id)) return { ok: false, error: 'Buy it in the Shop first' };
+  if (!it || !owns(slotKey, id)) return { ok: false, error: 'Buy it in the Store first' };
   if (slotKey === 'skin') {
     if (!fitsClass(it, cls)) return { ok: false, error: 'That skin does not fit this class' };
     data.loadout.skins[cls] = id;

@@ -200,7 +200,7 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
           ${previewBox(M.itemById('skin', lo.skin) || cat.skin[0], cls)}
           <div class="lk-slots">${M.SLOTS.map((s) => { const it = M.itemById(s.key, lo[s.key]); return `<button class="lk-slot r-${it?.rarity || 'common'}${slot === s.key ? ' on' : ''}" data-slot="${s.key}"><span class="ls-ic">${slotIcon(s.key)}</span><span><small>${s.one}</small><b>${esc(it?.name || 'Default')}</b></span></button>`; }).join('')}</div>
           <div class="lk-owned">${owned.map((x) => { const eq = lo[slot] === x.id; const fits = M.fitsClass(x, cls); return `<button class="own r-${x.rarity}${eq ? ' eq' : ''}" data-slot="${slot}" data-id="${esc(x.id)}" ${fits ? '' : 'disabled'}>${itemArt(x, cls)}<b>${esc(x.name)}</b>${eq ? `<span class="own-eq">${ICON.check}</span>` : ''}</button>`; }).join('')}
-            ${locked ? `<button class="own more" data-goshop="${slot}">${ICON.shop}<b>${locked} more in the Shop</b></button>` : ''}</div>
+            ${locked ? `<button class="own more" data-goshop="${slot}">${ICON.shop}<b>${locked} more in the Store</b></button>` : ''}</div>
         </div>
       </div>`;
     wire();

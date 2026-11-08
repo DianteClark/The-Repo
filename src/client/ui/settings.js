@@ -25,12 +25,15 @@ const DEFAULTS = {
   motion: 'auto',      // reduced motion: 'auto' (follow the OS) | 'reduced' | 'full'
   hitmarkers: true,    // hitmarker + XP popups
   playMode: 'solo',    // last hub play choice: 'solo' | 'host' | 'join'
+  // 5.1
+  pacing: 'cinematic', // camera / action rhythm: 'cinematic' | 'normal' | 'fast' (R.setPacing)
 };
 
 const ENUMS = {
   quality: ['auto', 'high', 'low'], timer: ['ring', 'bar'], botSpeed: ['normal', 'fast'],
   colorPreset: ['standard', 'deutan', 'protan', 'tritan', 'high'], textSize: ['s', 'm', 'l', 'xl'], motion: ['auto', 'reduced', 'full'],
   playMode: ['solo', 'host', 'join'],
+  pacing: ['cinematic', 'normal', 'fast'],
 };
 /** Only keep known keys with the right type and range, so a corrupt or old save can't break the UI. */
 export function sanitizeSettings(saved) {

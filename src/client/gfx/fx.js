@@ -235,6 +235,14 @@ export class Fx {
       m.visible = false; m.renderOrder = 7; m.frustumCulled = false;
       world.add(m); this.beams.push(m);
     }
+    // 5.1 cosmetic tracer cores: a separate pool, NOT tone-mapped and drawn normally blended
+    // (additive + ACES washed saturated hues out to white: Prism looked white). Colours stay true.
+    this.cores = [];
+    for (let i = 0; i < 40; i++) {
+      const m = new THREE.Mesh(this.beamGeo, new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, toneMapped: false, fog: false }));
+      m.visible = false; m.renderOrder = 8; m.frustumCulled = false;
+      world.add(m); this.cores.push(m);
+    }
     // rings
     this.ringGeo = new THREE.RingGeometry(0.82, 1, 48); this.ringGeo.rotateX(-Math.PI / 2);
     this.thinRingGeo = new THREE.RingGeometry(0.965, 1, 72); this.thinRingGeo.rotateX(-Math.PI / 2);
@@ -434,25 +442,49 @@ export class Fx {
     return best;
   }
 
-  tracer(ax, ay, az, bx, by, bz, color, width = 0.035, dur = 0.16) {
+  tracer(ax, ay, az, bx, by, bz, color, width = 0.035, dur = 0.16, gain = 3.2, slug = true) {
     const m = this._pick(this.beams), tok = m.userData.tok;
     _a.set(ax, ay, az); _b.set(bx, by, bz);
     const L = _a.distanceTo(_b);
     m.position.copy(_a);
     m.lookAt(_b);
     m.scale.set(width, width, L);
-    m.material.color.set(color).multiplyScalar(3.2);
+    m.material.color.set(color).multiplyScalar(gain);
     m.visible = true;
     // travelling bright slug
     const dx = (bx - ax) / L, dy = (by - ay) / L, dz = (bz - az) / L;
     const sp = 55;
-    this.add.spawn(ax, ay, az, dx * sp, dy * sp, dz * sp, Math.min(0.5, L / sp), 0.08, 0.08, 7, 6, 4.5, 1, 0, 0, 0.9, 0.8);
+    if (slug) this.add.spawn(ax, ay, az, dx * sp, dy * sp, dz * sp, Math.min(0.5, L / sp), 0.08, 0.08, 7, 6, 4.5, 1, 0, 0, 0.9, 0.8);
     this.timed(dur, (t) => {
       if (m.userData.tok !== tok) return;
       m.material.opacity = (1 - t) * (1 - t);
       m.scale.x = m.scale.y = width * (1 - t * 0.6);
       if (t >= 1) m.visible = false;
     });
+  }
+
+  /**
+   * A true-colour beam segment (cosmetic tracer cores). fn(t, mesh) may restyle it per frame
+   * (e.g. Prism's scrolling hue). Opacity fades out over dur.
+   */
+  core(ax, ay, az, bx, by, bz, color, width, dur, fn = null) {
+    const m = this._pick(this.cores), tok = m.userData.tok;
+    _a.set(ax, ay, az); _b.set(bx, by, bz);
+    const L = Math.max(1e-3, _a.distanceTo(_b));
+    m.position.copy(_a);
+    m.lookAt(_b);
+    m.scale.set(width, width, L);
+    m.material.color.set(color);
+    m.material.opacity = 1;
+    m.visible = true;
+    this.timed(dur, (t) => {
+      if (m.userData.tok !== tok) return;
+      m.material.opacity = 1 - t * t;
+      m.scale.x = m.scale.y = width * (1 - t * 0.5);
+      if (fn) fn(t, m);
+      if (t >= 1) m.visible = false;
+    });
+    return m;
   }
 
   sparks(x, y, z, n, r = 5, g = 3.2, b = 1.4, speed = 5) {
@@ -655,7 +687,7 @@ export class Fx {
     this.clear();
     for (const P of [this.add, this.alpha]) { P.geo.dispose(); P.mat.dispose(); }
     this.debris.mesh.geometry.dispose(); this.debris.mesh.material.dispose(); this.debris.mesh.dispose?.();
-    this.beamGeo.dispose(); for (const b of this.beams) b.material.dispose();
+    this.beamGeo.dispose(); for (const b of this.beams) b.material.dispose(); for (const b of this.cores) b.material.dispose();
     this.ringGeo.dispose(); this.thinRingGeo.dispose(); for (const r of this.rings) r.material.dispose();
     this.scorchTex.dispose(); this.scorchGeo.dispose(); for (const s of this.scorches) s.m.material.dispose();
     for (const t of this.texts) { t.tex.dispose(); t.s.material.dispose(); }
@@ -666,6 +698,7 @@ export class Fx {
     this.add.n = 0; this.alpha.n = 0; this.debris.n = 0;
     this.items.length = 0;
     for (const b of this.beams) b.visible = false;
+    for (const b of this.cores) b.visible = false;
     for (const r of this.rings) r.visible = false;
     for (const s of this.scorches) s.m.visible = false;
     for (const t of this.texts) t.s.visible = false;

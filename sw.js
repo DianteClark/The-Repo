@@ -11,7 +11,7 @@
 // then adds anything loaded at runtime that this list missed.
 // PeerJS (esm.sh) is deliberately not cached: online play needs the network anyway.
 
-const VERSION = 'tidefall-v5.0.2';
+const VERSION = 'tidefall-v5.1.0';
 const NET_TIMEOUT = 4000; // ms before a cached copy wins over a slow network
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
@@ -22,6 +22,7 @@ const SHELL = [
   './src/client/audio.js', './src/client/main.js', './src/client/render.js', './src/client/wakelock.js',
   // src/client/gfx/
   './src/client/gfx/ambient.js', './src/client/gfx/battlefield.js', './src/client/gfx/camos.js', './src/client/gfx/cosmeticfx.js',
+  './src/client/gfx/director.js', './src/client/gfx/pacing.js',
   './src/client/gfx/fields.js', './src/client/gfx/flatlines.js', './src/client/gfx/fx.js', './src/client/gfx/overlays.js',
   './src/client/gfx/palette.js', './src/client/gfx/pickups.js', './src/client/gfx/post.js', './src/client/gfx/preview.js',
   './src/client/gfx/props.js', './src/client/gfx/skins.js', './src/client/gfx/sky.js', './src/client/gfx/stages.js',
@@ -41,7 +42,8 @@ const SHELL = [
   './src/client/ui/haptics.js', './src/client/ui/hubpages.js', './src/client/ui/hud.js', './src/client/ui/icons.js',
   './src/client/ui/juice.js', './src/client/ui/menu.js', './src/client/ui/meta.js', './src/client/ui/minimap.js',
   './src/client/ui/progress.js', './src/client/ui/qrcode.js', './src/client/ui/settings.js', './src/client/ui/shop.js',
-  './src/client/ui/squads.js', './src/client/ui/stages.js', './src/client/ui/transfer.js', './src/client/ui/xferui.js',
+  './src/client/ui/squads.js', './src/client/ui/stages.js', './src/client/ui/stagewheel.js', './src/client/ui/transfer.js', './src/client/ui/weaponthumbs.js',
+  './src/client/ui/xferui.js',
   // src/client/ui/fonts/
   './src/client/ui/fonts/barlow-condensed-latin-600-normal.woff2', './src/client/ui/fonts/barlow-condensed-latin-800-normal.woff2',
   // src/net/

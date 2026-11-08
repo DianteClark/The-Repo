@@ -144,17 +144,20 @@ function assets() {
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _p = new THREE.Vector3(), _s = new THREE.Vector3();
 const _col = new THREE.Color();
 
-// Tracer cosmetics: core colour (HDR rgb for additive particles), trail style, density per unit length.
+// Tracer cosmetics (5.1). col: the true core colour (drawn un-tone-mapped, so it stays that hue);
+// glow: the trail particle colour (0..1: additive particles are not tone-mapped either, so any channel
+// over 1 clipped and washed every cosmetic toward white — Prism read as plain white).
+// w: core width × the shot width, linger: core life × the beam's, trail style, dens per world unit.
 export const TRACER = {
-  ember: { core: [5, 2.6, 0.8], trail: 'sparks', dens: 6, hex: 0xffb060 },
-  emerald: { core: [0.8, 4.5, 1.6], trail: 'glitter', dens: 8, hex: 0x6aff9a },
-  violet: { core: [2.6, 1.0, 4.8], trail: 'core', dens: 5, hex: 0xb46aff },
-  ice: { core: [2.4, 3.6, 5], trail: 'frost', dens: 7, hex: 0xbfe6ff },
-  crimson: { core: [5, 0.6, 0.6], trail: 'smoke', dens: 5, smoke: [0.35, 0.08, 0.08], hex: 0xff3a3a },
-  gold: { core: [5, 3.6, 1.0], trail: 'glitter', dens: 9, hex: 0xffd24a },
-  tide: { core: [1.2, 3.6, 4.8], trail: 'helix', dens: 10, hex: 0x6ae0ff },
-  plasma: { core: [3.4, 3.8, 6], trail: 'arc', dens: 12, hex: 0xc8d4ff },
-  prism: { core: [4, 4, 4], trail: 'rainbow', dens: 10, hex: 0xffffff },
+  ember: { col: 0xff6a10, glow: [1, 0.42, 0.06], w: 0.9, linger: 2.0, trail: 'sparks', dens: 6, hex: 0xffb060 },
+  emerald: { col: 0x19e866, glow: [0.15, 0.95, 0.4], w: 0.75, linger: 2.2, trail: 'glitter', dens: 7, hex: 0x6aff9a },
+  violet: { col: 0x9a3cff, glow: [0.6, 0.2, 1], w: 1.05, linger: 2.0, trail: 'pulse', dens: 4, hex: 0xb46aff },
+  ice: { col: 0x8fd8ff, glow: [0.75, 0.92, 1], w: 0.7, linger: 2.2, trail: 'frost', dens: 7, hex: 0xbfe6ff },
+  crimson: { col: 0xff1a1a, glow: [1, 0.08, 0.08], w: 0.8, linger: 1.8, trail: 'smoke', dens: 5, smoke: [0.35, 0.05, 0.05], hex: 0xff3a3a },
+  gold: { col: 0xffc21a, glow: [1, 0.78, 0.15], w: 0.8, linger: 2.0, trail: 'coins', dens: 5, hex: 0xffd24a },
+  tide: { col: 0x22c8ff, glow: [0.25, 0.8, 1], w: 0.6, linger: 1.8, trail: 'helix', dens: 10, hex: 0x6ae0ff },
+  plasma: { col: 0x7f8cff, glow: [0.55, 0.62, 1], w: 0.75, linger: 1.8, trail: 'arc', dens: 8, hex: 0xc8d4ff },
+  prism: { col: 0xff3ad0, glow: [1, 1, 1], w: 1.0, linger: 2.4, trail: 'rainbow', dens: 9, hex: 0xff7ad9 },
 };
 /** Display colour of a tracer cosmetic (falls back to the squad colour). */
 export function tracerColor(id, squadHex) { return TRACER[id]?.hex ?? squadHex; }
@@ -889,45 +892,87 @@ export class CosmeticFx {
    */
   tracer(id, ax, ay, az, bx, by, bz, squadHex, width = 0.035, dur = 0.16) {
     const fx = this.fx;
-    fx.tracer(ax, ay, az, bx, by, bz, squadHex, width, dur);
     const L = TRACER[id];
-    if (!L) return;
-    _col.setRGB(L.core[0] / 5, L.core[1] / 5, L.core[2] / 5);
-    fx.tracer(ax, ay, az, bx, by, bz, _col, width * 0.5, dur * 1.2); // coloured inner core
+    if (!L) { fx.tracer(ax, ay, az, bx, by, bz, squadHex, width, dur); return; }
+    // squad-coloured halo stays (readability), dimmer and wider so the cosmetic core reads inside it
+    fx.tracer(ax, ay, az, bx, by, bz, squadHex, width * 1.35, dur, 0.9, false);
     const dx = bx - ax, dy = by - ay, dz = bz - az, len = Math.hypot(dx, dy, dz) || 1;
     const ux = dx / len, uy = dy / len, uz = dz / len;
     const sp = 55, life = Math.min(0.5, len / sp);
-    const c = L.core;
-    // a second, coloured slug riding with the default one
-    fx.add.spawn(ax, ay, az, ux * sp, uy * sp, uz * sp, life, 0.12, 0.1, c[0], c[1], c[2], 1, 0, 0, 1.2, 0.8);
-    const n = Math.min(40, Math.round(len * L.dens));
+    const cw = Math.max(0.022, width * L.w), cdur = dur * L.linger;
+    const g = L.glow;
     // perpendicular basis for helix / arcs
     let px = -uz, pz = ux; const pl = Math.hypot(px, pz) || 1; px /= pl; pz /= pl;
+    const t = L.trail;
+    if (t === 'rainbow') {
+      // Prism: the core is a spectrum that scrolls along the round while it fades
+      const N = 9;
+      for (let i = 0; i < N; i++) {
+        const k0 = i / N, k1 = (i + 1) / N, h0 = i / N;
+        _col.setHSL(h0, 1, 0.55);
+        fx.core(ax + dx * k0, ay + dy * k0, az + dz * k0, ax + dx * k1, ay + dy * k1, az + dz * k1, _col, cw * 1.25, cdur,
+          (q, m) => m.material.color.setHSL((h0 - q * 1.6 + 10) % 1, 1, 0.55));
+      }
+      // three hue slugs chase each other down the line
+      for (let j = 0; j < 3; j++) {
+        _col.setHSL(j / 3, 1, 0.5);
+        fx.alpha.spawn(ax - ux * j * 0.25, ay - uy * j * 0.25, az - uz * j * 0.25, ux * sp, uy * sp, uz * sp, life, 0.13, 0.1, _col.r, _col.g, _col.b, 1, 0, 0, 1.2, 0.8);
+      }
+    } else if (t === 'arc') {
+      // Arc Plasma: a thin hot core wrapped in a jagged electric arc
+      fx.core(ax, ay, az, bx, by, bz, 0xe6ecff, cw * 0.55, cdur);
+      const N = Math.max(4, Math.min(10, Math.round(len * 1.2)));
+      let lx = ax, ly = ay, lz = az;
+      for (let i = 1; i <= N; i++) {
+        const k = i / N, j = i === N ? 0 : 0.17;
+        const ox = (Math.random() - 0.5) * 2 * j, oy = (Math.random() - 0.5) * 2 * j;
+        const x = ax + dx * k + px * ox, y = ay + dy * k + oy, z = az + dz * k + pz * ox;
+        fx.core(lx, ly, lz, x, y, z, L.col, cw * 0.9, cdur * (0.7 + Math.random() * 0.5), (q, m) => { m.visible = q > 0.95 || Math.random() < 0.82; });
+        lx = x; ly = y; lz = z;
+      }
+    } else if (t === 'pulse') {
+      // Ultraviolet: a fat violet core that throbs as it fades
+      fx.core(ax, ay, az, bx, by, bz, L.col, cw, cdur, (q, m) => { const s = 1 + Math.sin(q * 40) * 0.35; m.scale.x = m.scale.y = cw * s * (1 - q * 0.5); });
+    } else {
+      fx.core(ax, ay, az, bx, by, bz, L.col, cw, cdur);
+    }
+    if (t !== 'rainbow') {
+      // a coloured slug riding the round
+      fx.alpha.spawn(ax, ay, az, ux * sp, uy * sp, uz * sp, life, 0.13, 0.1, g[0], g[1], g[2], 1, 0, 0, 1.2, 0.8);
+      fx.add.spawn(ax, ay, az, ux * sp, uy * sp, uz * sp, life, 0.07, 0.06, g[0] * 0.8, g[1] * 0.8, g[2] * 0.8, 1, 0, 0, 1, 0.8);
+    }
+    const n = Math.min(40, Math.round(len * L.dens));
     for (let i = 0; i < n; i++) {
       const k = (i + Math.random()) / n, x = ax + dx * k, y = ay + dy * k, z = az + dz * k;
       const delay = k * life;
-      const t = L.trail;
       if (t === 'helix') {
-        const a = k * len * 9, r = 0.07;
+        const a = k * len * 9, r = 0.08;
         const ox = px * Math.cos(a) * r, oy = Math.sin(a) * r, oz = pz * Math.cos(a) * r;
-        fx.alpha.spawn(x + ox, y + oy, z + oz, ox * 2, oy * 2 + 0.2, oz * 2, 0.35 + delay, 0.05, 0.03, 0.75, 0.95, 1, 0.9, 1, 1.5, 0, 1);
-        fx.add.spawn(x + ox, y + oy, z + oz, 0, 0, 0, 0.18 + delay, 0.04, 0.01, c[0], c[1], c[2], 1, 0, 0, 0, 1);
+        fx.alpha.spawn(x + ox, y + oy, z + oz, ox * 2, oy * 2 + 0.2, oz * 2, 0.4 + delay, 0.05, 0.03, 0.75, 0.95, 1, 0.9, 1, 1.5, 0, 1);
+        fx.alpha.spawn(x - ox, y - oy, z - oz, -ox * 2, -oy * 2 + 0.2, -oz * 2, 0.4 + delay, 0.045, 0.02, g[0], g[1], g[2], 0.95, 1, 1.5, 0, 1);
       } else if (t === 'sparks') {
-        fx.add.spawn(x, y, z, (Math.random() - 0.5) * 1.5, Math.random() * 1.2, (Math.random() - 0.5) * 1.5, 0.25 + delay + Math.random() * 0.2, 0.04, 0.01, c[0], c[1], c[2], 1, 2, 6, 0.8, 1);
+        fx.add.spawn(x, y, z, (Math.random() - 0.5) * 1.8, Math.random() * 1.4, (Math.random() - 0.5) * 1.8, 0.3 + delay + Math.random() * 0.25, 0.045, 0.012, g[0], g[1], g[2], 1, 2, 6, 0.8, 1);
       } else if (t === 'glitter') {
-        fx.add.spawn(x, y, z, (Math.random() - 0.5) * 0.4, -0.3 - Math.random() * 0.5, (Math.random() - 0.5) * 0.4, 0.4 + delay + Math.random() * 0.3, 0.035, 0.015, c[0], c[1], c[2], 1, 1, 1.5, 0, 1);
+        fx.add.spawn(x, y, z, (Math.random() - 0.5) * 0.4, -0.3 - Math.random() * 0.5, (Math.random() - 0.5) * 0.4, 0.5 + delay + Math.random() * 0.3, 0.04, 0.015, g[0] * 0.9, g[1] * 0.9, g[2] * 0.9, 1, 1, 1.5, 0, 1);
+      } else if (t === 'coins') {
+        // Gold Rush: big slow-tumbling glints that drop and twinkle
+        if (i % 2 === 0) fx.alpha.spawn(x, y, z, (Math.random() - 0.5) * 0.3, 0.2, (Math.random() - 0.5) * 0.3, 0.7 + delay, 0.07, 0.04, 1, 0.8, 0.2, 1, 1.2, 2.2, 0, 3);
+        fx.add.spawn(x, y, z, 0, -0.2, 0, 0.2 + delay + Math.random() * 0.4, 0.09, 0.0, 1, 0.92, 0.55, 1, 0, 0, 0, 4);
       } else if (t === 'smoke') {
-        fx.alpha.spawn(x, y, z, 0, 0.15, 0, 0.5 + delay, 0.04, 0.16, L.smoke[0], L.smoke[1], L.smoke[2], 0.45, 1, -0.2, 0, 1.4);
+        fx.alpha.spawn(x, y, z, 0, 0.15, 0, 0.6 + delay, 0.05, 0.2, L.smoke[0], L.smoke[1], L.smoke[2], 0.55, 1, -0.2, 0, 1.4);
       } else if (t === 'frost') {
-        fx.alpha.spawn(x, y, z, (Math.random() - 0.5) * 0.3, -0.1, (Math.random() - 0.5) * 0.3, 0.45 + delay, 0.05, 0.02, 0.85, 0.95, 1, 0.85, 1, 0.5, 0, 1);
+        fx.alpha.spawn(x, y, z, (Math.random() - 0.5) * 0.3, -0.1, (Math.random() - 0.5) * 0.3, 0.55 + delay, 0.055, 0.025, g[0], g[1], g[2], 0.9, 1, 0.5, 0, 1);
       } else if (t === 'arc') {
-        const j = 0.09;
-        fx.add.spawn(x + (Math.random() - 0.5) * j, y + (Math.random() - 0.5) * j, z + (Math.random() - 0.5) * j, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, 0.08 + delay * 0.5, 0.05, 0.02, c[0], c[1], c[2], 1, 0, 0, 2, 1);
+        const j = 0.1;
+        fx.add.spawn(x + (Math.random() - 0.5) * j, y + (Math.random() - 0.5) * j, z + (Math.random() - 0.5) * j, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4, 0.1 + delay * 0.5, 0.05, 0.02, g[0], g[1], g[2], 1, 0, 0, 2, 1);
       } else if (t === 'rainbow') {
-        _col.setHSL((k * 2 + fx.clock * 0.5) % 1, 1, 0.6);
-        fx.add.spawn(x, y, z, 0, 0.1, 0, 0.25 + delay, 0.06, 0.02, _col.r * 3, _col.g * 3, _col.b * 3, 1, 0, 0, 0, 1);
+        // true-colour (normal-blended) spectrum motes: they keep their hue
+        _col.setHSL((k * 2 + fx.clock * 0.6) % 1, 1, 0.5);
+        fx.alpha.spawn(x, y, z, (Math.random() - 0.5) * 0.2, 0.15, (Math.random() - 0.5) * 0.2, 0.35 + delay, 0.075, 0.03, _col.r, _col.g, _col.b, 1, 0.5, 0, 0, 1.2);
+      } else if (t === 'pulse') {
+        fx.alpha.spawn(x, y, z, 0, 0.05, 0, 0.3 + delay, 0.09, 0.04, g[0], g[1], g[2], 0.7, 0, 0, 0, 1.5);
       } else {
-        fx.add.spawn(x, y, z, 0, 0, 0, 0.15 + delay, 0.04, 0.02, c[0], c[1], c[2], 1, 0, 0, 0, 1);
+        fx.alpha.spawn(x, y, z, 0, 0, 0, 0.2 + delay, 0.045, 0.02, g[0], g[1], g[2], 0.9, 0, 0, 0, 1);
       }
     }
   }
