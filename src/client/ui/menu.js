@@ -315,6 +315,7 @@ export function applyAccessibility() {
 
 function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCareer, onTransfer }) {
   const body = $('settingsBody');
+  let confirmWipe = 0;
   let confirmReset = 0;
   const render = () => {
     const q = qualityNow?.();
@@ -348,6 +349,12 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
       <div class="set-btns">
         <button id="setTut" class="btn ghost sm">${ICON.book}Replay tutorial</button>
         <button id="setReset" class="btn ghost sm danger">${ICON.refresh}${Date.now() - confirmReset < 3000 ? 'Tap again to wipe' : 'Reset career stats'}</button>
+      </div>
+      <div class="set-xfer set-wipe">
+        <div><b>Wipe everything</b><small>${Date.now() - confirmWipe < 4000
+          ? 'This deletes your level, prestige, Salvage, items, loadouts, challenges, career and settings on this device. It can\'t be undone. Tap again to confirm.'
+          : 'Start over as a brand-new player. Export a transfer code first if you might want your progress back.'}</small></div>
+        <div class="set-btns"><button id="setWipe" class="btn ghost sm danger">${ICON.refresh}${Date.now() - confirmWipe < 4000 ? 'Tap again to wipe all' : 'Wipe all data'}</button></div>
       </div>`;
     body.querySelectorAll('.seg').forEach((s) => {
       s.querySelectorAll('button').forEach((b) => {
@@ -371,6 +378,24 @@ function initSettingsSheet({ onClick, qualityNow, onReplayTutorial, onResetCaree
     $('setTut').onclick = () => { onClick?.(); onReplayTutorial?.(); };
     $('setExport').onclick = () => { onClick?.(); onTransfer?.('export'); };
     $('setImport').onclick = () => { onClick?.(); onTransfer?.('import'); };
+    $('setWipe').onclick = () => {
+      onClick?.();
+      if (Date.now() - confirmWipe < 4000) {
+        confirmWipe = 0;
+        try {
+          for (const store of [localStorage, sessionStorage]) {
+            const keys = [];
+            for (let i = 0; i < store.length; i++) { const k = store.key(i); if (k && k.startsWith('tidefall')) keys.push(k); }
+            keys.forEach((k) => store.removeItem(k));
+          }
+        } catch { /* storage unavailable */ }
+        toastFn?.('All data wiped. Restarting…', 'info');
+        setTimeout(() => location.replace(location.pathname), 600);
+        return;
+      }
+      confirmWipe = Date.now();
+      render();
+    };
     $('setReset').onclick = () => {
       onClick?.();
       if (Date.now() - confirmReset < 3000) { resetCareer(); confirmReset = 0; onResetCareer?.(); toastFn?.('Career stats wiped. Prestige, Salvage and items are kept', 'info'); } else confirmReset = Date.now();
