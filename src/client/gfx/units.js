@@ -71,7 +71,7 @@ export function soldierGeos(cls, skin = 'default') {
   if (!BODY[cls]) cls = 'assault';
   if (!hasSkin(skin)) skin = 'default';
   const gk = cls + '|' + skin;
-  if (GEO.has(gk)) return GEO.get(gk);
+  if (GEO.has(gk)) { const hit = GEO.get(gk); GEO.delete(gk); GEO.set(gk, hit); return hit; }
   const B = skinKit(cls, skin);
   const SKIN = B.skinTone, DARK = B.dark, METAL = B.metal, BOOT = B.boot;
   const w = B.w;
@@ -249,6 +249,13 @@ export function soldierGeos(cls, skin = 'default') {
   const res = { leg, torso, head, accent, headAccent, upper, fore, armband, shield, w, thick };
   for (const k of ['leg', 'torso', 'head', 'accent', 'headAccent', 'upper', 'fore', 'armband', 'shield']) if (res[k]) res[k].userData.shared = true;
   GEO.set(gk, res);
+  // LRU cap (bots wear random skins: the class×skin cache used to grow every match).
+  // A match needs ≤16 combos; evicted geometries are disposed (re-uploaded if still drawn).
+  while (GEO.size > 40) {
+    const k0 = GEO.keys().next().value, old = GEO.get(k0);
+    GEO.delete(k0);
+    for (const k of ['leg', 'torso', 'head', 'accent', 'headAccent', 'upper', 'fore', 'armband', 'shield']) old[k]?.dispose?.();
+  }
   return res;
 }
 

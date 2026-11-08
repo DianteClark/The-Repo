@@ -104,7 +104,7 @@ class PreviewStage {
     this.fx.clear(); this.cfx.clear();
     if (this.view) { this.view.stopEmote(); this.view.root.parent?.remove(this.view.root); this.view.dispose(); this.view = null; }
     if (this.target) { this.target.root.parent?.remove(this.target.root); this.target.dispose(); this.target = null; }
-    for (const o of this.extra) { o.parent?.remove(o); o.traverse?.((c) => { if (c.geometry && !c.geometry.userData?.shared) c.geometry.dispose(); }); }
+    for (const o of this.extra) { o.parent?.remove(o); o.traverse?.((c) => { if (c.geometry && !c.geometry.userData?.shared) c.geometry.dispose(); if (c.material?.userData?.previewOwned) c.material.dispose(); }); }
     this.extra = [];
     this.model = null;
     this.content.clear();
@@ -157,7 +157,18 @@ class PreviewStage {
       case 'tracer': {
         this.ped.visible = false;
         const m = (this.model = new WeaponModel({ weapon: 'tr7', attachments: { optic: 'reflex' }, camo: 'none' }));
-        const d = new THREE.Mesh(dummyGeo, dummyMat); d.position.set(0.45, 0.05, -3.2);
+        // practice target: board on two legs with a bullseye, so it reads as a range target, not a floating box
+        const d = new THREE.Group(); d.position.set(0.45, 0.05, -3.2);
+        const board = new THREE.Mesh(dummyGeo, dummyMat); d.add(board);
+        for (const [r0, r1, col] of [[0.2, 0.235, 0xf1e6cf], [0.12, 0.155, 0xf1e6cf], [0, 0.065, 0xf1e6cf]]) {
+          const ring = new THREE.Mesh(new THREE.RingGeometry(r0, r1, 32), new THREE.MeshBasicMaterial({ color: col }));
+          ring.material.userData.previewOwned = true;
+          ring.position.set(0, 0.8, 0.042); d.add(ring); this.extra.push(ring);
+        }
+        for (const sx of [-0.18, 0.18]) {
+          const leg = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.42, 0.035), dummyMat);
+          leg.position.set(sx, 0.2, -0.02); d.add(leg); this.extra.push(leg);
+        }
         m.group.position.set(-0.42, 0.42, 1.25); m.group.scale.setScalar(1.6);
         m.group.lookAt(d.position.x, 0.85, d.position.z);
         this.content.add(m.group, d); this.dummy = d;

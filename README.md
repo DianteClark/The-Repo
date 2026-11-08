@@ -6,36 +6,29 @@ A 16-player, turn-based, XCOM-style battle royale that runs in the browser.
 One soldier per player. Rival salvage crews fight across a drowning archipelago
 while the storm tide (**the Surge**) floods the map from the edges in.
 
-> **Status: v3.0.** Single device against 15 bots, installable to your home screen and playable offline after your first visit. Online invite-code lobbies are the next build.
+> **Status: v5.0.** XCOM tactics × Call of Duty loadouts × Battlefield destruction. Solo vs 15 bots, or online via invite code (peer-to-peer, host-run). Installable, works offline.
 
 ## Play it
 
-- **Locally:** `npm start`, then open http://localhost:8080. Or use any static file server; there's no build step.
-- **Online:** https://dianteclark.github.io/The-Repo/ — every push to `main` redeploys it through GitHub Pages.
+- **Online:** https://dianteclark.github.io/The-Repo/. Every push to `main` redeploys it.
+- **Locally:** `npm start`, then open http://localhost:8080.
+- **Invite friends:** Play → Host Online, then share the code or link. Friends use Join with Code or open `?join=CODE`.
 
-**Controls:**
-- Tap a tile to move: cyan costs 1 AP, gold is a 2 AP dash.
-- Tap a visible enemy to aim, then **Fire**. Firing ends your turn.
-- Drag to pan the map. Pinch or scroll to zoom. ⟲ ⟳ rotate the camera.
-
-## What's in 3.0
+## What's in 5.0
 
 | Area | Details |
 | --- | --- |
-| Modes | Solos 16×1 · Duos 8×2 · Trios 5×3 + 1 **Lone Wolf** (+1 AP, +50% HP, +1 armor; volunteer in the menu) · Quads 4×4 |
-| Turns | Each squad gets **20 s**. Teammates act in the same window, and the clock pauses while your own action animates. When time runs out, your unit goes on overwatch |
-| Stages | 44×44 maps. **Drowned Harbor** (classic) · **Kelp Shallows** (kelp hides you beyond 3 tiles) · **Rig Graveyard** (explosive barrels that chain; shoot them) · **Night Spires** (sight 6; firing flares you to everyone) · **Surge Point** (the safe zone drifts) |
-| Classes | Assault · Marksman (Aimed Shot) · Breacher (Breach charge) · **Medic** (Patch / revive) · **Recon** (Scan reveals through fog) |
-| Actions | Move/dash · Shoot · Frag (destroys cover) · Smoke · class ability · Revive · Hunker · Overwatch · Medkit |
-| Squads | In Duos, Trios and Quads, 0 HP **downs** you. You bleed out over 2 turns unless a squadmate revives you |
-| Combat | Destructible cover · flanking (+aim, +damage) · step-out line of sight · graze band · visible miss-streak bonus · seeded rolls |
-| Loot | You drop in with your class weapon. Crates hold medkits, armor, frags, scopes and barrels. **Supply caches** fall on rounds 4, 8 and 12 |
-| The Surge | The tide floods in every 2 rounds and its damage grows. The storm grade, rain and lightning intensify late game |
-| Graphics | Stylized diorama: ACES, soft shadows, bloom, animated water and tide, prop-based cover, debris, action cam, hit-stop. Auto quality (`?gfx=low\|high` to force) |
-| Audio | Synthesized weapons per class, title theme, adaptive match score, ambience from waves and gulls to storm |
-| Meta | Class badges with 5 prestige tiers (Recruit → Legend) · Salvage currency · Shop and Locker for skins, kill effects and drop-in arrivals · a distinct colour per squad (yours is amber) |
-| App | PWA with home-screen icon (`assets/icon/`) and an offline cache (`sw.js`) |
-| UI | Cinematic title screen, career stats, callsign, tutorial, DROP IN intro, haptics, damage-direction arcs. Tap to preview, tap again to confirm. Hit-% badges, grenade AoE preview, minimap, kill feed, turn-order strip, spectator mode, and keyboard shortcuts on desktop |
+| Turns | **Engagement turns**: squads out of contact move at the same time; squads in a firefight alternate XCOM-style. 20 s per squad turn |
+| Classes | 7: Assault, Marksman, Breacher, Medic, Recon, **Engineer** (deploy cover, repair boats), **Gunner** (suppress) · 12 perks in 3 tiers |
+| Arsenal | 21 primaries, 3 secondaries, 15 attachments (Gunsmith), 7 named **legendaries**, ammo and reload, swap · Lethal: frag, semtex, claymore, knife · Tactical: smoke, flashbang, stim, decoy |
+| Killstreaks | Earned with points (kills, downs, assists, revives): UAV · Care Package · Counter-UAV · Airstrike (telegraphed) · Sentry · Gunship |
+| Battlefield | Boats you can drive, repair and shoot · one telegraphed stage event per match · whole buildings collapse |
+| The Pit | Your first death sends you to a 1v1 duel. Win it and you redeploy |
+| Stages | Drowned Harbor · Kelp Shallows · Rig Graveyard · Night Spires · Surge Point (44×44) |
+| Progression | Player level 1–100 · class prestige badges (5 tiers) · weapon levels 1–20 · camo challenges with Gold, Diamond and animated Tidal · daily challenges · medals · calling cards and emblems |
+| Store | 120+ cosmetics: operator skins, kill effects, drop-ins, emotes, charms, tracers, streak skins, bundles. Earned Salvage only, no real money |
+| Online | Code invites, lobby with squads, host-authoritative with fog-filtered data (no hidden-info leaks), reconnect within 60 s |
+| Account | Transfer code (`TF5-…`) + QR to move your progress between devices |
 
 ## Layout
 
@@ -47,8 +40,10 @@ src/sim/                  game rules: pure, deterministic, no DOM
   rules.js                line of sight, cover, hit chance, pathfinding
   map.js                  seeded map generation
   ai.js                   bots (same rules, same fog as players)
-src/client/               main.js (match flow), render.js + gfx/ (graphics), ui/ (HUD/menu), audio.js + sfx/
-docs/V1_SPEC.md           contract between sim, graphics, UI and audio
+src/client/               main.js (UI flow), match/ (controllers), online/ (lobby), render.js + gfx/, ui/, audio.js + sfx/
+src/net/                  peer-to-peer transport, sessions, redaction
+src/shared/               colours, cosmetics, calling cards
+docs/V1–V5_SPEC.md        design contracts per version
 tests/                    node:test suite incl. full bot-only matches
 ```
 

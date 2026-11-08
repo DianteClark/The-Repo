@@ -156,7 +156,13 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       case 'batch': playBatch(m); return;
       case 'turn': openTurn(m); return;
       case 'turn_end': player.then(() => closeTurn(m.reason)); return;
-      case 'result': player.then(() => { const r = waiting.get(m.seq); waiting.delete(m.seq); r?.({ ok: !!m.ok, error: m.error }); }); return;
+      case 'result': {
+        // The host answered: stop the no-answer clock now, resolve once the action's events have played.
+        const r = waiting.get(m.seq);
+        r?.got?.();
+        player.then(() => { waiting.delete(m.seq); r?.({ ok: !!m.ok, error: m.error }); });
+        return;
+      }
       case 'step': hook('onStep', { active: m.active || [], activeCount: m.activeCount, engagements: m.engagements || [], round: m.round }); return;
       case 'status': hook('onStatus', m.msg, m.level || 'info'); return;
       case 'pit': player.then(() => pit(m)); return;
@@ -167,6 +173,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
 
   function pit(m) {
     if (m.phase === 'start') {
+      player.ff = false; // my own duel plays for real even after "skip to results"
       const s = { mirror: m.snap, unitId: m.unitId, team: m.team };
       scopes.set(m.scope, s);
       view.state = s.mirror; view.team = s.team;
@@ -266,12 +273,14 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       const t = turn;
       return new Promise((resolve) => {
         const to = setTimeout(() => { if (waiting.has(s)) { waiting.delete(s); t.busy = false; resolve({ ok: false, error: 'No answer from the host' }); } }, 10000);
-        waiting.set(s, (r) => {
+        const done = (r) => {
           clearTimeout(to);
           t.busy = false;
           net.send({ t: 'idle', seq: s });
           resolve(r);
-        });
+        };
+        done.got = () => clearTimeout(to);
+        waiting.set(s, done);
         if (!net.send({ t: 'act', seq: s, action })) { waiting.delete(s); clearTimeout(to); t.busy = false; resolve({ ok: false, error: 'Not connected' }); }
       });
     },

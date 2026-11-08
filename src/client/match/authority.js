@@ -436,6 +436,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
       net.send(pid, { t: 'pit', phase: 'start', scope: world.id, duelId: d.id, unitId: did, team: ds.units[did]?.team, snap, a: d.a, b: d.b, warden: !!d.warden });
     }
     if (iAmIn) {
+      player.ff = false; // skipped while waiting in the Pit queue: my own duel (and redeploy) plays for real
       await player.idle();
       view.state = ds; view.team = ds.units[myDuelId]?.team ?? -1;
       Rcall('setGame', ds, view.team, { cosmetics: {} });

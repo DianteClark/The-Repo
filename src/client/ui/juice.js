@@ -105,11 +105,12 @@ export function createTracker() {
     turnKills: 0,
     actionKills: 0,
     lastShot: new Map(),   // victim id → {from, chance, flank, dist, cover, dmg, max, weapon}
+    downedIds: new Set(),  // units currently downed (from the event stream, in order)
     hitMe: new Set(),      // enemy ids that damaged my squad
     kills: 0,
   };
   const award = (key, out) => { T.medals.push(key); out.push(key); };
-  T.reset = () => { T.medals = []; T.firstBlood = false; T.turnKills = 0; T.actionKills = 0; T.lastShot.clear(); T.hitMe.clear(); T.kills = 0; T.lethalKills = 0; T.streaks = 0; for (const k of Object.keys(T.w)) T.w[k] = 0; };
+  T.reset = () => { T.medals = []; T.firstBlood = false; T.turnKills = 0; T.actionKills = 0; T.lastShot.clear(); T.downedIds.clear(); T.hitMe.clear(); T.kills = 0; T.lethalKills = 0; T.streaks = 0; for (const k of Object.keys(T.w)) T.w[k] = 0; };
   T.turnStart = () => { T.turnKills = 0; };
   T.actionStart = () => { T.actionKills = 0; };
   T.turnEnd = () => {
@@ -127,11 +128,18 @@ export function createTracker() {
         const s = st.units[ev.from], t = st.units[ev.to];
         if (!s || !t) break;
         if (mine(ev.from)) {
-          T.w.shots++;
-          if (ev.result !== 'miss') { T.w.hits++; T.w.dmg += ev.dmg || 0; }
+          // Weapon challenge stats count the deployed primary only (not the sidearm, a legendary or the Pit pistol).
+          const prim = !ctx.weaponId || !ev.weapon || ev.weapon === ctx.weaponId;
+          if (prim) {
+            T.w.shots++;
+            if (ev.result !== 'miss') { T.w.hits++; T.w.dmg += ev.dmg || 0; }
+          }
           const d = ctx.dist(s, t, ev);
-          const range = s.weapon?.range || 10;
-          T.lastShot.set(ev.to, { from: ev.from, chance: ev.chance ?? ev.hit ?? null, flank: !!ev.flank, dist: d, range, cover: ev.cover ?? null, dmg: ev.dmg || 0, max: ev.headshot === true || (Array.isArray(s.weapon?.dmg) && ev.dmg >= s.weapon.dmg[1] && ev.result === 'hit'), downed: !!t.downed });
+          const wd = ev.weapon && s.weapons ? s.weapons.find((w) => w?.id === ev.weapon) : null;
+          const range = (wd || s.weapon)?.range || 10;
+          // Sim shot events carry {chance, cover, flank, headshot, dist}; older shapes fall back.
+          const max = typeof ev.headshot === 'boolean' ? ev.headshot : (Array.isArray(s.weapon?.dmg) && ev.dmg >= s.weapon.dmg[1] && ev.result === 'hit');
+          T.lastShot.set(ev.to, { from: ev.from, prim, chance: Number.isFinite(ev.chance) ? ev.chance : Number.isFinite(ev.hit) ? ev.hit : null, flank: !!ev.flank, dist: d, range, cover: ev.cover ?? null, dmg: ev.dmg || 0, max: ev.result === 'hit' && !!max, downed: T.downedIds.has(ev.to) && !ev.downed });
         } else if (t.team === myTeam && ev.result !== 'miss' && s.team !== myTeam) T.hitMe.add(ev.from);
         break;
       }
@@ -139,13 +147,14 @@ export function createTracker() {
         const t = st.units[ev.id ?? ev.target];
         const by = ev.by ?? ev.from ?? ev.owner;
         if (t && t.team === myTeam && Number.isInteger(by) && st.units[by]?.team !== myTeam) T.hitMe.add(by);
-        if (Number.isInteger(by) && mine(by) && t && t.team !== myTeam) T.w.dmg += ev.dmg || 0;
         break;
       }
+      case 'downed': T.downedIds.add(ev.id); break;
       case 'streak_used':
         if (mine(ev.id)) { T.streaks++; award('streak_called', out); }
         break;
       case 'revive':
+        T.downedIds.delete(ev.id ?? ev.target);
         if (mine(ev.by)) award('savior', out);
         break;
       case 'death': {
@@ -153,6 +162,7 @@ export function createTracker() {
         const k = Number.isInteger(ev.by) ? st.units[ev.by] : null;
         const first = !T.firstBlood;
         T.firstBlood = true;
+        T.downedIds.delete(ev.id);
         if (!v || !k || !mine(k.id) || v.team === myTeam) break;
         T.kills++;
         T.turnKills++;
@@ -163,16 +173,17 @@ export function createTracker() {
         pops.push(['KILL', 100, 'kill']);
         if (first) { award('first_blood', out); pops.push(['FIRST BLOOD', 200, 'gold']); }
         if (viaShot) {
-          T.w.kills++;
+          const w = shot.prim ? T.w : {}; // challenge tallies: primary weapon only
+          w.kills = (w.kills || 0) + 1;
           if (shot.dist >= 10) { award('longshot', out); pops.push(['LONGSHOT', 50]); }
-          if (shot.dist >= shot.range * 0.75) T.w.longshots++;
+          if (shot.dist >= shot.range * 0.75) w.longshots = (w.longshots || 0) + 1;
           if (shot.dist <= 1.5) award('point_blank', out);
-          if (shot.dist <= 3) T.w.closes++;
-          if (shot.flank) { award('flanker', out); T.w.flanks++; pops.push(['FLANK', 50]); }
-          if (shot.chance !== null && shot.chance <= 50) T.w.longodds++;
+          if (shot.dist <= 3) w.closes = (w.closes || 0) + 1;
+          if (shot.flank) { award('flanker', out); w.flanks = (w.flanks || 0) + 1; pops.push(['FLANK', 50]); }
+          if (shot.chance !== null && shot.chance <= 50) w.longodds = (w.longodds || 0) + 1;
           if (shot.chance !== null && shot.chance <= 40) { award('long_odds', out); pops.push(['LONG ODDS', 75]); }
-          if (shot.cover) T.w.coverKills++;
-          if (shot.max) { T.w.headshots++; pops.push(['HEADSHOT', 50]); }
+          if (shot.cover) w.coverKills = (w.coverKills || 0) + 1;
+          if (shot.max) { w.headshots = (w.headshots || 0) + 1; pops.push(['HEADSHOT', 50]); }
           if (shot.downed) { award('executioner', out); pops.push(['EXECUTION', 25]); }
         } else if (lethal) {
           T.lethalKills++;

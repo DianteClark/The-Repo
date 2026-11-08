@@ -327,6 +327,7 @@ async function openOnline(kind, code = null) {
     }
     lobby = mount(root, {
       intent: kind === 'join' ? 'join' : 'host', code: code || (mod.joinCodeFromUrl?.() ?? null), profile, sfx,
+      get mode() { return settings.mode; }, get stage() { return settings.stage || 'random'; }, // read when hosting
       ui: { badgeSVG, cardSVG, emblemSVG, squadColor },
       onExit: close,
       onStart: ({ kind: k, net, lobby: l }) => {
@@ -669,6 +670,7 @@ async function startGame({ online = null } = {}) {
   onlineCfg = online;
   tracker.reset();
   activeTeams = [];
+  lastStep = null;
   const lo = AR.validate(P.activeLoadout());
   matchLoadout = lo;
   settings.cls = lo.cls;
@@ -859,15 +861,23 @@ function applySpeed() {
 }
 
 /** Turn hand-off juice: a swipe across the turn label when a new squad takes over. */
-function onStep({ active = [], engagements = [] } = {}) {
-  activeTeams = [...active];
-  const mt = myTeam();
+let lastStep = null; // the main match's step, re-shown when a Pit duel ends
+function renderStepInfo(quiet = false) {
+  if (!lastStep) return;
+  const mt = ctl ? ctl.myTeam : myTeam();
   J.renderStep({
-    active, engagements, myTeam: mt, sfx,
+    ...lastStep, myTeam: mt, sfx: quiet ? null : sfx,
     nameOf: (t) => (t === mt ? 'Your squad' : squadName(t)),
     colorOf: (t) => teamColor(t),
-    banner: (a, b, c, d) => { if (!fastForward) H.banner(a, b, c, d); },
+    banner: (a, b, c, d) => { if (!fastForward && !quiet) H.banner(a, b, c, d); },
   });
+}
+function onStep({ active = [], engagements = [] } = {}) {
+  activeTeams = [...active];
+  lastStep = { active: [...active], engagements };
+  if (pitView) { queueHud(); return; } // the main match's squads aren't what the duel HUD shows
+  const mt = myTeam();
+  renderStepInfo();
   if (active.includes(mt) && !playerUp() && !fastForward) H.feedInfo('Your squad is moving', 'signal');
   document.body.dataset.turn = active.includes(mt) ? 'mine' : 'enemy';
   handoff();
@@ -886,6 +896,7 @@ function onPit(p = {}) {
     pitView = { myDuelUnitId: p.myDuelUnitId };
     state = ctl.view || p.duelState || state;
     document.body.classList.add('in-pit');
+    $('engageInfo')?.classList.add('hidden');
     const foe = state.units.find((u) => u.id !== p.myDuelUnitId && u.alive);
     J.showPit({ phase: 'start', mine: true, meName: callsign(), foeName: foe ? (ctl?.names?.[foe.srcId ?? foe.id] || foe.name) : null, round: ctl?.state?.round });
     sfx.pitTheme(true);
@@ -895,6 +906,7 @@ function onPit(p = {}) {
     pitView = null;
     state = ctl.view || ctl.state;
     document.body.classList.remove('in-pit');
+    renderStepInfo(true);
     sfx.pitTheme(false);
     J.showPit({ phase: 'end', mine: true, meName: callsign(), won });
     if (won) buzz('win');
@@ -1075,6 +1087,18 @@ function barrelTargetList(u, withPreview = true) {
   out.sort((a, b) => score(b) - score(a) || RU.dist(u.x, u.y, a.x, a.y) - RU.dist(u.x, u.y, b.x, b.y));
   return out;
 }
+/** Enemy-crewed or empty boats in range and sight (5.0): shoot the hull. */
+function boatTargetList(u) {
+  if (!state.vehicles?.length || typeof G.vehicleShotPreview !== 'function' || isLauncher(u)) return [];
+  const S = state.map.size;
+  const out = [];
+  for (const v of state.vehicles) {
+    let pv = null;
+    try { pv = G.vehicleShotPreview(state, u, v); } catch { pv = null; }
+    if (pv) out.push({ id: 'v' + v.id, vehicle: true, vehicleId: v.id, k: v.y * S + v.x, x: v.x, y: v.y, hp: v.hp, pv });
+  }
+  return out;
+}
 function barrelPreviewAt(u, x, y) {
   if (typeof G.barrelPreview === 'function') {
     try { const p = G.barrelPreview(state, u, x, y); if (p) return { units: p.units || [], barrels: p.barrels || [], cover: p.cover || [], radius: p.radius ?? BARREL_RADIUS, valid: p.valid !== false }; } catch (e) { warnOnce('barrelPreview', e); }
@@ -1232,7 +1256,7 @@ function availability(u) {
   const empty = hasAmmoModel(u) && !infiniteAmmo(u) && (ammoOf(u) ?? 1) < 1;
   const launch = isLauncher(u);
   const shots = !base && !empty ? (launch ? [...(setFor('launch', u) || [])] : validTargets(u)) : [];
-  const barrels = !base && !empty ? barrelTargetList(u, false).length : 0;
+  const barrels = !base && !empty ? barrelTargetList(u, false).length + boatTargetList(u).length : 0;
   set('shoot', base || (empty ? 'Magazine empty: reload' : shots.length || barrels ? null : hasBarrels() ? 'No enemy or barrel in range and sight' : 'No enemy in range and sight'), { count: shots.length, barrels, empty });
 
   // reload / swap (5.0)
@@ -1318,6 +1342,12 @@ function availability(u) {
     }
     set('revive', r, { count: downed.length });
   }
+  // Engineer next to a damaged boat (5.0): repair +4 hull, +1 fuel.
+  if (u.cls === 'engineer' && state.vehicles?.length && typeof G.repairTargets === 'function') {
+    let ids = [];
+    try { ids = [...(G.repairTargets(state, u) || [])]; } catch { ids = []; }
+    if (ids.length) set('repair', base, { ids });
+  }
   const hk = ab.hunker;
   set('hunker', base || (hk && !hk.ready ? hk.reason || 'Not ready' : null));
   set('overwatch', base || (empty ? 'Magazine empty: reload' : null));
@@ -1383,6 +1413,7 @@ function actionList(u) {
     const smokes = av.smoke.charges ?? 0;
     if (smokes > 0 || u.cls === 'recon') list.push({ key: 'smoke', icon: 'smoke', label: 'Smoke', badge: smokes, badgeKind: smokes > 0 ? 'ch' : 'zero' });
   }
+  if (av.repair) list.push({ key: 'repair', icon: 'water', label: 'Repair', cls: 'ability' });
   if (av.revive && av.revive.count > 0) list.push({ key: 'revive', icon: 'revive', label: 'Revive', badge: av.revive.count, badgeKind: av.revive.ok ? 'rv' : 'zero', cls: av.revive.ok ? 'urgent' : '' });
   list.push(
     { key: 'hunker', icon: 'hunker', label: 'Hunker', endsTurn: true },
@@ -1423,6 +1454,7 @@ function pressAction(a) {
       break;
     }
     case 'hunker': doAction({ type: 'hunker' }); break;
+    case 'repair': { const id = availability(u).repair?.ids?.[0]; if (id !== undefined) doAction({ type: 'repair', vehicleId: id }); break; }
     case 'overwatch': doAction({ type: 'overwatch' }); break;
     case 'medkit': doAction({ type: 'medkit' }); break;
     case 'reload': doAction({ type: 'reload' }).then((ok) => { if (ok) { sfx.reload?.(); buzz('tap'); } }); break;
@@ -1508,6 +1540,7 @@ function setMode(mode, preselect = null, extra = null) {
 
   if (mode === 'move') {
     ui.reach = G.moveOptions(state, u);
+    addBoatNodes(u);
     const hl = new Map();
     for (const [k, n] of ui.reach) if (n.d > 0) hl.set(k, n.d <= u.move ? 1 : 2);
     Rcall('setHighlights', hl);
@@ -1525,7 +1558,7 @@ function setMode(mode, preselect = null, extra = null) {
     ui.targets = validTargets(u, mode);
     if (mode === 'shoot') {
       const bt = barrelTargetList(u);
-      ui.targets.push(...bt);
+      ui.targets.push(...bt, ...boatTargetList(u));
       if (bt.length) {
         // Show which barrels can be shot.
         const hl = new Map();
@@ -1578,6 +1611,25 @@ function cancelMode() {
 
 // ----- move
 
+/** Boats (5.0): boardable boats next to you, or the water your boat can reach when you drive. */
+function addBoatNodes(u) {
+  if (!state.vehicles?.length || !ui.reach) return;
+  const S = state.map.size;
+  const start = u.y * S + u.x;
+  if (!ui.reach.has(start)) ui.reach.set(start, { d: 0, prev: -1 });
+  try {
+    if (u.vehicle != null) {
+      const v = G.vehicleOf?.(state, u) || state.vehicles.find((w) => w.id === u.vehicle);
+      const set = G.boatMoveTargets?.(state, u);
+      if (!v || !set?.size) return;
+      const reach = G.boatReach(state, v);
+      for (const k of set) ui.reach.set(k, { d: 1, prev: start, boat: 'drive', path: RU.pathTo(reach, S, k) });
+    } else {
+      for (const k of G.boardTargets?.(state, u) || []) ui.reach.set(k, { d: 1, prev: start, boat: 'board' });
+    }
+  } catch (e) { warnOnce('boat nodes', e); }
+}
+
 function previewMove(k, via) {
   const u = turnCtx.u;
   const S = state.map.size;
@@ -1585,7 +1637,17 @@ function previewMove(k, via) {
   if (!node || node.d === 0) return false;
   const x = k % S, y = (k / S) | 0;
   const cost = node.d <= u.move ? 1 : 2;
-  const path = RU.pathTo ? RU.pathTo(ui.reach, S, k) : [[u.x, u.y], [x, y]];
+  const path = node.path || (RU.pathTo ? RU.pathTo(ui.reach, S, k) : [[u.x, u.y], [x, y]]);
+  if (node.boat) {
+    const v = node.boat === 'drive' ? state.vehicles.find((w) => w.id === u.vehicle) : state.vehicles.find((w) => w.x === x && w.y === y);
+    ui.pending = { kind: 'move', boat: node.boat, k, x, y, cost: 1, path, via };
+    Rcall('setPathPreview', path, 1);
+    H.showContext(`<div class="ctx-h"><span class="ctx-ic">${ICON.move}</span><b>${node.boat === 'drive' ? 'Drive the boat' : 'Board the boat'}</b><span class="cost">1 AP</span></div>
+      <div class="ctx-row"><span class="n">${node.boat === 'drive' ? `Ends your turn · fuel ${v?.fuel ?? '?'} → ${(v?.fuel ?? 1) - 1}` : `Hull ${v?.hp ?? '?'}/${v?.maxHp ?? 12} · ${v?.seats?.length ?? 0}/4 aboard · half cover, no tide damage`}</span></div>`, 'move');
+    $('fireBtn').innerHTML = `${ICON.check}<span>${node.boat === 'drive' ? 'Drive' : 'Board'}</span>`;
+    $('fireBtn').disabled = false;
+    return true;
+  }
   ui.pending = { kind: 'move', k, x, y, cost, path, via };
   Rcall('setPathPreview', path, cost);
   showMoveContext(ui.pending, via);
@@ -1646,12 +1708,29 @@ function showMoveContext(p, via) {
 
 // ----- shoot / aimed
 
-const unitMarkers = (sel = null) => ui.targets.filter((x) => !x.barrel).map((x) => ({ id: x.id, chance: x.p.chance, selected: x.id === sel }));
+const unitMarkers = (sel = null) => ui.targets.filter((x) => !x.barrel && !x.vehicle).map((x) => ({ id: x.id, chance: x.p.chance, selected: x.id === sel }));
 
 function selectTarget(id) {
   const t = ui.targets.find((x) => x.id === id);
   if (!t) return false;
   ui.target = id;
+  if (t.vehicle) {
+    ui.pending = { kind: 'vehicle', id, vehicleId: t.vehicleId, k: t.k, x: t.x, y: t.y };
+    Rcall('setSelectedTarget', null);
+    Rcall('setTargetMarkers', unitMarkers());
+    Rcall('setAoePreview', { x: t.x, y: t.y, radius: 0.5, valid: true, kind: 'scan' });
+    const u = turnCtx.u;
+    Rcall('focus', (t.x + u.x) / 2, (t.y + u.y) / 2);
+    const idx = ui.targets.findIndex((x) => x.id === t.id);
+    H.showContext(`<div class="ctx-h"><span class="ctx-ic">${ICON.shoot}</span><b>Enemy boat</b><span class="cost">1 AP</span><span class="spacer"></span>
+      ${ui.targets.length > 1 ? `<button class="btn ghost sm cycle" id="cycleBtn" title="Next target [Tab]">${idx + 1}/${ui.targets.length}<span class="kbd-hint">Tab</span></button>` : ''}</div>
+      <div class="odds three"><div class="odd big"><b>${t.pv.chance}<small>%</small></b><span>Hit</span></div><div class="odd"><b>${t.pv.dmg[0]}-${t.pv.dmg[1]}</b><span>Hull dmg</span></div><div class="odd"><b>${t.hp}</b><span>Hull left</span></div></div>`, 'shoot');
+    $('fireBtn').innerHTML = `${ICON.shoot}<span>Shoot boat</span><small>ends turn</small>`;
+    $('fireBtn').disabled = false;
+    const cb = $('cycleBtn');
+    if (cb) cb.onclick = (e) => { e.stopPropagation(); sfx.uiClick(); cycleTarget(1); };
+    return true;
+  }
   if (t.barrel) {
     ui.pending = { kind: 'barrel', id, k: t.k, x: t.x, y: t.y };
     Rcall('setSelectedTarget', null);
@@ -1883,7 +1962,8 @@ function previewStreak(x, y, via) {
   const k = keyOf(x, y);
   let x0 = x, y0 = y, x2, y2;
   if (sk.target === 'line') {
-    if (!sk.a || (via === 'tap' && ui.pending && ui.pending.k !== k && sk.locked)) {
+    // First tap anchors the start; later taps aim the jets (tapping the aimed tile again calls it in).
+    if (!sk.a) {
       if (!ui.valid?.has(k)) { sfx.uiError(); return; }
       if (via !== 'tap') { x2 = x + 1; y2 = y; } else { sk.a = { x, y }; sk.locked = true; showTargetHint('Now tap the direction the jets fly'); }
     }
@@ -1956,7 +2036,9 @@ function confirmPending() {
   if (!turnCtx || turnCtx.busy || !p || p.kind === 'streak-wait') { if ((!p || p.kind === 'streak-wait') && turnCtx) sfx.uiError(); return; }
   sfx.uiClick();
   switch (p.kind) {
-    case 'move': doAction({ type: 'move', x: p.x, y: p.y }); break;
+    case 'move': doAction({ type: p.boat === 'drive' ? 'boat_move' : 'move', x: p.x, y: p.y }); break;
+    case 'vehicle': doAction({ type: 'shoot', vehicleId: p.vehicleId }); break;
+    case 'repair': doAction({ type: 'repair', vehicleId: p.vehicleId }); break;
     case 'shoot': doAction({ type: 'shoot', targetId: p.id }); break;
     case 'aimed': doAction({ type: 'aimed', targetId: p.id }); break;
     case 'barrel': doAction({ type: 'shoot_barrel', x: p.x, y: p.y }); break;
@@ -2055,7 +2137,7 @@ function handleTile(x, y) {
       return;
     }
     case 'shoot': case 'aimed': case 'knife': case 'suppress': {
-      const b = ui.targets.find((t) => t.barrel && t.k === k);
+      const b = ui.targets.find((t) => (t.barrel || t.vehicle) && t.k === k);
       if (b) {
         if (ui.target === b.id) { confirmPending(); return; }
         sfx.uiClick(); selectTarget(b.id); return;
@@ -2195,7 +2277,7 @@ function updateHud() {
   const u = me();
   const alive = new Set(typeof G.aliveTeams === 'function' ? G.aliveTeams(state) : state.teams.map((t) => t.id));
   const mt = myTeam();
-  let act = activeTeams.filter((t) => alive.has(t));
+  let act = pitView ? [] : activeTeams.filter((t) => alive.has(t));
   if (!act.length && state.winner === null) {
     try { act = typeof G.activeTeams === 'function' ? G.activeTeams(state) : [G.currentTeamId(state)]; } catch { act = []; }
   }
@@ -2329,7 +2411,7 @@ function renderStreakBar(u) {
     const st = s.used ? 'used' : s.ready ? 'ready' : s.earned ? 'earned' : 'locked';
     return `<button class="sk ${st}${ui.streak?.key === s.key ? ' active' : ''}" data-key="${esc(s.key)}" title="${esc(s.name)}: ${esc(s.reason || s.desc || '')}" style="--f:${frac}">
       <span class="sk-ring"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" class="trk"/><circle cx="18" cy="18" r="16" class="arc"/></svg><span class="sk-ic">${streakIcon(s.key)}</span></span>
-      <span class="sk-t"><b>${esc(s.name)}</b><small>${s.used ? 'Used' : s.ready ? 'Ready' : `${Math.min(have, s.cost)}/${s.cost}`}</small></span></button>`;
+      <span class="sk-t"><b>${esc(String(s.name || '').replace(/^Care Package$/i, 'Care Drop').replace(/^Counter-UAV$/i, 'C-UAV'))}</b><small>${s.used ? 'Used' : s.ready ? 'Ready' : `${Math.min(have, s.cost)}/${s.cost}`}</small></span></button>`;
   }).join('');
   el.querySelectorAll('.sk').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); const s = list.find((x) => x.key === b.dataset.key); if (s) pressStreak(s); }; });
   const ready = list.filter((s) => s.earned && !s.used).map((s) => s.key).join(',');
@@ -2447,7 +2529,7 @@ function meta(ev) {
   if (!stats) return;
   // Medals, challenge stats and XP popups (5.0).
   if (!pitView || ev.type === 'redeploy') {
-    const tr = tracker.feed(ev, { st, myId: myId(), myTeam: mt, standing, lastBlast, dist: (a, b, e) => (Number.isFinite(e?.dist) ? e.dist : RU.dist(e?.fx ?? a.x, e?.fy ?? a.y, b.x, b.y)) });
+    const tr = tracker.feed(ev, { st, myId: myId(), myTeam: mt, standing, lastBlast, weaponId: matchLoadout?.primary?.id, dist: (a, b, e) => (Number.isFinite(e?.dist) ? e.dist : RU.dist(e?.fx ?? a.x, e?.fy ?? a.y, b.x, b.y)) });
     if (!ff) { for (const k of tr.medals) J.showMedal(k, sfx); if (tr.pops.length) J.xpPop(tr.pops); }
   }
   if (!ff && ev.type === 'shot' && ev.from === myId() && ev.result !== 'miss') { J.hitmarker(ev.result === 'graze' ? 'graze' : ev.headshot ? 'crit' : 'hit'); sfx.hitmarker(ev.result); }
@@ -2665,7 +2747,7 @@ function meta(ev) {
       }
       break;
     case 'overwatch_trigger':
-      if (!ff && st.units[ev.target].team === mt) H.toast(`Overwatch fire on ${unitName(st.units[ev.target])}!`, 'warn', 'overwatch');
+      if (!ff && st.units[ev.target]?.team === mt) H.toast(`Overwatch fire on ${unitName(st.units[ev.target])}!`, 'warn', 'overwatch');
       break;
     case 'zone_shrink': {
       if (!ff) sfx.stinger('tide');
@@ -2715,7 +2797,7 @@ function recordCareer(place) {
     stats.award5 = P.awardMatch5({
       cls: u.cls, place, total, won, kills: u.kills || 0, dmg: stats.dmg, revives: stats.revives,
       rounds: stats.roundOut ?? (ctl?.state || state).round, medals, weaponId: matchLoadout?.primary?.id,
-      wstats: { ...tracker.w, dmg: Math.max(tracker.w.dmg, stats.dmg), shots: Math.max(tracker.w.shots, stats.shots), hits: Math.max(tracker.w.hits, stats.hits) }, streaks: tracker.streaks || stats.streaks || 0, lethalKills: tracker.lethalKills,
+      wstats: { ...tracker.w }, // primary-weapon tallies from the event stream (juice.js tracker) streaks: tracker.streaks || stats.streaks || 0, lethalKills: tracker.lethalKills,
     });
   } catch (e) { warnOnce('awardMatch5', e); }
   return recordMatch({
@@ -2742,9 +2824,12 @@ function showEnd(token, summary = {}) {
   const u = ctl?.state?.units?.[ctl.myUnitId] || me();
   if (!u || !state) return;
   const mt = ctl ? ctl.myTeam : myTeam();
-  const won = state.winner === mt;
+  // Host left / connection lost: no placement, no career record, no XP.
+  const aborted = !!summary.reason && summary.reason !== 'over';
+  const won = !aborted && state.winner === mt;
   const total = state.teams.length;
   const place = won ? 1 : (playerPlace ?? summary.place ?? total);
+  if (aborted) { showAborted(token, summary, u); return; }
   const rec = recordCareer(place);
   if (won || !stats.defeatPlayed) sfx.stinger(won ? 'victory' : 'defeat');
   sfx.setIntensity(0.15);
@@ -2811,6 +2896,37 @@ function showEnd(token, summary = {}) {
       animateEndPrestige(award, token);
     });
   }, fastForward ? 0 : 1500);
+}
+
+/** The match ended early (host left, connection lost): a clean result with nothing recorded. */
+function showAborted(token, summary, u) {
+  if (stats) stats.recorded = true; // never record this match later
+  sfx.setIntensity(0.15);
+  allowSleep();
+  const host = summary.reason === 'host_left';
+  const st = curStage();
+  $('endKicker').innerHTML = `<span>${esc(callsign())}</span><span>${MODES[state.mode]?.name || state.mode}</span><span>${esc(AR.CLASSES[u.cls]?.name || u.cls)}</span>${st ? `<span>${esc(st.name)}</span>` : ''}`;
+  $('endBanner').innerHTML = cardSVG(P.equippedCard(), { name: callsign(), emblem: P.equippedEmblem(), level: P.player().level, sub: 'MATCH ENDED', w: 640 });
+  $('endPlace').innerHTML = '<span class="hash">–</span>';
+  $('endPlace').className = 'end-place';
+  $('endTitle').textContent = host ? 'HOST LEFT' : summary.reason === 'lost' ? 'CONNECTION LOST' : 'MATCH ENDED';
+  $('endTitle').className = '';
+  $('endSub').textContent = (summary.msg || (host ? 'The host left the match.' : 'The connection to the match was lost.')) + ' Nothing was recorded.';
+  for (const id of ['endStats', 'endMedals', 'endXp', 'endPrestige', 'endChallenges', 'endCareer']) $(id).innerHTML = '';
+  $('specBar').classList.add('hidden');
+  $('endShopSalv').innerHTML = `${ICON.coin}${M.salvage().toLocaleString('en-US')}`;
+  $('loadoutBtn').textContent = onlineCfg?.lobby ? 'Back to lobby' : 'Back to hub';
+  $('againBtn').querySelector('span').textContent = onlineCfg ? 'Back to lobby' : 'Back to hub';
+  clearTimeout(endTimer);
+  endTimer = setTimeout(() => {
+    if (token !== gameToken || !state) return;
+    turnCtx = null;
+    document.body.classList.add('ended');
+    const es = $('endScreen');
+    es.classList.remove('hidden');
+    es.scrollTop = 0;
+    requestAnimationFrame(() => { es.classList.add('open'); $('againBtn').focus({ preventScroll: true }); });
+  }, 300);
 }
 
 // ----- player / weapon XP, challenges, camos and Salvage on the end screen
@@ -3077,6 +3193,11 @@ if (DEBUG) {
       intro: !!introCtx, menu: inMenu(), ended: !$('endScreen').classList.contains('hidden'),
     }),
     enter: () => { menu.enter(); return 'ok'; },
+    me: () => me(),
+    pitView: () => pitView,
+    tap: (x, y) => { onTileTap(x, y); return ui.pending ? ui.pending.kind + (ui.pending.boat ? ':' + ui.pending.boat : '') : ui.mode; },
+    press: (key) => { const a = standing(me()) ? actionList(me()).list.find((x) => x.key === key) : null; if (!a) return 'none'; pressAction(a); return a.state === 'off' ? 'off: ' + a.reason : ui.mode; },
+    streakBar: () => streakBar(me()).map((s) => `${s.key}:${s.ready ? 'ready' : s.reason}`),
     deploy: () => { startGame(); return 'ok'; },
     skipIntro: () => { introCtx?.skip(); return 'ok'; },
     toMenu: () => { toMenu(); return 'ok'; },

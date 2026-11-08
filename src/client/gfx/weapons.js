@@ -475,10 +475,14 @@ function buildLegendary(key, K) {
 }
 
 const GEO = new Map();
+// LRU cap: bots roll random attachment combos, so without a cap the cache (and its GPU
+// buffers) grew by ~20-30 geometries every match. One match needs at most ~32 combos;
+// evicted geometries are disposed (three re-uploads one transparently if it is still drawn).
+const GEO_MAX = 80;
 function weaponGeos(w, K) {
   const v = w.legendary ? 0 : VARIANT[w.id] ?? Math.floor(hash(String(w.id).split('').reduce((a, c) => a * 31 + c.charCodeAt(0), 7) >>> 0) * 3);
   const key = [w.cat, w.legendary || '', v, K.optic || '', K.barrel || '', K.mag || '', K.under || '', K.stock || ''].join('|');
-  if (GEO.has(key)) return GEO.get(key);
+  if (GEO.has(key)) { const hit = GEO.get(key); GEO.delete(key); GEO.set(key, hit); return hit; }
   const B = (w.legendary && buildLegendary(w.legendary, K)) || buildCat(w.cat, v, K);
   let mk = K.mag;
   if (!mk && !w.legendary && w.cat === 'lmg' && v === 1) mk = 'drumround';
@@ -487,6 +491,14 @@ function weaponGeos(w, K) {
   const res = { body: B.g.build({ ao: false }), mag: magGeo(mk, w.cat, w.legendary), magPos: B.mag, muzzle: B.muzzle, hand: B.hand, charm: B.charm, len: B.len, style };
   res.body.userData.shared = true; res.mag.userData.shared = true;
   GEO.set(key, res);
+  while (GEO.size > GEO_MAX) {
+    const k0 = GEO.keys().next().value, old = GEO.get(k0);
+    GEO.delete(k0);
+    old.body.dispose();
+    let magInUse = false;
+    for (const e of GEO.values()) if (e.mag === old.mag) { magInUse = true; break; }
+    if (!magInUse) old.mag.dispose();
+  }
   return res;
 }
 
@@ -496,10 +508,20 @@ const CHARM_GEO = new Map();
 export function charmGeo(id) {
   if (CHARM_GEO.has(id)) return CHARM_GEO.get(id);
   const g = new GeoBuilder();
-  g.tag(WT.att).box(0.006, 0.03, 0.006, 0, -0.015, 0, 0x8a9096); // chain
+  g.tag(WT.att);
+  for (let i = 0; i < 4; i++) g.sphere(0.0034, 0, -0.004 - i * 0.0075, 0, 0x8a9096, 1, 1, 1, 5, 4); // bead chain
   const y = -0.045;
   switch (id) {
-    case 'tags': g.box(0.03, 0.045, 0.004, -0.006, y, 0.003, 0xc8ccd0, 0, 0, 0.2); g.box(0.03, 0.045, 0.004, 0.006, y - 0.004, -0.003, 0xaab0b6, 0, 0, -0.15); break;
+    case 'tags': {
+      g.box(0.03, 0.045, 0.004, -0.006, y, 0.003, 0xc8ccd0, 0, 0, 0.2); g.box(0.03, 0.045, 0.004, 0.006, y - 0.004, -0.003, 0xaab0b6, 0, 0, -0.15);
+      // stamped lines on both faces + the punched hole, so the tags read as tags up close
+      for (let i = 0; i < 3; i++) {
+        const ly = y + 0.006 - i * 0.008, w = i === 2 ? 0.012 : 0.018;
+        g.box(w, 0.0025, 0.0012, -0.006 + Math.sin(0.2) * (ly - y) * -1, ly, 0.0056, 0x6a7076, 0, 0, 0.2);
+        g.box(w, 0.0025, 0.0012, 0.006 + Math.sin(0.15) * (ly - y + 0.004), ly - 0.004, -0.0056, 0x5e646a, 0, 0, -0.15);
+      }
+      g.cyl(0.0035, 0.006, 6, -0.006 + 0.003, y + 0.017, 0.003, 0x2a2e31, 0, Z); break;
+    }
     case 'dice': g.box(0.036, 0.036, 0.036, 0, y, 0, 0xe83a3a, 0.5, 0.4); g.box(0.008, 0.008, 0.038, 0, y, 0, 0xffffff, 0.5, 0.4); g.box(0.038, 0.008, 0.008, 0, y, 0, 0xffffff, 0.5, 0.4); break;
     case 'shell': g.sphere(0.024, 0, y, 0, 0xf2e2c8, 0.8, 1.2, 0.6, 8, 6); g.box(0.004, 0.04, 0.012, 0, y, 0.013, 0xa0603a); g.sphere(0.006, 0.01, y + 0.01, 0.012, 0xa0603a); break;
     case 'tooth': g.cone(0.022, 0, 0.06, 3, 0, y - 0.01, 0, 0xf4f0e4, 0, Math.PI); g.box(0.03, 0.01, 0.012, 0, y + 0.02, 0, 0x2a2e31); break;

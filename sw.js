@@ -11,7 +11,7 @@
 // then adds anything loaded at runtime that this list missed.
 // PeerJS (esm.sh) is deliberately not cached: online play needs the network anyway.
 
-const VERSION = 'tidefall-v5.0.0';
+const VERSION = 'tidefall-v5.0.1';
 const NET_TIMEOUT = 4000; // ms before a cached copy wins over a slow network
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
@@ -64,6 +64,11 @@ const SHELL = [
   'https://unpkg.com/three@0.170.0/examples/jsm/shaders/CopyShader.js',
   'https://unpkg.com/three@0.170.0/examples/jsm/shaders/LuminosityHighPassShader.js',
   'https://unpkg.com/three@0.170.0/examples/jsm/shaders/OutputShader.js',
+  // GTAO (high quality, desktop) and its dependencies
+  'https://unpkg.com/three@0.170.0/examples/jsm/postprocessing/GTAOPass.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/shaders/GTAOShader.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/shaders/PoissonDenoiseShader.js',
+  'https://unpkg.com/three@0.170.0/examples/jsm/math/SimplexNoise.js',
 ];
 
 const IMMUTABLE = (url) => url.startsWith('https://unpkg.com/three@');

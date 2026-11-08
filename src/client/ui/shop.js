@@ -98,7 +98,7 @@ export function initShop({ CLASSES, getR, onClick, onBuy, onChange, toast }) {
   function card(it, cls, big = false) {
     const s = itemState(it, cls);
     const priceHtml = s.owned ? `<span class="ic-own">${s.eq ? `${ICON.check}Equipped` : 'Owned'}</span>`
-      : `${s.feat && !it.isDefault ? `<s>${it.price}</s>` : ''}${coin(s.price, M.salvage() >= s.price ? '' : 'short')}`;
+      : `${s.feat && !it.isDefault ? `<s>${Number(it.price).toLocaleString('en-US')}</s>` : ''}${coin(s.price, M.salvage() >= s.price ? '' : 'short')}`;
     const isSel = ui.sel && ui.sel.slot === it.slot && ui.sel.id === it.id;
     return `<button class="it r-${it.rarity}${big ? ' feat' : ''}${isSel ? ' sel' : ''}${s.owned ? ' owned' : ''}${s.eq ? ' eq' : ''}" data-slot="${it.slot}" data-id="${esc(it.id)}">
       ${itemArt(it, cls)}
