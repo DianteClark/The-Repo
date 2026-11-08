@@ -75,7 +75,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
   function setupHost() {
     const lp = net.players();
     const mode = net.lobby.settings.mode;
-    const stage = net.lobby.settings.stage;
+    const stage = 'random'; // 5.1: the stage wheel reveals the seed's pick on every client
     const sizes = squadSizes(mode);
     const lw = mode === 'trios' && sizes[sizes.length - 1] === 1 ? sizes.length - 1 : -1;
     const hostP = lp.find((p) => p.isHost);
@@ -134,7 +134,9 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
     const c = clients.get(pid);
     c.mem = createTeamMemory(state, c.team); // a fresh mirror starts from a fresh memory
     const { snap } = teamView(state, [], c.mem, { myUnitId: c.unitId });
-    return { t: 'start', unitId: c.unitId, team: c.team, snap, cosmetics: cosmetics(), names: names(), turnMs, mode: state.mode, stage: state.stage };
+    const t = turns.get(c.unitId);
+    const turnOpen = !!(t && !t.done && !t.autoing); // a resync tells the client whether its turn is still open
+    return { t: 'start', unitId: c.unitId, team: c.team, snap, cosmetics: cosmetics(), names: names(), turnMs, mode: state.mode, stage: state.stage, turnOpen };
   }
 
   function broadcast(events, scope = null) {

@@ -140,10 +140,19 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
     view.state = mirror; view.team = myTeam;
     Rcall('setGame', mirror, myTeam, { cosmetics });
     Rcall('setSpectator', false);
-    if (!first) { turn = null; player.myTurn = false; Rcall('syncFromState'); hook('onState'); hook('onStatus', 'Back in the match', 'ok'); }
+    if (!first) {
+      // Resync (rejoin / reconnect): keep a turn the host still has open (its 'turn' message follows and
+      // refreshes the clock); otherwise close the stale one properly so the UI drops it too.
+      if (turn && !(m.turnOpen && !turn.scope)) closeTurn('ended');
+      Rcall('syncFromState'); hook('onState');
+      const now = performance.now();
+      if (now - backAt > 4000) hook('onStatus', 'Back in the match', 'ok'); // rejoin + reconnect both resync: say it once
+      backAt = now;
+    }
     startResolve?.();
   }
 
+  let backAt = -1e9; // last "Back in the match" notice
   const early = []; // messages before start() ran
   function onMessage(m) {
     if (stopped) return;
@@ -271,7 +280,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
     done: null,
 
     act(action) {
-      if (!turn) return Promise.resolve({ ok: false, error: 'Not your turn' });
+      if (!turn) { hook('onTurnEnd', { unitId: myUnitId, reason: 'stale' }); return Promise.resolve({ ok: false, error: 'Not your turn' }); } // the UI still had a turn open: drop it
       if (turn.busy) return Promise.resolve({ ok: false, error: 'Busy' });
       const s = ++seq;
       turn.busy = true; turn.busyAt = performance.now();
@@ -290,7 +299,7 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       });
     },
     endTurn() {
-      if (!turn) return Promise.resolve({ ok: false, error: 'Not your turn' });
+      if (!turn) { hook('onTurnEnd', { unitId: myUnitId, reason: 'stale' }); return Promise.resolve({ ok: false, error: 'Not your turn' }); }
       net.send({ t: 'end' });
       return Promise.resolve({ ok: true });
     },

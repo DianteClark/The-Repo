@@ -414,7 +414,7 @@ applyPacing();
 if (R) {
   R.onCinematic = (p) => {
     if (attract || !state || fastForward) { if (p?.phase === 'end') H.cineCard(p); return; }
-    H.cineCard(p || {});
+    H.cineCard(p?.phase === 'start' ? { ...p, alive: () => !!R.inCinematic && !fastForward } : (p || {}));
     if (p?.phase === 'start') { H.hideBanner(); if (!p.light) buzz('tap'); }
   };
   R.onFocus = (f) => {
@@ -2017,6 +2017,7 @@ function previewStreak(x, y, via) {
   const sk = ui.streak;
   const d = AR.streakByKey(sk.key) || { name: sk.key };
   const k = keyOf(x, y);
+  const aimTap = sk.target === 'line' && !!sk.a && via === 'tap'; // the direction was tapped: hover must not re-aim it
   let x0 = x, y0 = y, x2, y2;
   if (sk.target === 'line') {
     // First tap anchors the start; later taps aim the jets (tapping the aimed tile again calls it in).
@@ -2040,7 +2041,7 @@ function previewStreak(x, y, via) {
   Rcall('setHighlights', hl);
   if (sk.target !== 'line') Rcall('setAoePreview', { x: x0, y: y0, radius: sk.key === 'sentry' ? (d.reach ?? 8) / 8 : 0.7, valid: ok, kind: STREAK_PREVIEW_KIND[sk.key] || 'scan' });
   Rcall('setStreakPreview', { key: sk.key, tiles: pv.tiles, valid: ok });
-  ui.pending = ok ? { kind: 'streak', key: sk.key, k, x: x0, y: y0, x2, y2, via: sk.target === 'line' ? 'line' : via } : (sk.target === 'line' && sk.a ? { kind: 'streak-wait', k } : null);
+  ui.pending = ok ? { kind: 'streak', key: sk.key, k, x: x0, y: y0, x2, y2, via: sk.target === 'line' ? (aimTap ? 'tap' : 'line') : via } : (sk.target === 'line' && sk.a ? { kind: 'streak-wait', k } : null);
   const seen = (pv.units || []).filter((h) => unitVisible(state.units[h.id]));
   const rows = seen.map((h) => { const t = state.units[h.id]; return `<span class="hit ${t.team === u.team ? 'ff' : 'en'}">${esc(unitName(t))}<b>-${h.dmg ?? d.dmg ?? 5}</b></span>`; }).join('');
   const html = `<div class="ctx-h"><span class="ctx-ic str">${streakIcon(sk.key)}</span><b>${esc(d.name)}</b><span class="cost">0 AP</span><span class="spacer"></span><span class="dim">once per match</span></div>
@@ -3403,6 +3404,7 @@ if (DEBUG) {
       return 'waiting';
     },
     fastForward: () => { ctl?.fastForward?.(); fastForward = true; },
+    netDrop: () => { const n = onlineCfg?.net; if (!n?._simulateDrop) return 'no net'; n._simulateDrop(); return 'dropped'; },
     get ctl() { return ctl; },
     tracker,
     progress: P,

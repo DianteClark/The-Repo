@@ -2438,7 +2438,8 @@ body.cine #hud .banner { opacity: 0 !important; }
   #hud #turnStrip.solo .ts { width: 12px; flex-basis: 12px; }
   #hud .ts i { width: 4px; height: 7px; }
   #hud .top-stats { font-size: 13.5px; gap: 5px 12px; }
-  #hud #colL { top: calc(var(--st) + var(--pad)); width: 300px; }
+  /* stop short of the centred top bar (its left edge is 50vw - min(360px, 50vw - 208px)) */
+  #hud #colL { top: calc(var(--st) + var(--pad)); width: min(300px, calc(50vw - min(360px, 50vw - 208px) - var(--pad) - 10px)); }
   #hud #sideR { top: calc(var(--st) + var(--pad)); }
   #hud #camBtns { grid-template-columns: repeat(4, 1fr); }
   #hud #medalStack { top: calc(var(--st) + var(--pad) + var(--side-w) + 60px); }
@@ -2510,8 +2511,6 @@ body[data-text="xl"] #hud .uc-tags { display: none; }
 .stage-mini b { font: 800 11.5px/1 var(--head); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stage-mini small { display: inline-flex; align-items: center; gap: 3px; font: 600 9.5px/1 var(--head); letter-spacing: .06em; color: var(--cyan); white-space: nowrap; overflow: hidden; }
 .stage-mini small .ic { width: 10px; height: 10px; flex: none; }
-/* online lobby (NET's markup): the stage is always random now, so hide its stage picker / chip */
-#onlineRoot select[data-set="stage"], #onlineRoot .card .row > h3 + .chip + .chip { display: none; }
 
 /* ---------- STAGE WHEEL ---------- */
 #stageWheel { z-index: 26; display: grid; place-items: center; padding: calc(16px + var(--st)) 0 calc(16px + var(--sb)); cursor: pointer; overflow: hidden; }

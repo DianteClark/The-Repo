@@ -413,6 +413,8 @@ export function cineCard(p = {}) {
   el.className = `cine-card show k-${String(p.kind || 'x').replace(/[^a-z_]/gi, '')}${p.light ? ' light' : ''}`;
   document.body.classList.add('cine');
   document.body.classList.toggle('cine-light', !!p.light);
-  // never stick: the director always ends, but a dropped 'end' must not hide the HUD for good
-  cineT = setTimeout(() => cineCard({ phase: 'end' }), 9000);
+  // never stick: the director always ends, but a dropped 'end' must not hide the HUD for good.
+  // While the set piece is still running (p.alive), keep the HUD hidden: Cinematic pacing can run past 9s.
+  const guard = () => { cineT = setTimeout(() => { if (typeof p.alive === 'function' && p.alive()) guard(); else cineCard({ phase: 'end' }); }, 9000); };
+  guard();
 }

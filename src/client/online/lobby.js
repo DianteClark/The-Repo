@@ -1,5 +1,5 @@
 // Online lobby UI: host or join by code, roster with class badges and ready state, squads,
-// mode/stage (host), start, kick, leave. Mounts into a container the UI provides (#onlineRoot).
+// mode (host; the stage is always random), start, kick, leave. Mounts into a container the UI provides (#onlineRoot).
 //
 //   import { mountLobby, joinCodeFromUrl } from './online/lobby.js';
 //   const lobby = mountLobby(document.getElementById('onlineRoot'), {
@@ -94,7 +94,6 @@ function injectStyle() {
 }
 
 const MODES = () => Object.entries(K.MODES || { solos: { name: 'Solos' } }).map(([key, m]) => ({ key, name: m.name || key }));
-const STAGES = () => [{ key: 'random', name: 'Random stage' }, ...Object.values(K.STAGES || {}).map((s) => ({ key: s.key, name: s.name }))];
 const className = (cls) => K.CLASSES?.[cls]?.name || cls || '';
 
 export function mountLobby(root, cfg = {}) {
@@ -162,7 +161,6 @@ export function mountLobby(root, cfg = {}) {
     for (const p of L.players) if (p.squad >= 0 && p.squad < sizes.length) bySquad[p.squad].push(p);
     const can = isHost ? net.canStart() : null;
     const modeName = MODES().find((m) => m.key === L.settings.mode)?.name || L.settings.mode;
-    const stageName = STAGES().find((s) => s.key === L.settings.stage)?.name || L.settings.stage;
     const showSquads = bySquad.map((list, i) => ({ list, i })).filter(({ list, i }) => list.length || (sizes[i] > 1 && i < Math.max(2, bySquad.filter((l) => l.length).length + 1)));
     const squadOpts = (cur) => sizes.map((n, i) => `<option value="${i}" ${i === cur ? 'selected' : ''}>Squad ${i + 1}</option>`).join('');
     el.innerHTML = `
@@ -180,9 +178,8 @@ export function mountLobby(root, cfg = {}) {
       <div class="card">
         <div class="row" style="margin-bottom:10px">
           <h3 class="grow" style="margin:0">Match</h3>
-          ${isHost ? `<select data-set="mode" aria-label="Mode">${MODES().map((m) => `<option value="${m.key}" ${m.key === L.settings.mode ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
-          <select data-set="stage" aria-label="Stage">${STAGES().map((s) => `<option value="${s.key}" ${s.key === L.settings.stage ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
-    : `<span class="chip">${esc(modeName)}</span><span class="chip">${esc(stageName)}</span>`}
+          ${isHost ? `<select data-set="mode" aria-label="Mode">${MODES().map((m) => `<option value="${m.key}" ${m.key === L.settings.mode ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`
+    : `<span class="chip">${esc(modeName)}</span>`}
         </div>
         <div class="squads">${showSquads.map(({ list, i }) => `
           <div class="sq${list.some((p) => p.pid === myPid) ? ' mine' : ''}">
@@ -199,7 +196,7 @@ export function mountLobby(root, cfg = {}) {
             ${Array.from({ length: Math.max(0, sizes[i] - list.length) }, () => '<div class="slot">Bot</div>').join('')}
           </div>`).join('')}
         </div>
-        <p class="note" style="margin:10px 0 0">Empty slots are filled by bots. ${sizes.length} squads in ${esc(modeName)}.</p>
+        <p class="note" style="margin:10px 0 0">Empty slots are filled by bots. ${sizes.length} squads in ${esc(modeName)}. The stage wheel picks the map at drop-in.</p>
       </div>
       <div class="status ${status.level}">${esc(status.msg)}</div>
       <div class="foot">
@@ -217,7 +214,7 @@ export function mountLobby(root, cfg = {}) {
     busy = true;
     setStatus('Creating a lobby…');
     try {
-      net = await hostSession({ profile: profile(), settings: { mode: cfg.mode || 'duos', stage: cfg.stage || 'random' } });
+      net = await hostSession({ profile: profile(), settings: { mode: cfg.mode || 'duos', stage: 'random' } }); // 5.1: always random, the stage wheel reveals it
       wire();
       screen = 'lobby';
       status = { msg: 'Lobby open. Share the code.', level: 'ok' };
