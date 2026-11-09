@@ -223,3 +223,8 @@ console.log(`alive at round 11 (${T.lateN}): streaks earned avg ${(T.lateEarned 
 // ---------- sanity audit ----------
 console.log(`\n=== bot sanity audit (${T.matches} matches) ===`);
 console.log(auditReport(AUDIT.A, T.matches));
+{
+  const A = AUDIT.A;
+  console.log(`care packages: called ${A.care}  landed ${A.careLanded}  claimed by caller's squad ${pct(A.careOwn, A.careLanded)} (caller ${pct(A.careCaller, A.careLanded)})`
+    + `  by enemies ${pct(A.careEnemy, A.careLanded)}  never ${pct(A.careNever, A.careLanded)}  |  gold claimed ${pct(A.goldTaken, A.gold)}  kill drops claimed ${pct(A.killDropTaken, A.killDrop)}`);
+}

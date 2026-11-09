@@ -20,11 +20,11 @@ import {
 } from './game.js';
 import {
   coverVs, dist, teamSeesUnit, teamSeesTile, hitChance, los, weaponRange, standing, inBounds,
-  concealment, isFlared, isKelp, sightOf, smokeAt, moveOf, DIRS8,
+  concealment, isFlared, isKelp, isWater, sightOf, smokeAt, moveOf, reachable, DIRS8,
 } from './rules.js';
 import { roll } from './rng.js';
-import { FRAG, SCAN, SUPPRESS } from './constants.js';
-import { EQUIPMENT, STREAKS, hasSpecial } from './weapons.js';
+import { FRAG, SCAN, SUPPRESS, MOD_CAP } from './constants.js';
+import { EQUIPMENT, STREAKS, LEGENDARIES, hasSpecial } from './weapons.js';
 import { hasAmmo } from './core.js';
 import { hasPerk } from './loadout.js';
 
@@ -327,6 +327,158 @@ function threatAt(state, u, x, y, enemies, hunker = false) {
   return t;
 }
 
+// ---------- crates: what's worth walking to, and who in the squad goes ----------
+
+/** Low on primary ammo: the magazine plus spares is no more than one magazine. */
+function lowAmmo(u) {
+  const prim = u.weapons ? u.weapons[0] : u.weapon;
+  if (!prim || hasSpecial(prim, 'infinite') || hasSpecial(prim, 'explosive')) return false;
+  const loaded = !u.weapons || u.slot === 0 ? u.ammo : prim.ammo;
+  return (loaded ?? 0) + (prim.spare ?? 0) <= prim.mag;
+}
+
+/**
+ * How much a crate is worth to this unit (roughly: points of move score). Care packages and gold
+ * crates (legendary weapons) are big; supply caches next; ammo matters when low, medkits when hurt.
+ */
+export function crateValue(state, u, c) {
+  const hurt = u.hp <= u.maxHp * 0.6;
+  const kits = u.items?.medkit || 0;
+  const low = lowAmmo(u);
+  switch (c.type) {
+    case 'care': return 40 + (c.weapon ? 15 : 0) + (low ? 4 : 0) + (hurt && !kits ? 4 : 0);
+    case 'gold': {
+      const slot = LEGENDARIES[c.weapon]?.slot === 'secondary' ? 1 : 0;
+      const cur = u.weapons ? u.weapons[slot] : slot === 0 ? u.weapon : null;
+      return cur && cur.legendary ? 12 : 42;
+    }
+    case 'cache': return 18 + (low ? 6 : 0);
+    case 'medkit': return 3 + (hurt ? (kits ? 6 : 14) : 0);
+    case 'ammo': return low ? (u.ammo <= 0 ? 18 : 12) : 2;
+    case 'armor': return (u.mods?.armor ?? 0) < MOD_CAP ? 7 : 3;
+    case 'scope': case 'barrel': return 5;
+    case 'attachment': return 4;
+    default: return 3; // lethal / tactical / frag / smoke
+  }
+}
+
+/**
+ * The crate this unit should go and claim, if any: {c, v, du, field, big, pending}.
+ *  - the squad sends one claimer per crate: the standing squadmate with the shortest walk to it
+ *    (so a downed caller's package is picked up by a mate);
+ *  - own care packages still in the air count too (stay close: it lands next step);
+ *  - an enemy care package is contested when the squad can see it;
+ *  - skipped when it's in the tide, will flood at the coming shrink, sits on a telegraphed strike,
+ *    or several enemies have good shots on it and this unit is low.
+ * With enemies in sight only crates worth the walk are returned.
+ */
+function crateTarget(state, u, enemies) {
+  if (u.vehicle != null || !state.crates) return null;
+  const S = state.map.size;
+  const mv = moveOf(u);
+  const shrinkSoon = state.round % 2 === 0;
+  const danger = dangerTiles(state);
+  const foes = threats(enemies);
+  const squad = state.units.filter((m) => standing(m) && m.team === u.team && m.id !== u.id && m.vehicle == null);
+  const all = state.crates.filter((c) => !c.taken);
+  for (const d of state.drops || []) if (d.team === u.team) all.push({ ...d.crate, x: d.x, y: d.y, team: d.team, pending: true });
+  // Cheap pass: value and an upper bound on the score (walking is never shorter than Chebyshev).
+  const cands = [];
+  for (const c of all) {
+    const big = c.type === 'care' || c.type === 'gold';
+    const cheb = chebyshev(u, c);
+    if (cheb > (big ? mv * 2 + 6 : 10)) continue;
+    if (!insideZone(state, c.x, c.y) || danger.has(c.y * S + c.x)) continue;
+    if (shrinkSoon && !insideNextZone(state, c.x, c.y)) continue;
+    const enemyCare = c.type === 'care' && c.team != null && c.team !== u.team;
+    if (enemyCare && !teamSeesTile(state, u.team, c.x, c.y)) continue;
+    const v = crateValue(state, u, c) * (enemyCare ? 0.85 : 1);
+    const pull = big ? 0.6 : foes.length ? 1.5 : 0.8;
+    const bound = v * (big ? 1.25 : 1) - cheb * pull;
+    if (foes.length && bound <= 0) continue; // can't be worth it even on a straight walk
+    cands.push({ c, big, cheb, v, pull, bound });
+  }
+  cands.sort((a, b) => b.bound - a.bound || a.c.y - b.c.y || a.c.x - b.c.x);
+  let best = null;
+  for (const cand of cands) {
+    const { c, big, cheb, pull, bound } = cand;
+    let { v } = cand;
+    if (best && bound <= best.score) break; // nothing further down can beat it
+    if (foes.length && !c.pending) {
+      // Running into a crossfire for loot at low HP is how you die.
+      // Several good shots on the crate and not the HP to take what they'd do: leave it.
+      const ghost = { ...u, x: c.x, y: c.y, hunkered: false };
+      let good = 0, hurt = 0;
+      for (const e of foes) {
+        if (dist(e.x, e.y, c.x, c.y) > weaponRange(e) || !los(state.map, e.x, e.y, c.x, c.y)) continue;
+        const ch = hitChance(state, e, ghost).chance;
+        if (ch >= 45) good++;
+        const [mn, mx] = e.weapon.dmg;
+        hurt += (ch / 100) * Math.max(1, (mn + mx) / 2 + (e.mods?.barrel || 0) - u.armor);
+      }
+      if (good >= 2 && (u.hp <= u.maxHp * 0.5 || hurt >= u.hp * 0.6)) continue;
+    }
+    const field = walkField(state, c.x, c.y, cheb * 2 + mv * 2 + 4);
+    const du = field[u.y * S + u.x];
+    if (du < 0) continue;
+    // One claimer per crate: the closest standing squadmate (ties: lowest id).
+    if (squad.some((m) => {
+      const dm = field[m.y * S + m.x];
+      return dm >= 0 && (dm < du || (dm === du && m.id < u.id));
+    })) continue;
+    // Racing an enemy that's close to it: get there first.
+    if (big && foes.some((e) => chebyshev(e, c) <= moveOf(e) * 2)) v *= 1.25;
+    const score = v - du * pull;
+    if (foes.length && score <= 0) continue;
+    if (!best || score > best.score) best = { c, v, du, field, score, big, pending: !!c.pending };
+  }
+  return best;
+}
+
+/** Walking distance from tile k to the crate target (falls back to a straight-line guess). */
+const crateDist = (tgt, k, S) => (tgt.field[k] >= 0 ? tgt.field[k] : dist(k % S, (k / S) | 0, tgt.c.x, tgt.c.y) * 1.5 + 4);
+
+/**
+ * Where to call a care package: a free, dry tile (inside this ring and the next, not water, off
+ * every telegraphed strike) that this unit can walk onto with one move next turn (two at most),
+ * leaning towards the coming circle and away from known threats. {x, y, v} or null (hold it).
+ */
+export function careSpot(state, u, foes = threats(visibleEnemies(state, u))) {
+  if (u.vehicle != null || foes.some((e) => dist(e.x, e.y, u.x, u.y) <= 6)) return null;
+  const S = state.map.size;
+  const danger = dangerTiles(state);
+  const mv = moveOf(u);
+  const reach = reachable(state, u, mv * 2);
+  const known = knownThreats(state, u, 16);
+  const z = state.zone;
+  const gx = z.nx ?? z.x, gy = z.ny ?? z.y;
+  let best = null;
+  for (const k of streakTargets(state, u, 'care')) {
+    const x = k % S, y = (k / S) | 0;
+    if (danger.has(k) || !keepsDry(state, x, y) || isWater(state.map, x, y)) continue;
+    if (state.crates.some((c) => !c.taken && c.x === x && c.y === y) || state.drops.some((d) => d.x === x && d.y === y)) continue;
+    const n = reach.get(k);
+    if (!n || n.d === 0) continue;
+    let v = (n.d <= mv ? 4 : 0) - n.d * 0.25 - dist(x, y, gx, gy) * 0.1;
+    if (n.d === 1) v -= 1; // right next to us is fine, but the drop shuffles if somebody's on it
+    for (const t of known) {
+      const d = dist(x, y, t.x, t.y);
+      // It lands next step, and enemies may act before we do: keep it out of a known enemy's
+      // walking reach where we can.
+      const tr = (t.unit ? moveOf(t.unit) : 4) * 2 + 1;
+      if (chebyshev(t, { x, y }) <= tr) v -= 5 * t.w;
+      if (d <= 12 && los(state.map, Math.round(t.x), Math.round(t.y), x, y)) v -= 2 * t.w;
+      else if (d <= 12) v += 0.2 * t.w;
+    }
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (inBounds(state.map, x + dx, y + dy) && state.map.cover[(y + dy) * S + x + dx] > 0) { v += 0.5; break; }
+    }
+    v += roll(state.seed, u.id, k, 77) * 0.3;
+    if (!best || v > best.v) best = { x, y, v };
+  }
+  return best;
+}
+
 export function chooseMove(state, u, { costOne = true, defensive = false } = {}) {
   const S = state.map.size;
   const reach = moveOptions(state, u);
@@ -334,14 +486,13 @@ export function chooseMove(state, u, { costOne = true, defensive = false } = {})
   const aboard = u.vehicle != null;
   const enemies = visibleEnemies(state, u);
   const z = state.zone;
-  const crates = state.crates.filter((c) => !c.taken && dist(c.x, c.y, u.x, u.y) <= 10 && insideZone(state, c.x, c.y, z.r));
+  const tgt = crateTarget(state, u, enemies);
   const aimedReady = u.cls === 'marksman' && u.cooldowns.aimed <= 0;
   const breachReady = u.cls === 'breacher' && u.cooldowns.breach <= 0;
   let goal = null;
   if (!enemies.length) {
-    if (crates.length) {
-      crates.sort((a, b) => dist(a.x, a.y, u.x, u.y) - dist(b.x, b.y, u.x, u.y));
-      goal = crates[0];
+    if (tgt) {
+      goal = tgt.c;
     } else {
       // Unseen gunfire (or a decoy) nearby and inside the coming ring: go and look.
       const heard = (state.noises || []).filter((n) => n.team !== u.team && n.round >= state.round - 1
@@ -363,6 +514,8 @@ export function chooseMove(state, u, { costOne = true, defensive = false } = {})
   const shrinkSoon = state.round % 2 === 0; // the ring shrinks at the start of next round
   // Contacts we've lost sight of (or only heard): take cover against where they were.
   const hidden = near.length ? [] : knownThreats(state, u, 14).filter((t) => !t.unit);
+  // A bleeding squadmate comes before loot.
+  const tgtW = tgt ? (needy.some((m) => m.downed) ? 0.5 : 1) : 0;
 
   let best = null;
   for (const [k, node] of reach) {
@@ -420,8 +573,19 @@ export function chooseMove(state, u, { costOne = true, defensive = false } = {})
       score -= Math.abs(d - ideal) * (defensive ? 0.3 : 0.7);
       if (defensive) score += Math.min(d, 12) * 0.5;
     } else if (goal) {
-      score -= dist(x, y, goal.x, goal.y) * 2;
-      if (state.crates.some((c) => !c.taken && c.x === x && c.y === y)) score += 20;
+      if (tgt && goal === tgt.c) {
+        const wd = crateDist(tgt, k, S);
+        // Still in the air: wait next to where it lands; landed: stand on it.
+        if (tgt.pending) score -= Math.max(0, wd - 1) * 2;
+        else {
+          score -= wd * 2;
+          if (wd === 0) score += Math.max(20, tgt.v * tgtW);
+        }
+      } else score -= dist(x, y, goal.x, goal.y) * 2;
+      if (!(tgt && x === tgt.c.x && y === tgt.c.y)) {
+        const c = state.crates.find((o) => !o.taken && o.x === x && o.y === y);
+        if (c) score += Math.min(20, 6 + crateValue(state, u, c));
+      }
       // Nobody in sight, but somebody always is: end the move tucked into cover.
       let sides = 0, full = 0;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -441,7 +605,18 @@ export function chooseMove(state, u, { costOne = true, defensive = false } = {})
         else if (dt <= 10 && los(state.map, tx, ty, x, y)) score -= 5 * t.w;
       }
     }
-    if (near.length && state.crates.some((c) => !c.taken && c.x === x && c.y === y)) score += c8(state, x, y);
+    if (near.length) {
+      // Mid-fight: loot on the way is still worth a step; the target crate pulls harder.
+      if (tgt) {
+        const wd = crateDist(tgt, k, S);
+        if (!tgt.pending && wd === 0) score += tgt.v * tgtW * (tgt.big ? 1 : 0.8);
+        score -= Math.min(wd, 14) * (tgt.big ? 1.2 : 0.4) * tgtW;
+      }
+      if (!(tgt && x === tgt.c.x && y === tgt.c.y)) {
+        const c = state.crates.find((o) => !o.taken && o.x === x && o.y === y);
+        if (c) score += Math.min(10, crateValue(state, u, c) * 0.5 + 2);
+      }
+    }
     for (const m of needy) {
       const reach = Math.max(Math.abs(m.x - x), Math.abs(m.y - y));
       const w = m.downed ? (m.bleed <= 1 ? 30 : 22) : 10;
@@ -460,8 +635,6 @@ export function chooseMove(state, u, { costOne = true, defensive = false } = {})
   return best;
 }
 
-// Crates are still worth grabbing mid-fight; caches especially.
-const c8 = (state, x, y) => (state.crates.some((c) => !c.taken && c.x === x && c.y === y && c.type === 'cache') ? 10 : 4);
 
 /**
  * AP needed to reach a tile that is dry and off every telegraphed danger tile: 0 if already
@@ -900,21 +1073,10 @@ function tryStreak(state, u, enemies, doAct) {
         if (foes.length >= 2 || (foes.length && (late || u.hp <= u.maxHp * 0.5))) return doAct({ type: 'streak', key: 'gunship' });
         break;
       case 'care': {
-        // Somewhere quiet: nobody close, and a tile we can grab soon, inside the coming ring.
-        if (foes.some((e) => dist(e.x, e.y, u.x, u.y) <= 6)) break;
-        const danger = dangerTiles(state);
-        const meDry = insideNextZone(state, u.x, u.y);
-        let best = null;
-        for (const k of streakTargets(state, u, 'care')) {
-          const x = k % S, y = (k / S) | 0;
-          const d = dist(x, y, u.x, u.y);
-          if (d > 4 || danger.has(k) || !insideZone(state, x, y)) continue;
-          if (!insideNextZone(state, x, y) && meDry) continue;
-          const v = -Math.abs(d - 2) - (foes.length ? threatAt(state, u, x, y, foes) * 3 : 0)
-            + (insideNextZone(state, x, y) ? 1 : 0) + roll(state.seed, u.id, k, 77);
-          if (!best || v > best.v) best = { x, y, v };
-        }
-        if (best) return doAct({ type: 'streak', key: 'care', x: best.x, y: best.y });
+        // Somewhere quiet, on dry ground we can walk onto next turn (else hold it for later).
+        if (escapeAP(state, u) > 0) break; // getting out of the tide / a strike comes first
+        const spot = careSpot(state, u, foes);
+        if (spot) return doAct({ type: 'streak', key: 'care', x: spot.x, y: spot.y });
         break;
       }
       case 'sentry': {
@@ -1171,13 +1333,20 @@ export function botTakeTurn(state, unitId) {
     if (moved < 2 && u.ap >= 1) {
       const fighting = foes.length > 0;
       const downedMate = matesOf(state, u).some((m) => m.downed);
-      const travel = !fighting && (moved === 0 || !insideNextZone(state, u.x, u.y));
+      // A crate (care package, gold, cache...) within one more move: finish the walk and claim it.
+      const tgt = (moved === 1 && !fighting) || (moved === 0 && fighting) ? crateTarget(state, u, enemies) : null;
+      const claim = tgt && !tgt.pending && tgt.du <= moveOf(u) * Math.min(2, u.ap);
+      const travel = !fighting && (moved === 0 || !insideNextZone(state, u.x, u.y) || (claim && tgt.v >= 4));
+      // Mid-fight, a care package / gold crate we can reach this turn is worth the whole turn,
+      // as long as standing on it isn't walking into the guns.
+      const dash = fighting && claim && tgt.big && tgt.du > moveOf(u) && u.ap >= 2 && !(shot && shot.lethal && shot.chance >= 50)
+        && threatAt(state, u, tgt.c.x, tgt.c.y, foes) < (lowHp ? 0.4 : 0.8);
       if (inTide || inDanger || (fighting || downedMate ? moved === 0 : travel)) {
         // Assault Run & Gun: dash into a flank and still fire.
         const runGun = fighting && u.cls === 'assault' && u.cooldowns.run_gun <= 0 && u.ap >= 2 && !lowHp && !(shot && shot.chance >= 50);
         const opts = {
           // Caught in the tide: dash for dry ground even mid-fight.
-          costOne: inTide || inDanger || runGun ? false : fighting || downedMate || u.ap >= 2,
+          costOne: inTide || inDanger || runGun || dash ? false : fighting || downedMate || u.ap >= 2,
           defensive: lowHp && !(shot && shot.chance >= 50),
         };
         let dest = chooseMove(state, u, opts);

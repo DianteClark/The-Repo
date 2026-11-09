@@ -7,7 +7,7 @@
 //   unit.streaks:[key×3]  unit.streakUsed:{key:true}  unit.streakCalled (this turn)
 //   state.reveals  += {team, kind:'uav', x, y, radius, ids}
 //   state.cuav     = [{team, untilRound}]
-//   state.drops    = [{x, y, crate}]                 care packages landing next step
+//   state.drops    = [{x, y, crate, team, by}]       care packages landing next step (by: caller id)
 //   state.airstrikes = [{id, team, owner, tiles:[[x,y]], round}]
 //   state.sentries = [{id, team, owner, x, y, hp, dir:[dx,dy], expiresRound, shots}]
 //   state.gunships = [{id, team, owner, untilRound}]
@@ -163,7 +163,7 @@ export function actStreak(state, u, action) {
       if (!Number.isInteger(x) || !Number.isInteger(y) || !streakTargets(state, u, key).has(y * state.map.size + x)) return fail('Bad target');
       use();
       const crate = careCrate(state, x, y);
-      state.drops.push({ x, y, crate, team: u.team });
+      state.drops.push({ x, y, crate, team: u.team, by: u.id });
       events.push({ type: 'care_package_called', id: u.id, x, y });
       break;
     }
@@ -308,9 +308,10 @@ export function streaksStepStart(state, events) {
       }
       if (best) [x, y] = best;
     }
-    const crate = { ...d.crate, id: state.crates.length, x, y };
+    // team / by: whose care package it is (bots go and claim their own, and contest the enemy's).
+    const crate = { ...d.crate, id: state.crates.length, x, y, team: d.team, by: d.by };
     state.crates.push(crate);
-    events.push({ type: 'care_package', crate: { ...crate }, team: d.team });
+    events.push({ type: 'care_package', crate: { ...crate }, team: d.team, by: d.by });
   }
   state.drops = [];
   void S;

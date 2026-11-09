@@ -3,7 +3,8 @@
 // Checks only use what the bot's team could see at the time (visible enemies, recent noises).
 import { AI_HOOKS } from '../src/sim/ai.js';
 import { insideZone, insideNextZone, moveOptions, dangerTiles } from '../src/sim/game.js';
-import { dist, teamSeesUnit, standing, coverVs, los } from '../src/sim/rules.js';
+import { dist, teamSeesUnit, standing, coverVs, los, reachable, moveOf } from '../src/sim/rules.js';
+import { streakTargets } from '../src/sim/streaks.js';
 
 const visibleThreats = (state, u) => state.units.filter((e) => standing(e) && e.team !== u.team && teamSeesUnit(state, u.team, e));
 const heard = (state, u, r = 14) => (state.noises || []).some((n) => n.team !== u.team && n.round >= state.round - 1 && dist(n.x, n.y, u.x, u.y) <= r);
@@ -33,7 +34,20 @@ export const AUDIT_KEYS = [
   ['uav', 'UAVs'],
   ['uavEmpty', 'UAV that revealed nobody'],
   ['care', 'care packages'],
-  ['careBad', 'care package outside next zone or > 4 from caller'],
+  ['careBad', 'care package outside next ring (one was in range) or not walkable in 2 moves'],
+  ['careLanded', 'care packages landed'],
+  ['careOwn', '  claimed by the caller\'s squad'],
+  ['careCaller', '    of which by the caller'],
+  ['careFast', '    of which within 2 rounds of landing'],
+  ['careEnemy', '  claimed by an enemy squad'],
+  ['careSniped', '    of which before the caller\'s squad had another turn'],
+  ['careNever', '  never claimed'],
+  ['careTide', '    of which landed outside the next ring'],
+  ['careWiped', '    of which the caller\'s squad was knocked out before claiming it'],
+  ['gold', 'gold supply drops landed'],
+  ['goldTaken', '  gold drops claimed'],
+  ['killDrop', 'kill drops (crates from the dead)'],
+  ['killDropTaken', '  kill drops claimed'],
   ['smoke', 'smokes'],
   ['smokeBlind', 'smoke with no visible threat'],
   ['decoy', 'decoys'],
@@ -51,6 +65,9 @@ export const AUDIT_KEYS = [
 export function createAudit() {
   const A = Object.fromEntries(AUDIT_KEYS.map(([k]) => [k, 0]));
   const placed = new Set();
+  // Crates being tracked: crate id → {kind:'care'|'gold'|'kill', team, by, round, next}.
+  const watch = new Map();
+  const calls = []; // callers of care packages still in the air, in call order
   // The audit's own team memory: last place each enemy was seen (kept 2 rounds).
   const memory = new Map();
   const remember = (state, team) => {
@@ -109,9 +126,13 @@ export function createAudit() {
           };
         }
         if (a.key === 'care') {
+          const S = state.map.size;
+          const ringInRange = [...streakTargets(state, u, 'care')].some((k) => insideZone(state, k % S, (k / S) | 0)
+            && insideNextZone(state, k % S, (k / S) | 0));
+          const n = reachable(state, u, moveOf(u) * 2).get(y * S + x);
           return () => {
             A.care++;
-            if ((!insideNextZone(state, x, y) && insideNextZone(state, u.x, u.y)) || dist(x, y, u.x, u.y) > 4) A.careBad++;
+            if ((!insideNextZone(state, x, y) && ringInRange) || !n) A.careBad++;
           };
         }
         return null;
@@ -141,6 +162,8 @@ export function createAudit() {
       const u = state.units[id];
       if (!standing(u) || state.isPit) return run();
       remember(state, u.team);
+      // The caller's squad gets a turn with its care package on the ground.
+      for (const w of watch.values()) if (w.kind === 'care' && w.team === u.team) w.acted = true;
       const S = state.map.size;
       const danger = dangerTiles(state);
       let dry = false, ring = false, safe = false;
@@ -173,12 +196,49 @@ export function createAudit() {
           && state.units[e.id].team !== state.units[e.by].team) strike.hit = true;
         if (e.type === 'uav') { A.uav++; if (!e.revealed.length) A.uavEmpty++; }
         if (e.type === 'claymore_trigger') placed.delete(e.claymoreId);
+        if (e.type === 'care_package_called') calls.push(e.id);
+        if (e.type === 'team_out') for (const w of watch.values()) if (w.kind === 'care' && w.team === e.team) w.out = true;
+        if (e.type === 'care_package') {
+          // Drops land in call order: the caller comes off the queue (works with 5.2.1 events too).
+          const by = calls.length ? calls.shift() : e.by;
+          A.careLanded++;
+          watch.set(e.crate.id, {
+            kind: 'care', team: e.team ?? state.units[by]?.team, by, round: state.round,
+            next: insideNextZone(state, e.crate.x, e.crate.y),
+          });
+        }
+        if (e.type === 'supply_drop' && e.crate.type === 'gold') { A.gold++; watch.set(e.crate.id, { kind: 'gold' }); }
+        if (e.type === 'crate_drop') { A.killDrop++; watch.set(e.crate.id, { kind: 'kill' }); }
+        if (e.type === 'crate' && watch.has(e.crate)) {
+          const w = watch.get(e.crate);
+          watch.delete(e.crate);
+          const picker = state.units[e.id];
+          if (w.kind === 'gold') A.goldTaken++;
+          else if (w.kind === 'kill') A.killDropTaken++;
+          else if (picker.team === w.team) {
+            A.careOwn++;
+            if (picker.id === w.by) A.careCaller++;
+            if (state.round - w.round <= 2) A.careFast++;
+          } else {
+            A.careEnemy++;
+            if (!w.acted) A.careSniped++;
+          }
+        }
         if (e.type === 'damage' && e.source === 'airstrike' && e.by !== null
           && state.units[e.id].team === state.units[e.by].team) A.airFriendly++;
       }
       flush();
     },
-    endMatch() { A.clayUntriggered += placed.size; placed.clear(); memory.clear(); },
+    endMatch() {
+      A.clayUntriggered += placed.size; placed.clear(); memory.clear();
+      for (const w of watch.values()) {
+        if (w.kind !== 'care') continue;
+        A.careNever++;
+        if (!w.next) A.careTide++;
+        if (w.out) A.careWiped++;
+      }
+      watch.clear(); calls.length = 0;
+    },
   };
 }
 

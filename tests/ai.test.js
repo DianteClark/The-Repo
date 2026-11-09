@@ -3,10 +3,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { act, insideZone, insideNextZone, createGame, endTeamTurn, activeTeams } from '../src/sim/game.js';
 import {
-  botTakeTurn, claymoreSpot, deployCoverSpot, sentrySpot, airstrikeSpot, chooseMove,
+  botTakeTurn, claymoreSpot, deployCoverSpot, sentrySpot, airstrikeSpot, chooseMove, careSpot, crateValue,
 } from '../src/sim/ai.js';
-import { teamSeesUnit, dist, coverVs } from '../src/sim/rules.js';
-import { arena, S, setCover } from './helpers.js';
+import { teamSeesUnit, dist, coverVs, reachable, moveOf, isWater, hitChance } from '../src/sim/rules.js';
+import { dropUnit } from '../src/sim/core.js';
+import { arena, S, setCover, cycleLog } from './helpers.js';
 
 const zone = (s, x, y, r, next = r, nx = x, ny = y) => Object.assign(s.zone, { x, y, r, next, nx, ny });
 const types = (evs) => evs.map((e) => e.type);
@@ -177,4 +178,134 @@ test('bots skip a claymore when nothing sensible is in reach, and every claymore
     assert.notEqual(s.winner, null);
   }
   void n; void act; void chooseMove;
+});
+
+// ---------- 5.3 care packages: call them where they can be reached, then go and get them ----------
+
+/** A landed care package belonging to `u`'s squad (as streaksStepStart leaves it). */
+const careAt = (s, u, x, y) => {
+  const c = { id: s.crates.length, x, y, type: 'care', taken: false, team: u.team, by: u.id };
+  s.crates.push(c);
+  return c;
+};
+
+test('care package: a bot claims its own care package on its first turn after it lands (open arena)', () => {
+  for (const [x, y] of [[20, 20], [14, 26], [30, 16]]) {
+    const { s, a } = arena({ me: [x, y, 'assault', { streaks: ['care', 'sentry', 'uav'] }], foes: [[42, 42], [1, 42]] });
+    zone(s, 22, 22, 20);
+    s.noises = [];
+    a.points = 9;
+    let called = null, claimed = -1;
+    for (let t = 0; t < 4 && claimed < 0; t++) {
+      for (const e of botTakeTurn(s, a.id)) {
+        if (e.type === 'care_package_called') called = e;
+        if (e.type === 'crate' && e.item === 'care') claimed = t;
+      }
+      assert.ok(called, `called on the first turn from ${x},${y}`);
+      cycleLog(s, a.team);
+    }
+    // Called where one move reaches it: picked up on the first turn after it lands.
+    assert.equal(claimed, 1, `claimed on turn ${claimed} (from ${x},${y}, called at ${called.x},${called.y})`);
+  }
+});
+
+test('care package: called on dry ground walkable within 2 moves, never across water', () => {
+  const { s, a } = arena({ me: [20, 20, 'assault', { streaks: ['care', 'sentry', 'uav'] }], foes: [[42, 42], [1, 42]] });
+  // The circle is east, across a channel: the far bank is in call range but not in walking range.
+  zone(s, 30, 20, 20, 13, 30, 20);
+  for (let y = 0; y < S; y++) for (let x = 22; x <= 27; x++) s.map.terrain[y * S + x] = 2;
+  s.noises = [];
+  const spot = careSpot(s, a);
+  assert.ok(spot);
+  assert.ok(!isWater(s.map, spot.x, spot.y) && spot.x < 22, `${spot.x},${spot.y}`);
+  assert.ok(insideNextZone(s, spot.x, spot.y));
+  assert.ok(reachable(s, a, moveOf(a) * 2).has(spot.y * S + spot.x));
+  // Caller standing outside the coming ring (dry for now): the package still goes inside it.
+  const o = arena({ me: [12, 20, 'assault', { streaks: ['care', 'sentry', 'uav'] }], foes: [[42, 42], [1, 42]] });
+  zone(o.s, 22, 20, 20, 7, 22, 20);
+  o.s.noises = [];
+  o.a.points = 9;
+  assert.ok(!insideNextZone(o.s, 12, 20));
+  const call = botTakeTurn(o.s, o.a.id).find((e) => e.type === 'care_package_called');
+  assert.ok(call && insideNextZone(o.s, call.x, call.y), JSON.stringify(call));
+  // In the tide itself the bot gets out first and holds the package.
+  zone(s, 40, 40, 6, 4);
+  a.points = 9;
+  const evs = botTakeTurn(s, a.id);
+  assert.ok(!evs.some((e) => e.type === 'care_package_called'), types(evs).join(','));
+});
+
+test('care package: no run into a crossfire for it at low HP; a lone distant enemy doesn\'t stop the grab', () => {
+  const setup = (foes) => {
+    const r = arena({ me: [20, 20, 'assault'], foes });
+    zone(r.s, 22, 22, 20);
+    r.a.items.medkit = 0;
+    return { ...r, c: careAt(r.s, r.a, 24, 20) };
+  };
+  // Three rifles with clear, good shots on the crate tile.
+  const x = setup([[24, 14], [30, 20], [24, 26]]);
+  x.a.hp = Math.ceil(x.a.maxHp * 0.35);
+  for (const e of x.es) {
+    assert.ok(teamSeesUnit(x.s, x.a.team, e));
+    assert.ok(hitChance(x.s, e, { ...x.a, x: 24, y: 20 }).chance >= 45);
+  }
+  botTakeTurn(x.s, x.a.id);
+  assert.ok(!x.c.taken && !(x.a.x === 24 && x.a.y === 20), `walked into the crossfire to ${x.a.x},${x.a.y}`);
+  // Two of them, still low: same answer.
+  const y = setup([[24, 14], [30, 20], [42, 42]]);
+  y.a.hp = Math.ceil(y.a.maxHp * 0.35);
+  botTakeTurn(y.s, y.a.id);
+  assert.ok(!y.c.taken, `low HP into two good shots at ${y.a.x},${y.a.y}`);
+  // One enemy in sight but well off: the package is worth the dash.
+  const z = setup([[20, 13], [42, 42]]);
+  assert.ok(teamSeesUnit(z.s, z.a.team, z.es[0]));
+  botTakeTurn(z.s, z.a.id);
+  assert.ok(z.c.taken, `left the package at ${z.a.x},${z.a.y}`);
+});
+
+test('care package: a squadmate claims it when the caller is downed', () => {
+  const { s, a, b } = arena({ mode: 'duos', me: [20, 20, 'assault'], mate: [14, 25, 'medic'], foes: [[42, 42], [1, 42]] });
+  zone(s, 22, 22, 20);
+  s.noises = [];
+  dropUnit(s, a, null, []);
+  assert.ok(a.downed);
+  const c = careAt(s, a, 24, 21);
+  let by = null;
+  for (let t = 0; t < 3 && !c.taken; t++) {
+    for (const e of botTakeTurn(s, b.id)) if (e.type === 'crate' && e.crate === c.id) by = e.id;
+    cycleLog(s, a.team);
+  }
+  assert.equal(by, b.id, `mate at ${b.x},${b.y}`);
+});
+
+test('care package: one claimer per squad; enemy packages are contested when seen', () => {
+  // The caller and its mate: only the closer one walks to it.
+  const { s, a, b } = arena({ mode: 'duos', me: [20, 20, 'assault'], mate: [30, 20, 'assault'], foes: [[42, 42], [1, 42]] });
+  zone(s, 22, 22, 20);
+  s.noises = [];
+  const c = careAt(s, a, 27, 20);
+  const evs = botTakeTurn(s, b.id);
+  assert.ok(c.taken && evs.some((e) => e.type === 'crate' && e.crate === c.id), 'the mate is closer: it takes it');
+  void a;
+  // An enemy squad's package in plain view, nobody guarding it: go and take it.
+  const q = arena({ me: [20, 20, 'assault'], foes: [[42, 42], [1, 42]] });
+  zone(q.s, 22, 22, 20);
+  q.s.noises = [];
+  const enemyPkg = careAt(q.s, q.es[0], 25, 22);
+  botTakeTurn(q.s, q.a.id);
+  assert.ok(enemyPkg.taken, `left the enemy package; at ${q.a.x},${q.a.y}`);
+});
+
+test('crate values: gold and care packages first; medkits when hurt, ammo when low', () => {
+  const { a } = arena({ me: [20, 20, 'assault'], foes: [[42, 42], [1, 42]] });
+  const v = (c) => crateValue(null, a, c);
+  assert.ok(v({ type: 'care' }) > v({ type: 'cache' }) && v({ type: 'gold', weapon: 'x' }) > v({ type: 'cache' }));
+  assert.ok(v({ type: 'cache' }) > v({ type: 'medkit' }) && v({ type: 'cache' }) > v({ type: 'ammo' }));
+  const healthy = v({ type: 'medkit' });
+  a.hp = 2; a.items.medkit = 0;
+  assert.ok(v({ type: 'medkit' }) > healthy + 5);
+  const full = v({ type: 'ammo' });
+  a.ammo = 0;
+  if (a.weapons) { a.weapons[0].spare = 0; a.weapons[0].ammo = 0; }
+  assert.ok(v({ type: 'ammo' }) > full + 5);
 });
