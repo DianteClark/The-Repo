@@ -9,11 +9,13 @@
 import { makeCode, normalizeCode, token } from './codes.js';
 import { openTransport, transportKind } from './transport.js';
 import { encode, decode, PROTO } from './wire.js';
+import { createLiveness, backoff, HEARTBEAT_MS, DEAD_MS, PROBE_MS } from './liveness.js';
+import { every } from './ticker.js';
 
+export { HEARTBEAT_MS, DEAD_MS };
 export const MAX_PLAYERS = 16;
-export const RECONNECT_MS = 60000;
-export const HEARTBEAT_MS = 2000;
-export const DEAD_MS = 9000;
+export const RECONNECT_MS = 120000; // the host holds a dropped player's slot this long (auto-overwatch meanwhile)
+export const CLIENT_GIVEUP_MS = 240000; // a client keeps trying to get back this long before giving up
 const TEAM_SIZE = { solos: 1, duos: 2, trios: 3, quads: 4 };
 
 /** Squad slots for a mode, matching the sim's team layout (16 players; trios: 5 trios + a lone wolf). */
@@ -50,7 +52,7 @@ const cleanProfile = (p = {}) => ({
  * Host a lobby. profile: {name, cls, tier, loadout, cosmetics}. settings: {mode, stage}.
  * Resolves once the code is registered with the broker (or loopback).
  */
-export async function hostSession({ profile, settings = {}, kind = transportKind(), code = null } = {}) {
+export async function hostSession({ profile, settings = {}, kind = transportKind(), code = null, liveness = {} } = {}) {
   const T = await openTransport(kind);
   let endpoint = null;
   for (let i = 0; i < 6 && !endpoint; i++) {
@@ -63,7 +65,9 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
   const conns = new Map(); // pid → conn
   const tokens = new Map(); // token → pid
   const banned = new Set();
-  const lastSeen = new Map();
+  const deadMs = liveness.deadMs ?? DEAD_MS;
+  const holdMs = liveness.holdMs ?? RECONNECT_MS;
+  const live = createLiveness({ deadMs });
   let nextPid = 1;
   let closed = false;
   let inMatch = false;
@@ -96,15 +100,10 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
     return -1;
   }
   function reflowSquads() {
-    // After a mode change: keep squads where they fit, re-seat the rest.
-    const sizes = squadSizes(st.mode);
-    const seen = new Map();
-    for (const p of players.values()) {
-      const c = seen.get(p.squad) || 0;
-      if (p.squad >= sizes.length || c >= sizes[p.squad]) p.squad = -1;
-      else seen.set(p.squad, c + 1);
-    }
-    for (const p of players.values()) if (p.squad < 0) p.squad = freeSquad();
+    // After a mode change: re-seat everyone in join order, filling squads that already have
+    // humans first, so friends end up together (Solos → Duos puts the first two in Squad 1).
+    for (const p of players.values()) p.squad = -1;
+    for (const p of players.values()) p.squad = freeSquad();
   }
 
   function attach(conn) {
@@ -113,26 +112,32 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
     conn.onMessage((raw) => {
       const m = decode(raw);
       if (!m || typeof m.t !== 'string') return;
-      if (pid) lastSeen.set(pid, Date.now());
+      if (pid) {
+        live.seen(pid);
+        // Silent for a while but the same connection is talking again: back in, no reconnect needed.
+        const sp = players.get(pid);
+        if (sp && !sp.connected && !sp.left && conns.get(pid) === conn) revive(pid);
+      }
       if (!pid) {
         if (m.t !== 'hello') return;
         clearTimeout(timeout);
         if (m.v !== PROTO) { conn.send(encode({ t: 'closed', reason: 'version', msg: 'This game is on a different version. Refresh both devices.' })); setTimeout(() => conn.close(), 200); return; }
         // Reconnect with a token?
         const back = m.token && tokens.get(m.token);
-        if (back && players.has(back)) {
+        if (back && players.has(back) && !players.get(back).left) {
           if (banned.has(back)) { conn.send(encode({ t: 'kicked', reason: 'You were removed from this lobby.' })); setTimeout(() => conn.close(), 200); return; }
           pid = back;
           const old = conns.get(pid);
           if (old && old !== conn) { conns.delete(pid); old.close(); }
           const p = players.get(pid);
-          p.connected = true; p.goneAt = 0;
+          const wasOut = !p.connected;
+          p.connected = true; p.goneAt = 0; p.expired = false;
           conns.set(pid, conn);
-          lastSeen.set(pid, Date.now());
+          live.seen(pid);
           conn.send(encode({ t: 'welcome', pid, token: m.token, lobby: publicLobby(), rejoin: true }));
           broadcastLobby();
           ev.emit('rejoin', pid);
-          ev.emit('status', `${p.name} reconnected`, 'ok');
+          if (wasOut) ev.emit('status', `${p.name} is back`, 'ok');
           return;
         }
         if (inMatch) { conn.send(encode({ t: 'closed', reason: 'started', msg: 'That match has already started.' })); setTimeout(() => conn.close(), 200); return; }
@@ -144,7 +149,7 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
         tokens.set(tok, pid);
         players.set(pid, { pid, ...cleanProfile(m.profile), ready: false, squad, connected: true, isHost: false, token: tok });
         conns.set(pid, conn);
-        lastSeen.set(pid, Date.now());
+        live.seen(pid);
         conn.send(encode({ t: 'welcome', pid, token: tok, lobby: publicLobby() }));
         broadcastLobby();
         ev.emit('join', pid);
@@ -183,41 +188,76 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
       if (inMatch) { p.connected = false; p.goneAt = Date.now() - RECONNECT_MS; p.left = true; ev.emit('gone', pid, why); }
       else players.delete(pid);
       ev.emit('status', `${p.name} ${why === 'kicked' ? 'was removed' : 'left'}`, 'warn');
-    } else {
+    } else if (p.connected) {
       p.connected = false;
       p.goneAt = Date.now();
-      ev.emit('status', `${p.name} lost connection. Holding their slot for 60 s.`, 'warn');
+      ev.emit('status', `${p.name} lost connection. Holding their slot for ${Math.round(holdMs / 1000)} s.`, 'warn');
       ev.emit('disconnect', pid);
     }
     broadcastLobby();
   }
 
+  /** Nothing heard for deadMs: mark them away (their unit auto-overwatches) but keep the connection
+   *  open — a phone that was only backgrounded resumes on the same channel. */
+  function softDrop(pid) {
+    const p = players.get(pid);
+    if (!p || !p.connected) return;
+    p.connected = false;
+    p.goneAt = Date.now();
+    ev.emit('status', `${p.name} is not responding. Holding their slot for ${Math.round(holdMs / 1000)} s.`, 'warn');
+    ev.emit('disconnect', pid);
+    broadcastLobby();
+  }
+  function revive(pid) {
+    const p = players.get(pid);
+    if (!p) return;
+    p.connected = true; p.goneAt = 0; p.expired = false;
+    broadcastLobby();
+    ev.emit('rejoin', pid);
+    ev.emit('status', `${p.name} is back`, 'ok');
+  }
+
   endpoint.onConnection(attach);
 
-  const hb = setInterval(() => {
+  // Heartbeat: a worker-driven tick (not clamped like main-thread timers in a background tab).
+  // If OUR tick was late (host page frozen / CPU-starved), nobody gets blamed for the silence.
+  const beat = () => {
+    if (closed) return;
+    const { frozen } = live.tick();
     const now = Date.now();
-    for (const [pid, c] of conns) {
+    for (const [pid, c] of [...conns]) {
       c.send(encode({ t: 'ping', ts: now }));
-      if (now - (lastSeen.get(pid) || now) > DEAD_MS) drop(pid, 'lost', false);
+      const p = players.get(pid);
+      if (!p || frozen) continue;
+      if (p.connected && live.dead(pid)) softDrop(pid);
+      else if (!p.connected && live.silence(pid) > deadMs + holdMs) { conns.delete(pid); c.close(); }
     }
     for (const p of [...players.values()]) {
       if (p.isHost || p.connected || !p.goneAt) continue;
-      if (now - p.goneAt >= RECONNECT_MS) {
+      if (now - p.goneAt >= holdMs) {
         if (inMatch) { if (!p.expired) { p.expired = true; ev.emit('gone', p.pid, 'timeout'); } }
-        else { players.delete(p.pid); broadcastLobby(); }
+        else { players.delete(p.pid); conns.get(p.pid)?.close(); conns.delete(p.pid); broadcastLobby(); }
       }
     }
-  }, HEARTBEAT_MS);
+  };
+  const stopBeat = every(liveness.heartbeatMs ?? HEARTBEAT_MS, beat);
+  const onVisible = () => { if (globalThis.document?.visibilityState !== 'hidden') { live.grace(); beat(); } };
+  globalThis.document?.addEventListener?.('visibilitychange', onVisible);
+  globalThis.addEventListener?.('pageshow', onVisible);
 
   const close = (reason = 'host_left', msg = 'The host closed the game.') => {
     if (closed) return;
     closed = true;
-    clearInterval(hb);
+    stopBeat();
+    globalThis.document?.removeEventListener?.('visibilitychange', onVisible);
+    globalThis.removeEventListener?.('pageshow', onVisible);
+    globalThis.removeEventListener?.('pagehide', onUnload);
     for (const [pid, c] of conns) { c.send(encode({ t: 'closed', reason, msg })); setTimeout(() => c.close(), 120); void pid; }
     setTimeout(() => endpoint.close(), 200);
     ev.emit('closed', reason);
   };
-  const onUnload = () => close('host_left', 'The host left the game.');
+  // A real unload ends the game; a page put in the back/forward cache (persisted) may come back.
+  const onUnload = (e) => { if (!e?.persisted) close('host_left', 'The host left the game.'); };
   globalThis.addEventListener?.('pagehide', onUnload);
 
   const api = {
@@ -271,7 +311,11 @@ export async function hostSession({ profile, settings = {}, kind = transportKind
     /** Mark the lobby as in a match: joins close, reconnects keep working. */
     beginMatch() { inMatch = true; broadcastLobby(); },
     endMatch() { inMatch = false; for (const p of players.values()) { if (!p.isHost) p.ready = false; } for (const [pid, p] of players) if (!p.connected && !p.isHost) players.delete(pid); broadcastLobby(); },
-    close(reason, msg) { globalThis.removeEventListener?.('pagehide', onUnload); close(reason, msg); },
+    close(reason, msg) { close(reason, msg); },
+    /** Test hook: the host disappears without a goodbye (crash, phone died). */
+    _vanish() { closed = true; stopBeat(); endpoint.close(); },
+    /** Test hook: how long since pid was last heard from. */
+    _silence: (pid) => live.silence(pid),
   };
   return api;
 }
@@ -283,18 +327,32 @@ function saveSession(s) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringi
 export function savedSession() { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; } }
 export function clearSavedSession() { try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ } }
 
-/** Join a lobby by code. Resolves after the host's welcome. */
-export async function joinSession({ code, profile, kind = transportKind(), token: tok = null } = {}) {
+/**
+ * Join a lobby by code. Resolves after the host's welcome.
+ * Robustness: any message is proof of life; after DEAD_MS of silence, or a closed channel, the
+ * client rejoins with its token automatically (backoff, no user action) for CLIENT_GIVEUP_MS.
+ * Coming back to the page (visibilitychange / pageshow / focus) or the network (online) probes the
+ * link at once and reconnects if it is dead. Events: lobby, message, status(msg, level),
+ * connection(bool), reconnecting({since, attempt}), closed({reason, msg, retry?}).
+ */
+export async function joinSession({ code, profile, kind = transportKind(), token: tok = null, liveness = {} } = {}) {
   const c = normalizeCode(code);
   if (!c) throw Object.assign(new Error('That code is not valid'), { code: 'bad_code' });
   const T = await openTransport(kind);
   const ev = emitter();
+  const deadMs = liveness.deadMs ?? DEAD_MS;
+  const probeMs = liveness.probeMs ?? PROBE_MS;
+  const giveUpMs = liveness.giveUpMs ?? CLIENT_GIVEUP_MS;
+  const live = createLiveness({ deadMs });
   let conn = null;
   let pid = null;
   let lobby = null;
   let closed = false;
-  let lastMsg = Date.now();
   let reconnecting = false;
+  let reconnectSince = 0;
+  let attempt = 0;
+  let probe = null; // {until, since}: after a resume, wait this long for any message
+  let wakeNap = null;
   let prof = cleanProfile(profile);
   let myToken = tok || (savedSession()?.code === c ? savedSession().token : null);
   // Match messages that arrive before a match controller subscribes (from 'start' on) are kept here.
@@ -302,32 +360,43 @@ export async function joinSession({ code, profile, kind = transportKind(), token
   let backlog = [];
 
   const send = (msg) => (conn && !conn.closed ? conn.send(encode(msg)) : false);
+  const FATAL = new Set(['kicked', 'started', 'version', 'full', 'host_left', 'closed']);
 
   async function connectOnce() {
     const cn = await T.connect(c);
-    const welcome = new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(Object.assign(new Error('The host did not answer'), { code: 'timeout' })), 8000);
-      cn.onMessage((raw) => {
-        const m = decode(raw);
-        if (!m) return;
-        lastMsg = Date.now();
-        if (m.t === 'welcome') { clearTimeout(t); resolve(m); return; }
-        if (m.t === 'closed' || m.t === 'kicked') { clearTimeout(t); reject(Object.assign(new Error(m.msg || m.reason), { code: m.t === 'kicked' ? 'kicked' : m.reason })); }
-        handle(m);
+    let ok = false;
+    try {
+      const welcome = new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(Object.assign(new Error('The host did not answer'), { code: 'timeout' })), 10000);
+        cn.onMessage((raw) => {
+          const m = decode(raw);
+          if (!m) return;
+          if (conn && conn !== cn && ok) return; // superseded
+          live.seen('host');
+          if (probe) probe = null;
+          if (m.t === 'welcome') { clearTimeout(t); resolve(m); return; }
+          if (m.t === 'closed' || m.t === 'kicked') { clearTimeout(t); reject(Object.assign(new Error(m.msg || m.reason), { code: m.t === 'kicked' ? 'kicked' : m.reason || 'closed' })); }
+          handle(m);
+        });
+        cn.onClose(() => { clearTimeout(t); reject(Object.assign(new Error('Connection closed'), { code: 'network' })); });
       });
-      cn.onClose(() => { clearTimeout(t); reject(Object.assign(new Error('Connection closed'), { code: 'network' })); });
-    });
-    cn.send(encode({ t: 'hello', v: PROTO, profile: prof, token: myToken }));
-    const w = await welcome;
-    conn = cn;
-    pid = w.pid;
-    myToken = w.token;
-    lobby = w.lobby;
-    saveSession({ code: c, token: myToken, pid, at: Date.now() });
-    cn.onClose(() => { if (conn === cn) lost(); });
-    ev.emit('lobby', lobby);
-    if (w.rejoin) ev.emit('rejoin', w);
-    return w;
+      cn.send(encode({ t: 'hello', v: PROTO, profile: prof, token: myToken }));
+      const w = await welcome;
+      ok = true;
+      const old = conn;
+      conn = cn;
+      if (old && old !== cn) old.close();
+      pid = w.pid;
+      myToken = w.token;
+      lobby = w.lobby;
+      saveSession({ code: c, token: myToken, pid, at: Date.now() });
+      cn.onClose(() => { if (conn === cn) lost('closed'); });
+      ev.emit('lobby', lobby);
+      if (w.rejoin) ev.emit('rejoin', w);
+      return w;
+    } finally {
+      if (!ok) cn.close();
+    }
   }
 
   function handle(m) {
@@ -335,21 +404,40 @@ export async function joinSession({ code, profile, kind = transportKind(), token
       case 'ping': send({ t: 'pong', ts: m.ts }); return;
       case 'pong': return;
       case 'lobby': lobby = m.lobby; ev.emit('lobby', lobby); return;
-      case 'kicked': closed = true; clearSavedSession(); ev.emit('closed', { reason: 'kicked', msg: m.reason || 'You were removed from the lobby.' }); conn?.close(); return;
-      case 'closed': closed = true; clearSavedSession(); ev.emit('closed', { reason: m.reason || 'host_left', msg: m.msg || 'The host left the game.' }); conn?.close(); return;
+      case 'kicked': end({ reason: 'kicked', msg: m.reason || 'You were removed from the lobby.' }, true); return;
+      case 'closed': end({ reason: m.reason || 'host_left', msg: m.msg || 'The host left the game.' }, true); return;
       default:
         if (backlogOn) { if (m.t === 'start') backlog = []; backlog.push(m); }
         ev.emit('message', m);
     }
   }
 
-  async function lost() {
+  function end(info, forget) {
+    if (closed) return;
+    closed = true;
+    stopBeat();
+    unlisten();
+    if (forget) clearSavedSession();
+    const cn = conn; conn = null;
+    cn?.close();
+    T.dispose?.();
+    ev.emit('closed', info);
+  }
+
+  const nap = (ms) => new Promise((r) => { const t = setTimeout(() => { wakeNap = null; r(); }, ms); wakeNap = () => { clearTimeout(t); wakeNap = null; r(); }; });
+
+  async function lost(why = 'silent') {
     if (closed || reconnecting) return;
     reconnecting = true;
-    const since = Date.now();
+    reconnectSince = Date.now();
+    attempt = 0;
+    probe = null;
+    const old = conn; conn = null;
+    old?.close();
     ev.emit('status', 'Connection lost. Reconnecting…', 'warn');
     ev.emit('connection', false);
-    while (!closed && Date.now() - since < RECONNECT_MS) {
+    ev.emit('reconnecting', { since: reconnectSince, attempt, why });
+    while (!closed && Date.now() - reconnectSince < giveUpMs) {
       try {
         await connectOnce();
         reconnecting = false;
@@ -357,23 +445,56 @@ export async function joinSession({ code, profile, kind = transportKind(), token
         ev.emit('connection', true);
         return;
       } catch (e) {
-        if (e.code === 'kicked' || e.code === 'started' || e.code === 'version' || e.code === 'full') { closed = true; ev.emit('closed', { reason: e.code, msg: e.message }); return; }
-        await new Promise((r) => setTimeout(r, 2000));
+        if (FATAL.has(e.code)) { reconnecting = false; end({ reason: e.code, msg: e.message }, true); return; }
+        attempt++;
+        ev.emit('reconnecting', { since: reconnectSince, attempt, why: e.code || 'network' });
+        await nap(backoff(attempt));
       }
     }
     reconnecting = false;
-    if (!closed) {
-      closed = true;
-      ev.emit('closed', { reason: 'lost', msg: 'Lost connection to the host.' });
-    }
+    // Keep the saved token: the lobby offers Retry, and a reload rejoins the same slot.
+    end({ reason: 'lost', msg: 'Lost connection to the host.', retry: true }, false);
   }
 
   await connectOnce();
 
-  const hb = setInterval(() => {
-    if (closed) { clearInterval(hb); return; }
-    if (!reconnecting && Date.now() - lastMsg > DEAD_MS) { const old = conn; conn = null; old?.close(); lost(); }
-  }, 1000);
+  // Keepalive both ways (also keeps the carrier's NAT mapping warm), on a worker-driven tick.
+  const beat = () => {
+    if (closed) return;
+    const { frozen } = live.tick();
+    if (reconnecting) return;
+    send({ t: 'ping', ts: Date.now() });
+    const now = Date.now();
+    if (frozen) { startProbe(); return; } // our own page was asleep: check before blaming the host
+    if (probe && now > probe.until) { lost('probe'); return; }
+    if (live.dead('host')) lost('silent');
+  };
+  function startProbe() {
+    if (closed || reconnecting) return;
+    if (!conn || conn.closed) { lost('closed'); return; }
+    probe = { until: Date.now() + probeMs };
+    live.grace(); // the silence was ours
+    send({ t: 'ping', ts: Date.now() });
+  }
+  const stopBeat = every(liveness.heartbeatMs ?? HEARTBEAT_MS, beat);
+  const wake = () => {
+    if (closed) return;
+    if (globalThis.document?.visibilityState === 'hidden') return;
+    if (reconnecting) { wakeNap?.(); return; } // retry right now
+    startProbe();
+  };
+  const onOnline = () => { if (reconnecting) wakeNap?.(); else startProbe(); };
+  const doc = globalThis.document;
+  doc?.addEventListener?.('visibilitychange', wake);
+  globalThis.addEventListener?.('pageshow', wake);
+  globalThis.addEventListener?.('focus', wake);
+  globalThis.addEventListener?.('online', onOnline);
+  function unlisten() {
+    doc?.removeEventListener?.('visibilitychange', wake);
+    globalThis.removeEventListener?.('pageshow', wake);
+    globalThis.removeEventListener?.('focus', wake);
+    globalThis.removeEventListener?.('online', onOnline);
+  }
 
   return {
     kind: 'client',
@@ -383,6 +504,8 @@ export async function joinSession({ code, profile, kind = transportKind(), token
     get lobby() { return lobby; },
     get closed() { return closed; },
     get connected() { return !!conn && !conn.closed && !reconnecting; },
+    get reconnecting() { return reconnecting ? { since: reconnectSince, attempt } : null; },
+    get path() { return conn?.path || null; },
     on: ev.on,
     onMessage: (fn) => ev.on('message', fn),
     send,
@@ -392,16 +515,25 @@ export async function joinSession({ code, profile, kind = transportKind(), token
     setReady: (on) => send({ t: 'ready', on: !!on }),
     setSquad: (squad) => send({ t: 'squad', squad }),
     updateProfile(p) { prof = cleanProfile({ ...prof, ...p }); send({ t: 'profile', profile: prof }); },
+    /** Try to get back now (skips the current backoff wait). */
+    retryNow() { if (reconnecting) wakeNap?.(); else startProbe(); },
     leave() {
       if (closed) return;
-      closed = true;
-      clearInterval(hb);
       send({ t: 'leave' });
+      const cn = conn;
+      closed = true;
+      stopBeat();
+      unlisten();
       clearSavedSession();
-      setTimeout(() => conn?.close(), 120);
+      conn = null;
+      setTimeout(() => { cn?.close(); T.dispose?.(); }, 120);
       ev.emit('closed', { reason: 'left', msg: 'You left the game.' });
     },
     /** Test hook: drop the connection as if the network failed (reconnect kicks in). */
-    _simulateDrop() { const old = conn; conn = null; old?.close(); lost(); },
+    _simulateDrop() { lost('test'); },
+    /** Test hook: the link goes silent (no close) for ms, both ways, like a frozen/backgrounded phone. */
+    _simulateStall(ms) { const cn = conn; if (!cn) return; cn.blackhole = true; setTimeout(() => { cn.blackhole = false; }, ms); },
+    /** Test hook: pretend our page was frozen and just woke up. */
+    _simulateResume() { startProbe(); },
   };
 }

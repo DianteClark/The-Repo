@@ -21,6 +21,7 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
   const clients = new Map(); // pid → {unitId, team, mem, hash, scope}
   const turns = new Map(); // unitId → open turn
   const placeByTeam = new Map();
+  const retired = new Map(); // pid → client entry, for players whose hold expired (a bot plays them meanwhile)
   let state = null;
   let myUnitId = -1;
   let myTeam = -1;
@@ -130,10 +131,40 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
   };
   const names = () => { const n = {}; for (const [id, h] of humans) n[id] = h.name; return n; };
 
+  /**
+   * The map is ~117 KB per snapshot and rarely changes: after a full one, send only the map
+   * layers that changed since what this client last got (snap.mapPartial = true; the client merges).
+   */
+  function mapDelta(holder, snap) {
+    const m = snap?.map;
+    if (!m || typeof m !== 'object') return snap;
+    const sent = holder.mapSent || (holder.mapSent = {});
+    const out = {};
+    for (const k of Object.keys(m)) {
+      const v = m[k], prev = sent[k];
+      let same = false;
+      if (ArrayBuffer.isView(v) && ArrayBuffer.isView(prev) && prev.length === v.length && prev.constructor === v.constructor) {
+        same = true;
+        for (let i = 0; i < v.length; i++) if (v[i] !== prev[i]) { same = false; break; }
+      } else if (!ArrayBuffer.isView(v) && !ArrayBuffer.isView(prev) && k in sent) {
+        try { same = JSON.stringify(v) === JSON.stringify(prev); } catch { same = false; }
+      }
+      if (same) continue;
+      out[k] = v;
+      sent[k] = ArrayBuffer.isView(v) ? v.slice() : (v && typeof v === 'object' ? structuredClone(v) : v);
+    }
+    return { ...snap, map: out, mapPartial: true };
+  }
+  const fullMapSent = (holder, snap) => {
+    holder.mapSent = {};
+    for (const [k, v] of Object.entries(snap?.map || {})) holder.mapSent[k] = ArrayBuffer.isView(v) ? v.slice() : (v && typeof v === 'object' ? structuredClone(v) : v);
+  };
+
   function startMsg(pid) {
     const c = clients.get(pid);
     c.mem = createTeamMemory(state, c.team); // a fresh mirror starts from a fresh memory
     const { snap } = teamView(state, [], c.mem, { myUnitId: c.unitId });
+    fullMapSent(c, snap);
     const t = turns.get(c.unitId);
     const turnOpen = !!(t && !t.done && !t.autoing); // a resync tells the client whether its turn is still open
     return { t: 'start', unitId: c.unitId, team: c.team, snap, cosmetics: cosmetics(), names: names(), turnMs, mode: state.mode, stage: state.stage, turnOpen };
@@ -146,14 +177,15 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
       if (scope) {
         if (c.scope?.id !== scope.id) continue;
         const r = teamView(scope.state, events, c.scope.mem, { myUnitId: c.scope.unitId });
-        net.send(pid, { t: 'batch', scope: scope.id, events: r.events, snap: r.snap });
+        net.send(pid, { t: 'batch', scope: scope.id, events: r.events, snap: c.scope.mapSent ? mapDelta(c.scope, r.snap) : r.snap });
+        if (!c.scope.mapSent) fullMapSent(c.scope, r.snap);
         continue;
       }
       const r = teamView(state, events, c.mem, { myUnitId: c.unitId });
       const hash = JSON.stringify([r.snap.units, r.snap.crates, r.snap.zone, r.snap.round]);
       if (!r.events.length && hash === c.hash) continue;
       c.hash = hash;
-      net.send(pid, { t: 'batch', events: r.events, snap: r.snap });
+      net.send(pid, { t: 'batch', events: r.events, snap: mapDelta(c, r.snap) });
     }
   }
 
@@ -499,14 +531,28 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
         default:
       }
     }));
-    offs.push(net.on('rejoin', (pid) => { if (clients.has(pid) && running) sendResync(pid); }));
+    offs.push(net.on('rejoin', (pid) => {
+      // Back after the hold expired and a bot took over: hand the unit back if it is still in the game.
+      if (!clients.has(pid) && retired.has(pid)) {
+        const c = retired.get(pid);
+        retired.delete(pid);
+        const u = state.units[c.unitId];
+        if (u && u.alive) {
+          humans.set(c.unitId, c.human);
+          clients.set(pid, c);
+          hook('onStatus', `${c.human.name} is back in control`, 'ok');
+        }
+      }
+      if (clients.has(pid) && running) sendResync(pid);
+    }));
     offs.push(net.on('disconnect', (pid) => {
       const name = net.player(pid)?.name || 'A player';
       hook('onStatus', `${name} disconnected. Their unit holds overwatch for up to 60 s.`, 'warn');
     }));
-    offs.push(net.on('gone', (pid) => {
+    offs.push(net.on('gone', (pid, why) => {
       const c = clients.get(pid);
       if (!c) return;
+      if (why === 'timeout') retired.set(pid, { ...c, human: humans.get(c.unitId) });
       humans.delete(c.unitId);
       clients.delete(pid);
       hook('onStatus', `${net.player(pid)?.name || 'A player'} left. A bot takes over.`, 'warn');
@@ -610,7 +656,8 @@ export function createAuthority(kind, { G, AI, R, sfx, ui = {}, opts = {}, net =
       for (const t of [...turns.values()]) { t.done = true; t.resolve('left'); }
       turns.clear();
       for (const off of offs) { try { off(); } catch { /* ignore */ } }
-      if (net && kind === 'host') net.close?.('host_left', 'The host left the match.');
+      // Mid-match the host leaving ends the game for everyone; after the end the lobby lives on.
+      if (net && kind === 'host' && !over) net.close?.('host_left', 'The host left the match.');
       endResolve?.(summary || { reason, place: null, winner: state?.winner ?? null });
     },
     /** Debug/test helpers */

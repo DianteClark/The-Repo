@@ -336,12 +336,8 @@ async function openOnline(kind, code = null) {
       card: P.equippedCard(), emblem: P.equippedEmblem(), cosmetics: cosmeticsFor(l),
     };
   };
-  const close = () => {
-    try { lobby?.destroy?.(); } catch { /* ignore */ }
-    lobby = null;
-    root.classList.add('hidden'); root.innerHTML = '';
-    document.body.classList.remove('online-open');
-  };
+  const close = () => exitOnline();
+  keepAwake(); // phones must not sleep while friends join (a sleeping host drops the lobby)
   try {
     if (lobby && typeof lobby.showHost === 'function') {
       if (kind === 'join') lobby.showJoin?.(code); else lobby.showHost();
@@ -364,6 +360,27 @@ async function openOnline(kind, code = null) {
     close();
     H.toast('Could not open the online lobby.', 'error', 'globe');
   }
+}
+
+/** Leave online play for good: close the session (leave / close the lobby), destroy the lobby UI,
+ *  restore the hub (menu, music, wake lock). Safe to call from any online screen, twice. */
+function teardownOnline() {
+  const l = lobby || onlineCfg?.lobby || null;
+  lobby = null;
+  onlineCfg = null;
+  try { l?.leave?.(); } catch (e) { warnOnce('online leave', e); }
+  try { l?.destroy?.(); } catch (e) { warnOnce('online destroy', e); }
+  const root = $('onlineRoot');
+  root.classList.add('hidden'); root.innerHTML = '';
+  document.body.classList.remove('online-open');
+  allowSleep();
+}
+function exitOnline() {
+  const inMatch = !!state || !$('hud').classList.contains('hidden');
+  if (inMatch) { toMenu(null, { toHub: true }); return; }
+  teardownOnline();
+  menu.showMenu(false);
+  if (lastHubPage === 'store') sfx.startStoreMusic(); else sfx.startMenuMusic();
 }
 
 /** Cosmetics for the renderer: equipped items + the weapon's camo. */
@@ -490,7 +507,7 @@ $('endShopBtn').onclick = () => { sfx.uiClick(); toMenu('store'); };
 $('tuOk').onclick = () => { sfx.uiClick(); closeTierUp(); };
 $('pSettings').onclick = () => { sfx.uiClick(); openSheet('settingsSheet'); };
 $('pHow').onclick = () => { sfx.uiClick(); openSheet('howSheet'); };
-$('pQuit').onclick = () => { sfx.uiClick(); closeAllSheets(); toMenu(); };
+$('pQuit').onclick = () => { sfx.uiClick(); closeAllSheets(); toMenu(null, { toHub: !!onlineCfg }); };
 onSheetClose('pauseSheet', () => resumeTimer());
 
 function focusMe() {
@@ -621,7 +638,7 @@ function resetMatchUi() {
   $('specBar').classList.add('hidden');
   $('skipBtn').disabled = false;
   $('engageInfo').classList.add('hidden');
-  $('netStatus').classList.add('hidden');
+  stopNetBanner();
   reviveSig = '';
   Rcall('setReviveMarkers', null);
   coverFadeOn = true; syncCoverFade(true); // force the fade off
@@ -637,10 +654,11 @@ function leaveMatch() {
   if (c) { try { c.leave(); } catch (e) { warnOnce('leave', e); } }
 }
 
-function toMenu(page = null) {
+function toMenu(page = null, { toHub = false } = {}) {
   if (stats && !stats.recorded && playerPlace) recordCareer(playerPlace); // left after being knocked out
   gameToken++;
-  leaveMatch();
+  stopNetBanner();
+  leaveMatch(); // online: leaving mid-match closes the session; after the end it is kept for the lobby
   starting = false;
   state = null;
   stats = null;
@@ -651,15 +669,17 @@ function toMenu(page = null) {
   $('hud').classList.add('hidden');
   document.body.classList.add('in-menu');
   document.body.classList.remove('in-game');
-  if (onlineCfg?.lobby && typeof onlineCfg.lobby.returnToLobby === 'function' && !page) {
+  if (onlineCfg?.lobby && typeof onlineCfg.lobby.returnToLobby === 'function' && !page && !toHub) {
     // Online: back to the same lobby (same code, same squad).
     const l = onlineCfg.lobby;
     onlineCfg = null;
     menu.showMenu(false);
     $('onlineRoot').classList.remove('hidden');
     document.body.classList.add('online-open');
+    keepAwake();
     try { l.returnToLobby(); } catch (e) { warnOnce('returnToLobby', e); }
   } else {
+    if (onlineCfg || lobby) teardownOnline(); // to the hub/store/barracks: online play ends cleanly
     onlineCfg = null;
     menu.showMenu(false);
     if (page) menu.setPage(page);
@@ -800,14 +820,41 @@ function matchHooks(token) {
     onPit: guard((pt) => onPit(pt)),
     onMatchEnd: guard((sum) => onMatchEnd(sum, token)),
     onStatus: guard((msg, level) => H.toast(String(msg), level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'ok' ? 'loot' : 'info', level === 'warn' ? 'warn' : 'link')),
-    onConnection: guard((connected) => {
-      const el = $('netStatus');
-      el.classList.toggle('hidden', !!connected);
-      el.innerHTML = connected ? '' : `${ICON.wifi}<b>Reconnecting…</b><small>Your unit holds overwatch for up to 60 s</small>`;
-    }),
+    onConnection: guard((connected) => { if (connected) stopNetBanner(); else showNetBanner(); }),
     onState: guard(() => { queueHud(); }),
   };
 }
+
+// ----- ONLINE CONNECTION BANNER: "Reconnecting… 12s" with Retry / Leave (client side).
+let netBannerTimer = 0;
+function stopNetBanner() {
+  clearInterval(netBannerTimer); netBannerTimer = 0;
+  const el = $('netStatus');
+  el.classList.add('hidden'); el.innerHTML = '';
+}
+function showNetBanner() {
+  const el = $('netStatus');
+  const since = onlineCfg?.net?.reconnecting?.since || Date.now();
+  el.innerHTML = `${ICON.wifi}<div class="ns-t"><b>Reconnecting… <span data-s>0s</span></b><small>Your unit holds overwatch meanwhile</small></div>`
+    + '<button class="ns-b" data-net="retry">Retry</button><button class="ns-b ghost" data-net="leave">Leave</button>';
+  el.classList.remove('hidden');
+  const upd = () => {
+    const s = el.querySelector('[data-s]');
+    if (!s) return;
+    const r = onlineCfg?.net?.reconnecting;
+    s.textContent = `${Math.max(0, Math.round((Date.now() - (r?.since || since)) / 1000))}s`;
+  };
+  upd();
+  clearInterval(netBannerTimer);
+  netBannerTimer = setInterval(upd, 1000);
+}
+$('netStatus').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-net]');
+  if (!b) return;
+  sfx.uiClick();
+  if (b.dataset.net === 'retry') { onlineCfg?.net?.retryNow?.(); H.toast('Retrying…', 'info', 'link'); }
+  else exitOnline();
+});
 
 // ----- STAGE WHEEL: the reel lands on the stage the match seed picked (same for every player).
 
@@ -1048,6 +1095,10 @@ function openPause() {
   const solo = ctl?.kind !== 'host' && !onlineCfg;
   const paused = turnCtx && solo && ctl?.pause?.();
   $('pauseNote').textContent = turnCtx ? (paused ? 'Your turn timer is paused.' : 'Online matches keep running: your timer is still counting.') : 'The match continues in the background.';
+  const online = !!onlineCfg;
+  $('pQuit').textContent = !online ? 'Leave match' : ctl?.kind === 'host' ? 'End match & leave to hub' : 'Leave to hub';
+  if (online && ctl?.kind === 'host') $('pauseNote').textContent += ' Leaving ends the match for everyone.';
+  else if (online) $('pauseNote').textContent += ' Leaving hands your unit to a bot.';
   const st = curStage();
   $('pauseStage').innerHTML = st ? `<span class="sd-ic">${ICON[st.icon] || ICON.stage}</span><div><b>${esc(st.name)}</b><p>${esc(st.twist)}</p></div>` : '';
   if (turnCtx && paused) turnCtx.paused = performance.now();
@@ -2296,6 +2347,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.key;
   if (k === 'Escape') {
     if (closeTopSheet()) return;
+    if (!$('onlineRoot').classList.contains('hidden')) { e.preventDefault(); if (!lobby?.back?.()) exitOnline(); return; }
     if (!$('tierUp').classList.contains('hidden')) { closeTierUp(); return; }
     if (introCtx) { introCtx.skip(); return; }
     if (state && !$('hud').classList.contains('hidden') && $('endScreen').classList.contains('hidden')) {
@@ -3490,7 +3542,8 @@ if (DEBUG) {
       return 'waiting';
     },
     fastForward: () => { ctl?.fastForward?.(); fastForward = true; },
-    netDrop: () => { const n = onlineCfg?.net; if (!n?._simulateDrop) return 'no net'; n._simulateDrop(); return 'dropped'; },
+    netStall: (ms = 20000) => { const n = onlineCfg?.net || lobby?.session; if (!n?._simulateStall) return 'no net'; n._simulateStall(ms); return 'stalled'; },
+    netDrop: () => { const n = onlineCfg?.net || lobby?.session; if (!n?._simulateDrop) return 'no net'; n._simulateDrop(); return 'dropped'; },
     get ctl() { return ctl; },
     tracker,
     progress: P,

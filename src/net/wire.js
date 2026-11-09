@@ -53,4 +53,4 @@ export function decode(v) {
   return o;
 }
 
-export const PROTO = 5; // bump on any breaking wire change
+export const PROTO = 6; // 6: raw serialization + own framing (frame.js), partial map snapshots; // bump on any breaking wire change

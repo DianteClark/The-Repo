@@ -88,7 +88,10 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       pre: () => {
         const wasHidden = new Set(target.units.filter((u) => u.hidden).map((u) => u.id));
         const crates = new Set((target.crates || []).map((c) => c.id));
-        if (m.snap) assignInPlace(target, m.snap);
+        if (m.snap) {
+          // Partial map (only the layers that changed): merge them into the mirror's map.
+          if (m.snap.mapPartial) { const { mapPartial, ...rest } = m.snap; void mapPartial; if (!target.map) delete rest.map; assignInPlace(target, rest.map ? rest : { ...rest, map: target.map }); } else assignInPlace(target, m.snap);
+        }
         if (view.state !== target) return;
         // Units that came into view without an event moving them: put them where they are now,
         // so the renderer's fog reveals them exactly when my squad's view reaches them.
@@ -234,7 +237,8 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
   const backlog = net.takeBacklog?.() || [];
   offs.push(net.onMessage(onMessage));
   offs.push(() => net.resumeBacklog?.());
-  offs.push(net.on('status', (msg, level) => hook('onStatus', msg, level)));
+  // The reconnect banner (onConnection) and "Back in the match" (resync) say these better than a toast.
+  offs.push(net.on('status', (msg, level) => { if (/^(Reconnected|Connection lost\. Reconnecting)/.test(msg)) return; hook('onStatus', msg, level); }));
   offs.push(net.on('connection', (on) => { hook('onConnection', on); if (on) net.send({ t: 'resync' }); }));
   offs.push(net.on('closed', (info) => {
     if (over || stopped) return;
@@ -320,7 +324,8 @@ export function createRemote({ R, sfx, ui = {}, opts = {}, net }) {
       clearInterval(timer);
       player.stop();
       for (const off of offs) { try { off(); } catch { /* ignore */ } }
-      net.leave?.();
+      // Mid-match: leaving ends my session. After the end: keep it, the lobby takes over (same squad, same code).
+      if (!over) net.leave?.();
       endResolve?.(summary || { reason: 'left', place: null });
     },
     _debug: { player, scopes, get mirror() { return mirror; } },
